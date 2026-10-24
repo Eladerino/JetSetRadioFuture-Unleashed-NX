@@ -201,23 +201,32 @@ static void mkdir_p(const char *path)
     mkdir(buf, 0755);
 }
 
-/* Logs/last-run.log, the one before it kept as previous-run.log. Both
- * streams append to the same file, unbuffered, so a crash keeps
- * everything up to the fault. */
+/* Logs/last-run.log, the one before it kept as previous-run.log. One
+ * open file behind both streams: Horizon will not open a file for writing
+ * a second time while the first handle is open, so the earlier version's
+ * two freopen calls left stderr -- everything the engine and the crash
+ * report write -- going nowhere, and the log held only stdout. stdout now
+ * shares stderr's descriptor (and its file offset), unbuffered, so a crash
+ * keeps everything up to the fault, in order.
+ *
+ * rename() on Horizon refuses an existing destination, hence the remove. */
 static void open_log(const char *data)
 {
     char logs[1024], last[1100], prev[1100];
-    FILE *f;
     snprintf(logs, sizeof logs, "%s/Logs", data);
     mkdir_p(logs);
     snprintf(last, sizeof last, "%s/last-run.log", logs);
     snprintf(prev, sizeof prev, "%s/previous-run.log", logs);
+    remove(prev);
     rename(last, prev);
-    if ((f = fopen(last, "w")) != NULL) fclose(f);
-    if (!freopen(last, "a", stdout) || !freopen(last, "a", stderr))
-        fprintf(stderr, "[SWITCH] cannot open %s: %s\n", last, strerror(errno));
-    setvbuf(stdout, NULL, _IONBF, 0);
+    if (!freopen(last, "w", stderr))
+        return;
     setvbuf(stderr, NULL, _IONBF, 0);
+    fflush(stdout);
+    if (dup2(fileno(stderr), fileno(stdout)) < 0)
+        fprintf(stderr, "[SWITCH] stdout not redirected (%s); only stderr"
+                        " is in this log\n", strerror(errno));
+    setvbuf(stdout, NULL, _IONBF, 0);
 }
 
 /* key=value lines (the file the engine's F9/F10 keys write to as well). */
