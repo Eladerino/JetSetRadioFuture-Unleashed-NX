@@ -22,6 +22,9 @@
 #              is over a million lines, and each translation unit is
 #              large -- 4 is a safe number for 32 GB)
 #   SKIP_TOOLCHAIN=1   do not touch devkitPro (already installed)
+#   SKIP_RECOMP=1      reuse port/recomp/gen from an earlier run (after a
+#                      source change outside the generated code; regenerating
+#                      touches every generated file and recompiles them all)
 #
 # Output: $WORK_DIR/dist/switch/jsrf-unleashed/ ready to copy to the
 # SD card, plus $WORK_DIR/dist/debug/ with the .elf and linker map
@@ -130,6 +133,9 @@ fi
 [ -f "$GAME_FILES/default.xbe" ] || die "no default.xbe after extraction"
 
 # ---------------------------------------------------------------- recompilation
+if [ "${SKIP_RECOMP:-0}" = "1" ] && [ -d port/recomp/gen ]; then
+say "reusing port/recomp/gen (SKIP_RECOMP=1)"
+else
 say "recompiling (a few minutes; the count at the end is the verdict)"
 # The pipeline reads game_files/ relative to the fork root in upstream's
 # recipe; point it at the copy we just made.
@@ -147,6 +153,7 @@ if echo "$RECOMP_OUT" | grep -q "9333/9342 functions (0 failed)"; then
     say "recompilation matches the expected standalone-US build exactly"
 else
     die "recompilation count differs from 9333/9342 (0 failed). This is the signature of a different disc build (PAL, JP, or the Sega GT 2002 combo). The fork runs the standalone US build only -- see the log at $WORK_DIR/logs/recomp.log"
+fi
 fi
 
 # ---------------------------------------------------------------- engine build
