@@ -1192,7 +1192,17 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
              * XBOX_SECTORS_PER_CLUSTER above. */
             info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
             info->SectorsPerAllocationUnit = XBOX_SECTORS_PER_CLUSTER;
+#if defined(__SWITCH__)
+            /* newlib declares statvfs but not fstatvfs: stat the volume
+             * through the handle's own path, which is the same SD volume
+             * for every file this port opens. The numbers are clamped to
+             * the console's cache-partition size below either way, and
+             * the failure branch's made-up numbers remain the fallback. */
+            const char *vpath = fd >= 0 ? w32_handle_path(FileHandle) : NULL;
+            if (vpath && statvfs(vpath, &vfs) == 0) {
+#else
             if (fd >= 0 && fstatvfs(fd, &vfs) == 0) {
+#endif
                 ULONGLONG cs = (ULONGLONG)info->BytesPerSector * info->SectorsPerAllocationUnit;
                 ULONGLONG total = (ULONGLONG)vfs.f_blocks * vfs.f_frsize;
                 ULONGLONG avail = (ULONGLONG)vfs.f_bavail * vfs.f_frsize;

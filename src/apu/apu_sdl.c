@@ -25,7 +25,12 @@
 
 #define SA_RATE        48000
 #define SA_CHANNELS    2
+#if defined(__SWITCH__)
+#define SA_BUF_FRAMES  2048           /* ~43 ms per device pull: audren
+                                       * underruns at the desktop size */
+#else
 #define SA_BUF_FRAMES  512            /* ~10.7 ms per device pull */
+#endif
 #define SA_RING_FRAMES 8192           /* power of two, ~170 ms of slack */
 
 static SDL_AudioDeviceID g_dev;
@@ -87,7 +92,17 @@ static void *sa_fake_sink(void *arg)
     for (;;) {
         next.tv_nsec += period_ns;
         while (next.tv_nsec >= 1000000000L) { next.tv_nsec -= 1000000000L; next.tv_sec++; }
+#if defined(__SWITCH__)
+        /* devkitPro has no clock_nanosleep: sleep the difference. */
+        { struct timespec now, rel;
+          clock_gettime(CLOCK_MONOTONIC, &now);
+          rel.tv_sec = next.tv_sec - now.tv_sec;
+          rel.tv_nsec = next.tv_nsec - now.tv_nsec;
+          if (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec--; }
+          if (rel.tv_sec >= 0) nanosleep(&rel, NULL); }
+#else
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+#endif
         sa_pull(scratch, SA_BUF_FRAMES);
         if (raw) fwrite(scratch, sizeof scratch, 1, raw);
     }

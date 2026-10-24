@@ -92,7 +92,7 @@ endif()
 # there is, and Linux (Mesa has it), where that path can be tested. SDL makes
 # the context either way.
 option(NV2A_GLES "nv2a_gl: OpenGL ES 3.2 (Android) instead of OpenGL 3.3" OFF)
-if(ANDROID)
+if(ANDROID OR SWITCH)
     set(NV2A_GLES ON)
     set(NV2A_GL_CONTEXT "sdl")
 endif()

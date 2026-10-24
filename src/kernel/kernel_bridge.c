@@ -7910,6 +7910,8 @@ void xbox_kernel_bridge_init(void)
 #define backtrace(buf, n) ((int)CaptureStackBackTrace(0, (DWORD)(n), (buf), NULL))
 #elif defined(__ANDROID__)
 #include "../platform/android_backtrace.h"   /* <execinfo.h> is API 33 and later */
+#elif defined(__SWITCH__)
+#include "../platform/switch_backtrace.h"    /* no execinfo.h, no dladdr on Horizon */
 #else
 #include <execinfo.h>
 #endif

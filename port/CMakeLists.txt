@@ -26,6 +26,11 @@ endif()
 
 project(jsrf_recomp C)
 
+# Nintendo Switch (devkitPro toolchain), as in the runtime's CMakeLists.
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    set(SWITCH TRUE)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -78,7 +83,7 @@ endif()
 # Android: plain char is signed on x86 and on Apple's arm64, everywhere this
 # has run so far; the Arm ABI that Android follows makes it unsigned. Signed,
 # as it was tested.
-if(ANDROID)
+if(ANDROID OR SWITCH)
     add_compile_options(-fsigned-char)
 endif()
 
@@ -140,6 +145,16 @@ if(IOS)
         "-framework Metal" "-framework QuartzCore" "-framework CoreGraphics"
         "-framework Foundation")
 endif()
+if(SWITCH)
+    # The .nro's glue (switch/jsrf_switch.c: SD layout, log, environment,
+    # first-launch unpack, 16 MB host thread), and the include for
+    # "xiso.h" the unpacker shares with Android, plus src/ for main.c's
+    # "platform/switch_backtrace.h".
+    target_sources(jsrf_recomp PRIVATE switch/jsrf_switch.c)
+    target_include_directories(jsrf_recomp PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/ios"
+        "${JSRF_REPO}/src")
+endif()
 target_compile_definitions(jsrf_recomp PRIVATE JSRF_VERSION="${JSRF_VERSION}")
 target_link_libraries(jsrf_recomp PRIVATE xboxrecomp)
 target_include_directories(jsrf_recomp PRIVATE
@@ -186,9 +201,19 @@ elseif(ANDROID)
     # they stay in the dynamic symbol table, which is what names them in a
     # crash report.
     target_link_options(jsrf_recomp PRIVATE -Wl,--no-undefined -Wl,-Bsymbolic)
+elseif(SWITCH)
+    # pthreads and the C library are inside libnx/newlib; there is no
+    # libdl and no -rdynamic (statically linked .nro). The map file is
+    # kept, as on Windows: it is what a crash offset resolves against.
+    target_link_libraries(jsrf_recomp PRIVATE m)
+    target_link_options(jsrf_recomp PRIVATE "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/jsrf_recomp.map")
 else()
     target_link_libraries(jsrf_recomp PRIVATE pthread m dl)
     target_link_options(jsrf_recomp PRIVATE -rdynamic)
+endif()
+if(SWITCH)
+    # devkitPro's Switch.cmake turns the linked ELF into the .nro.
+    nx_create_nro(jsrf_recomp)
 endif()
 if(MSVC)
     target_link_options(jsrf_recomp PRIVATE /LARGEADDRESSAWARE)

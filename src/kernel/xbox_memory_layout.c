@@ -1329,7 +1329,7 @@ volatile uint64_t g_icall_count = 0;
 /* Used only by the startup RAM probe below: a store that faults means the
  * backing object is shorter than the mapping claims, and the probe wants to
  * carry on past it rather than die. */
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__SWITCH__)
 static volatile sig_atomic_t g_ram_probe_failed;
 static sigjmp_buf g_ram_probe_jmp;
 
@@ -1487,7 +1487,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * assumes this window is sixty-four megabytes of writable memory; if it is
      * not, saying so here is worth far more than the crash it becomes later.
      */
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__SWITCH__)
+    /* Horizon delivers no SIGSEGV/SIGBUS to user code, so the probe
+     * cannot run there; the Switch memory layer knows its backing
+     * object's size by construction instead. */
     {
         struct sigaction sa, old_bus, old_segv;
         volatile size_t off;

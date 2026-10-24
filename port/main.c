@@ -43,6 +43,8 @@
 #else
 #if defined(__ANDROID__)
 #include "platform/android_backtrace.h"   /* <execinfo.h> is API 33 and later */
+#elif defined(__SWITCH__)
+#include "platform/switch_backtrace.h"    /* no <execinfo.h> in newlib either */
 #else
 #include <execinfo.h>
 #endif
@@ -51,14 +53,17 @@
  * declarations the rest of this file needs. All that is wanted from it is the
  * ucontext_t type a signal handler is handed, and <signal.h> already declares
  * that on both platforms. */
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__SWITCH__)
 #include <ucontext.h>
-#else
+#elif defined(__APPLE__)
 #include <TargetConditionals.h>   /* TARGET_OS_IPHONE: the iOS build */
 #endif
 #include <unistd.h>
 #include <pthread.h>
-#include <dlfcn.h>
+#if !defined(__SWITCH__)
+#include <dlfcn.h>   /* no libdl on Horizon; its only uses here were the
+                    * crash handler's, which the Switch build omits */
+#endif
 #endif /* !_WIN32 */
 #include "win32_compat.h"
 #include "recomp_icall_feedback.h"
@@ -154,10 +159,11 @@ static int g_scale_env_ours;
 void recomp_restart_self(void);
 void recomp_restart_self(void)
 {
-#if defined(__ANDROID__)
-    /* Android: the process is the app's, not a program that can exec itself.
-     * A choice made in game (F9) is stored, and applies at the next start. */
-    fprintf(stderr, "  [WIN] restart: not on Android -- the choice applies at the next start\n");
+#if defined(__ANDROID__) || defined(__SWITCH__)
+    /* Android and Switch: the process is the app's, not a program that
+     * can exec itself. A choice made in game (F9) is stored, and
+     * applies at the next start. */
+    fprintf(stderr, "  [WIN] restart: not here -- the choice applies at the next start\n");
     return;
 #endif
     if (!g_argv || !g_argv[0]) return;
@@ -319,12 +325,12 @@ static void term_handler(int sig)
  * jsrf_protect_data_arm() (called from a file-open hook); each fault logs,
  * unprotects that page and resumes. POSIX only: on Windows the switch says
  * so and does nothing. */
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
 void jsrf_protect_data_arm(void)
 {
     static int said;
     if (getenv("JSRF_PROTECT_DATA") && !said++)
-        fprintf(stderr, "[PROTECT] JSRF_PROTECT_DATA is not available on Windows\n");
+        fprintf(stderr, "[PROTECT] JSRF_PROTECT_DATA is not available on this platform\n");
 }
 #else
 #include <sys/mman.h>
@@ -441,6 +447,7 @@ static void report_bad_pointer(uintptr_t fault_addr)
 }
 
 #if !defined(_WIN32)
+#if !defined(__SWITCH__)
 /*
  * The faulting instruction pointer and stack pointer, whatever the host is.
  *
@@ -594,6 +601,9 @@ static void segv_handler(int sig, siginfo_t *si, void *ctx)
     fflush(stderr);
     _exit(139);
 }
+#endif /* !__SWITCH__: no in-process crash handler on Horizon. A fault
+        * ends the process; diagnosis is the run's log plus the fault
+        * address, resolved afterwards against the linker map. */
 
 #else /* _WIN32 */
 
@@ -719,6 +729,9 @@ static int host_main(void)
                 }
             }
         }
+#elif defined(__SWITCH__)
+        /* No crash handler to install (see the note at the handler
+         * above); signals are not how Horizon reports faults. */
 #else
         struct sigaction sa; memset(&sa, 0, sizeof sa);
         sa.sa_sigaction = segv_handler; sa.sa_flags = SA_SIGINFO;
@@ -1141,6 +1154,14 @@ int main(int argc, char **argv)
     {
         extern int nv_android_main(int argc, char **argv, int (*host)(void));
         return nv_android_main(argc, argv, host_main);
+    }
+#endif
+#if defined(__SWITCH__)
+    /* Switch: port/switch/jsrf_switch.c does the same job for the
+     * .nro: SD paths, the log, the environment, a 16 MB host thread. */
+    {
+        extern int nv_switch_main(int argc, char **argv, int (*host)(void));
+        return nv_switch_main(argc, argv, host_main);
     }
 #endif
     if (argc > 1) g_game_dir_arg = argv[1];

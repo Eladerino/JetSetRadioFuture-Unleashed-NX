@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(xboxrecomp VERSION 0.8.0 LANGUAGES C)
 
+# Nintendo Switch (devkitPro toolchain): CMAKE_SYSTEM_NAME is
+# NintendoSwitch; the platform branches in this tree key off SWITCH
+# the way they key off ANDROID for the other SDL/GLES host.
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    set(SWITCH TRUE)
+endif()
+
 # Xbox Static Recompilation Runtime Library
 # Provides link-time libraries for statically recompiled Xbox games.
 # Pattern: extract emulator subsystems (xemu) into reusable static libraries.
