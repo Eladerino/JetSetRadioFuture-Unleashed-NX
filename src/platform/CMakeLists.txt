@@ -34,6 +34,11 @@ if(WIN32)
     endif()
 else()
     add_library(platform STATIC win32_compat.c)
+    if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+        # Horizon has no mmap; guest memory is built on process-memory
+        # syscalls instead (switch_mem.c).
+        target_sources(platform PRIVATE switch_mem.c)
+    endif()
     target_include_directories(platform PUBLIC
         ${XBOXRECOMP_SRC_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}

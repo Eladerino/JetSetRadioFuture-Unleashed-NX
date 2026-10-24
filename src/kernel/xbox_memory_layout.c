@@ -2188,7 +2188,24 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         uint64_t tiled_lo = XBOX_TILED_BASE;
         uint64_t tiled_hi = tiled_lo + xbox_TiledApertureSize();
 
-        for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
+        /* RECOMP_RAM_MIRRORS=N maps only the first N (default all). The
+         * rationale above comes from a RenderWare title; whether this one
+         * reaches past 64 MB at all is an experiment: with 0, the span
+         * stays reserved and inaccessible, so the first access beyond the
+         * base view faults at its address instead of reading the wrap.
+         * On the Switch each mirror is 32 more map syscalls at startup. */
+        int nmirrors = XBOX_NUM_MIRRORS;
+        {
+            const char *e = getenv("RECOMP_RAM_MIRRORS");
+            if (e && *e) {
+                int v = atoi(e);
+                if (v >= 0 && v < nmirrors) nmirrors = v;
+                fprintf(stderr, "  RAM mirror: limited to %d by"
+                                " RECOMP_RAM_MIRRORS\n", nmirrors);
+            }
+        }
+
+        for (int m = 0; m < nmirrors; m++) {
             uintptr_t mirror_base = (uintptr_t)g_memory_base +
                                     (uintptr_t)(m + 1) * g_memory_size;
             uint64_t guest_lo = (uint64_t)(m + 1) * g_memory_size;
@@ -2215,7 +2232,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             }
         }
         fprintf(stderr, "  RAM mirror: %d/%d views mapped (covers %d MB)\n",
-                mirrors_ok, XBOX_NUM_MIRRORS,
+                mirrors_ok, nmirrors,
                 (int)((mirrors_ok + 1) * g_memory_size / (1024 * 1024)));
     }
 
@@ -2277,6 +2294,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         }
     }
 
+#if defined(__SWITCH__)
+    {
+        extern void sw_mem_log_summary(void);
+        sw_mem_log_summary();
+    }
+#endif
     fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
     return TRUE;
 }

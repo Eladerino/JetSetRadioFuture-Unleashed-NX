@@ -50,489 +50,12 @@
 #endif
 
 #if defined(__SWITCH__)
-#include <switch/kernel/virtmem.h>
-#include <switch/runtime/env.h>
-#include <malloc.h>
-
-/* Horizon/newlib has no <sys/mman.h> and no mmap at all. The constants
- * are declared here so the call sites below compile unchanged.
- *
- * Guest memory on Horizon. The design was proven on real hardware by
- * a small standalone test program before it was built into the
- * engine, and it is:
- *
- *   - A backing is an ordinary heap allocation. It is turned into a
- *     code-memory window with svcMapProcessCodeMemory, and the window
- *     is relaxed to RW with svcSetProcessMemoryPermission. From that
- *     moment the heap pointer itself must never be dereferenced: the
- *     code-memory mapping revokes it (the test program verified this
- *     by deliberately reading through it, which faults).
- *   - Views are svcMapProcessMemory mappings of the window. The same
- *     window can be mapped any number of times, which is what the
- *     guest RAM mirrors and the tiled aperture need. Every other
- *     primitive measured (transfer memory, shared memory, code
- *     memory objects) allows only one extra mapping per object.
- *   - Backings are windowed in chunks of at most 2 MiB, the
- *     granularity the LostOdysseyNX port uses, so no single
- *     code-memory window has to be huge.
- *   - Reservations (PROT_NONE) are libnx virtmem reservations only;
- *     nothing is backed until a commit or a view lands in them.
- *
- * The process handle is the one hbloader passes to title-takeover
- * launches (envGetOwnProcessHandle); the test program verified it
- * works. Applet launches do not hint the syscalls and fail cleanly
- * here. The technique follows the published LostOdysseyNX design;
- * this implementation is written for this file, not copied. */
-#define PROT_NONE  0x0
-#define PROT_READ  0x1
-#define PROT_WRITE 0x2
-#define PROT_EXEC  0x4
-#define MAP_SHARED    0x01
-#define MAP_PRIVATE   0x02
-#define MAP_FIXED     0x10
-#define MAP_ANONYMOUS 0x20
-#define MAP_NORESERVE 0x4000
-#define MAP_FAILED ((void *)-1)
-
-#define SW_PAGE        0x1000u
-#define SW_CHUNK       0x200000u   /* 2 MiB window granularity */
-#define SW_MAX_CHUNKS  256         /* VirtualAlloc-style commits */
-#define SW_MAX_VIEWS   512         /* file-mapping views (mirrors) */
-#define SW_MAX_RESV    16
-
-typedef struct {
-    void  *heap;        /* backing allocation; never dereference it */
-    size_t total;       /* page-rounded size */
-    int    nwin;
-    void  *windows[];   /* one code-memory window per SW_CHUNK slice */
-} sw_backing;
-
-static void sw_detached_forget(sw_backing *bk);   /* defined with mprotect */
-
-typedef struct { void *dst; size_t len; sw_backing *bk; } sw_chunk_rec;
-typedef struct { void *dst; size_t len; sw_backing *bk; size_t off; } sw_view_rec;
-typedef struct { void *base; size_t len; VirtmemReservation *rv; } sw_resv_rec;
-
-static sw_chunk_rec s_sw_chunks[SW_MAX_CHUNKS];
-static sw_view_rec  s_sw_views[SW_MAX_VIEWS];
-static sw_resv_rec  s_sw_resv[SW_MAX_RESV];
-
-/* Ranges a protection call has detached from a view or a commit.
- * Defined here because munmap cleans them up; mprotect fills them. */
-typedef struct { sw_backing *bk; size_t off; void *dst; size_t len; } sw_detached_rec;
-#define SW_MAX_DETACHED 512
-static sw_detached_rec s_sw_detached[SW_MAX_DETACHED];
-static pthread_mutex_t s_sw_lock = PTHREAD_MUTEX_INITIALIZER;
-static Handle s_sw_proc;
-
-static Handle sw_proc_handle(void)
-{
-    if (!s_sw_proc) {
-        /* The launcher glue refuses applet launches before the engine
-         * starts; this is the same check at the point of use, so a
-         * failure here is a clean init error in the log rather than a
-         * string of refused syscalls. LostOdysseyNX and
-         * UnleashedRecomp-NX check the hints inside memory init as
-         * well as at startup. */
-        if (!envIsSyscallHinted(0x74) || !envIsSyscallHinted(0x77))
-            return 0;
-        Handle h = envGetOwnProcessHandle();
-        if (h && h != INVALID_HANDLE) s_sw_proc = h;
-    }
-    return s_sw_proc;
-}
-
-static size_t sw_round_up(size_t len)
-{
-    return (len + SW_PAGE - 1) & ~(size_t)(SW_PAGE - 1);
-}
-
-static sw_backing *sw_backing_create(size_t total)
-{
-    Handle proc = sw_proc_handle();
-    if (!proc || !total) return NULL;
-    total = sw_round_up(total);
-    int nwin = (int)((total + SW_CHUNK - 1) / SW_CHUNK);
-    sw_backing *bk = (sw_backing *)malloc(sizeof(sw_backing) +
-                                          (size_t)nwin * sizeof(void *));
-    if (!bk) return NULL;
-    bk->heap  = memalign(SW_PAGE, total);
-    bk->total = total;
-    bk->nwin  = 0;
-    if (!bk->heap) { free(bk); return NULL; }
-    memset(bk->heap, 0, total);
-    for (int i = 0; i < nwin; i++) {
-        size_t off = (size_t)i * SW_CHUNK;
-        size_t len = total - off < SW_CHUNK ? total - off : SW_CHUNK;
-        virtmemLock();
-        void *window = virtmemFindCodeMemory(len, SW_PAGE);
-        virtmemUnlock();
-        if (!window) goto fail;
-        if (R_FAILED(svcMapProcessCodeMemory(proc, (u64)window,
-                        (u64)((char *)bk->heap + off), len)))
-            goto fail;
-        if (R_FAILED(svcSetProcessMemoryPermission(proc, (u64)window,
-                        len, Perm_Rw))) {
-            svcUnmapProcessCodeMemory(proc, (u64)window,
-                                      (u64)((char *)bk->heap + off), len);
-            goto fail;
-        }
-        bk->windows[bk->nwin++] = window;
-    }
-    return bk;
-fail:
-    /* Windows created so far reference the heap block; process exit is
-     * the only teardown that is certainly safe for a partial backing,
-     * and a failed guest-memory init is fatal to the run anyway. */
-    return NULL;
-}
-
-static void sw_backing_destroy(sw_backing *bk)
-{
-    Handle proc = sw_proc_handle();
-    if (proc) {
-        for (int i = bk->nwin - 1; i >= 0; i--) {
-            size_t off = (size_t)i * SW_CHUNK;
-            size_t len = bk->total - off < SW_CHUNK ? bk->total - off
-                                                    : SW_CHUNK;
-            svcUnmapProcessCodeMemory(proc, (u64)bk->windows[i],
-                                      (u64)((char *)bk->heap + off), len);
-        }
-    }
-    free(bk->heap);
-    free(bk);
-}
-
-/* Map [off, off+len) of a backing at dst with svcMapProcessMemory,
- * walking the backing's windows. Caller holds s_sw_lock. */
-static int sw_backing_map(sw_backing *bk, size_t off, void *dst, size_t len)
-{
-    Handle proc = sw_proc_handle();
-    if (!proc) return -1;
-    size_t pos = off, end = off + len;
-    char *d = (char *)dst;
-    while (pos < end) {
-        int wi = (int)(pos / SW_CHUNK);
-        if (wi >= bk->nwin) return -1;
-        size_t woff = pos - (size_t)wi * SW_CHUNK;
-        size_t seg = SW_CHUNK - woff;
-        if (seg > end - pos) seg = end - pos;
-        void *src = (char *)bk->windows[wi] + woff;
-        if (R_FAILED(svcMapProcessMemory(d, proc, (u64)src, seg)))
-            return -1;
-        d += seg;
-        pos += seg;
-    }
-    return 0;
-}
-
-/* Undo sw_backing_map segment by segment. Caller holds s_sw_lock. */
-static void sw_backing_unmap(sw_backing *bk, size_t off, void *dst, size_t len)
-{
-    Handle proc = sw_proc_handle();
-    if (!proc) return;
-    size_t pos = off, end = off + len;
-    char *d = (char *)dst;
-    while (pos < end) {
-        int wi = (int)(pos / SW_CHUNK);
-        if (wi >= bk->nwin) return;
-        size_t woff = pos - (size_t)wi * SW_CHUNK;
-        size_t seg = SW_CHUNK - woff;
-        if (seg > end - pos) seg = end - pos;
-        svcUnmapProcessMemory(d, proc,
-                              (u64)((char *)bk->windows[wi] + woff), seg);
-        d += seg;
-        pos += seg;
-    }
-}
-
-static void *sw_commit(void *addr, size_t len)
-{
-    sw_backing *bk = sw_backing_create(len);
-    if (!bk) return MAP_FAILED;
-    void *dst = addr;
-    if (!dst) {
-        virtmemLock();
-        dst = virtmemFindAslr(len, SW_PAGE);
-        virtmemUnlock();
-        if (!dst) return MAP_FAILED;   /* backing leaks; run is over */
-    }
-    if (sw_backing_map(bk, 0, dst, bk->total) != 0)
-        return MAP_FAILED;             /* as above */
-    for (int i = 0; i < SW_MAX_CHUNKS; i++) {
-        if (!s_sw_chunks[i].dst) {
-            s_sw_chunks[i].dst = dst;
-            s_sw_chunks[i].len = bk->total;
-            s_sw_chunks[i].bk  = bk;
-            return dst;
-        }
-    }
-    return MAP_FAILED;
-}
-
-static void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
-{
-    (void)flags; (void)off;
-    if (!len) return MAP_FAILED;
-    len = sw_round_up(len);
-    pthread_mutex_lock(&s_sw_lock);
-    void *r;
-    if (fd >= 0) {
-        /* File views are made by MapViewOfFileEx's Switch path, which
-         * has the mapping object; a bare fd carries too little. */
-        r = MAP_FAILED;
-    } else if (prot == PROT_NONE) {
-        if (!addr) {
-            virtmemLock();
-            addr = virtmemFindAslr(len, SW_PAGE);
-            virtmemUnlock();
-        }
-        r = addr ? addr : MAP_FAILED;
-        if (addr) {
-            VirtmemReservation *rv = virtmemAddReservation(addr, len);
-            for (int i = 0; i < SW_MAX_RESV; i++) {
-                if (!s_sw_resv[i].base) {
-                    s_sw_resv[i].base = addr;
-                    s_sw_resv[i].len  = len;
-                    s_sw_resv[i].rv   = rv;
-                    break;
-                }
-            }
-        }
-    } else {
-        r = sw_commit(addr, len);
-    }
-    pthread_mutex_unlock(&s_sw_lock);
-    return r;
-}
-
-static int munmap(void *addr, size_t len)
-{
-    Handle proc = sw_proc_handle();
-    pthread_mutex_lock(&s_sw_lock);
-    int rc = -1;
-    if (proc) {
-        for (int i = 0; i < SW_MAX_CHUNKS; i++) {
-            if (s_sw_chunks[i].dst == addr) {
-                sw_backing *bk = s_sw_chunks[i].bk;
-                sw_backing_unmap(bk, 0, addr, bk->total);
-                s_sw_chunks[i].dst = NULL;
-                sw_detached_forget(bk);
-                sw_backing_destroy(bk);
-                rc = 0;
-                goto out;
-            }
-        }
-        for (int i = 0; i < SW_MAX_VIEWS; i++) {
-            if (s_sw_views[i].dst == addr) {
-                sw_backing *bk = s_sw_views[i].bk;
-                sw_backing_unmap(bk, s_sw_views[i].off,
-                                 addr, s_sw_views[i].len);
-                s_sw_views[i].dst = NULL;
-                /* Detached ranges inside this view are gone with it;
-                 * the same backing may live on in other views, whose
-                 * records stay. */
-                for (int j = 0; j < SW_MAX_DETACHED; j++) {
-                    uintptr_t d = (uintptr_t)s_sw_detached[j].dst;
-                    if (s_sw_detached[j].bk == bk && d >= (uintptr_t)addr
-                        && d < (uintptr_t)addr + len) {
-                        s_sw_detached[j].bk = NULL;
-                        s_sw_detached[j].len = 0;
-                    }
-                }
-                rc = 0;
-                goto out;
-            }
-        }
-    }
-    for (int i = 0; i < SW_MAX_RESV; i++) {
-        if (s_sw_resv[i].base == addr) {
-            if (s_sw_resv[i].rv)
-                virtmemRemoveReservation(s_sw_resv[i].rv);
-            s_sw_resv[i].base = NULL;
-            rc = 0;
-            goto out;
-        }
-    }
-out:
-    pthread_mutex_unlock(&s_sw_lock);
-    return rc;
-}
-
-/* Protection changes on views and commits, by detaching and
- * re-attaching pages.
- *
- * The guest's heap lives on this: NtFreeVirtualMemory with
- * MEM_DECOMMIT takes pages away (mprotect PROT_NONE here) and a
- * later commit gives them back (PAGE_READWRITE), and JSRF's cache
- * builder cycles buffers through exactly that pair per file. Whether
- * svcSetProcessMemoryPermission applies to svcMapProcessMemory views
- * at all is not documented, so protections on memory this layer owns
- * are not entrusted to it: taking access away unmaps the pages from
- * the view, and giving it back maps them again from the backing,
- * contents intact. Both primitives are the ones the standalone
- * test program proved on hardware.
- *
- * Read-only is the one protection this cannot express (the backing
- * window is read-write, and its permission is shared by every view),
- * so a read-only request on owned memory leaves it read-write and
- * succeeds: the guest loses a write fault it might have taken, and
- * nothing else. Ranges this layer does not own fall back to
- * svcSetProcessMemoryPermission, whose result is returned as is. */
-
-/* Which backing and offset a host address belongs to, searching the
- * file-mapping views first, then the VirtualAlloc commits.
- * Caller holds s_sw_lock. */
-static int sw_owner_of(void *addr, sw_backing **bk, size_t *off)
-{
-    uintptr_t a = (uintptr_t)addr;
-    for (int i = 0; i < SW_MAX_VIEWS; i++) {
-        uintptr_t b = (uintptr_t)s_sw_views[i].dst;
-        if (s_sw_views[i].dst && a >= b && a < b + s_sw_views[i].len) {
-            *bk  = s_sw_views[i].bk;
-            *off = s_sw_views[i].off + (a - b);
-            return 1;
-        }
-    }
-    for (int i = 0; i < SW_MAX_CHUNKS; i++) {
-        uintptr_t b = (uintptr_t)s_sw_chunks[i].dst;
-        if (s_sw_chunks[i].dst && a >= b && a < b + s_sw_chunks[i].len) {
-            *bk  = s_sw_chunks[i].bk;
-            *off = a - b;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* Record [dst, dst+len) of bk as detached, merging with a record it
- * touches end to end. Caller holds s_sw_lock. */
-static void sw_detached_add(sw_backing *bk, size_t off, void *dst, size_t len)
-{
-    for (int i = 0; i < SW_MAX_DETACHED; i++) {
-        sw_detached_rec *r = &s_sw_detached[i];
-        if (r->bk != bk) continue;
-        if (r->off + r->len == off && (char *)r->dst + r->len == (char *)dst) {
-            r->len += len;
-            return;
-        }
-        if (off + len == r->off && (char *)dst + len == (char *)r->dst) {
-            r->off = off;
-            r->dst = dst;
-            r->len += len;
-            return;
-        }
-    }
-    for (int i = 0; i < SW_MAX_DETACHED; i++) {
-        if (!s_sw_detached[i].bk) {
-            s_sw_detached[i].bk  = bk;
-            s_sw_detached[i].off = off;
-            s_sw_detached[i].dst = dst;
-            s_sw_detached[i].len = len;
-            return;
-        }
-    }
-    /* Table full: the range stays unmapped but unrecorded, so a later
-     * grant cannot re-attach it and will fail loudly there rather
-     * than corrupt silently here. 512 records of page runs is far
-     * beyond what a heap's decommit pattern produces. */
-}
-
-/* Re-attach the detached parts of [dst, dst+len). Returns 0 when the
- * whole range is attached afterwards. Caller holds s_sw_lock. */
-static int sw_attach_range(sw_backing *bk, size_t off, void *dst, size_t len)
-{
-    uintptr_t lo = (uintptr_t)dst, hi = lo + len;
-    int rc = 0;
-    for (int i = 0; i < SW_MAX_DETACHED; i++) {
-        sw_detached_rec *r = &s_sw_detached[i];
-        if (!r->bk || r->bk != bk) continue;
-        uintptr_t rlo = (uintptr_t)r->dst, rhi = rlo + r->len;
-        if (rhi <= lo || rlo >= hi) continue;
-        uintptr_t ilo = rlo > lo ? rlo : lo, ihi = rhi < hi ? rhi : hi;
-        size_t ioff = r->off + (ilo - rlo);
-        if (sw_backing_map(bk, ioff, (void *)ilo, ihi - ilo) != 0) {
-            rc = -1;
-            continue;
-        }
-        if (ilo == rlo && ihi == rhi) {
-            r->bk = NULL;
-            r->len = 0;
-        } else if (ilo == rlo) {          /* took the head */
-            r->off += ihi - ilo;
-            r->dst  = (void *)ihi;
-            r->len -= ihi - ilo;
-        } else if (ihi == rhi) {          /* took the tail */
-            r->len -= ihi - ilo;
-        } else {                          /* took the middle: keep the head,
-                                           * the tail needs its own record */
-            size_t head = ilo - rlo;
-            int placed = 0;
-            for (int j = 0; j < SW_MAX_DETACHED; j++) {
-                if (!s_sw_detached[j].bk) {
-                    s_sw_detached[j].bk  = bk;
-                    s_sw_detached[j].off = r->off + (ihi - rlo);
-                    s_sw_detached[j].dst = (void *)ihi;
-                    s_sw_detached[j].len = rhi - ihi;
-                    placed = 1;
-                    break;
-                }
-            }
-            r->len = head;
-            if (!placed) rc = -1;
-        }
-    }
-    return rc;
-}
-
-/* Drop detached records belonging to one backing. Called before the
- * backing is destroyed. Caller holds s_sw_lock. */
-static void sw_detached_forget(sw_backing *bk)
-{
-    for (int i = 0; i < SW_MAX_DETACHED; i++)
-        if (s_sw_detached[i].bk == bk) {
-            s_sw_detached[i].bk = NULL;
-            s_sw_detached[i].len = 0;
-        }
-}
-
-static int mprotect(void *addr, size_t len, int prot)
-{
-    Handle proc = sw_proc_handle();
-    if (!proc || !len) return -1;
-    uintptr_t lo = (uintptr_t)addr & ~(uintptr_t)(SW_PAGE - 1);
-    uintptr_t hi = ((uintptr_t)addr + len + SW_PAGE - 1)
-                   & ~(uintptr_t)(SW_PAGE - 1);
-    int granting = (prot & (PROT_READ | PROT_WRITE)) != 0;
-    int rc = 0;
-    pthread_mutex_lock(&s_sw_lock);
-    uintptr_t p = lo;
-    while (p < hi) {
-        sw_backing *bk;
-        size_t off;
-        if (!sw_owner_of((void *)p, &bk, &off)) {
-            /* Foreign range: the permission SVC, result and all. */
-            u32 perm = (prot & PROT_WRITE) ? Perm_Rw
-                     : (prot & PROT_READ)  ? Perm_R : Perm_None;
-            if (R_FAILED(svcSetProcessMemoryPermission(
-                    proc, (u64)p, SW_PAGE, perm)))
-                rc = -1;
-            p += SW_PAGE;
-            continue;
-        }
-        /* Owned range: work a page at a time; the runs this produces
-         * are what sw_detached_add merges back together. */
-        if (!granting) {
-            sw_backing_unmap(bk, off, (void *)p, SW_PAGE);
-            sw_detached_add(bk, off, (void *)p, SW_PAGE);
-        } else if (sw_attach_range(bk, off, (void *)p, SW_PAGE) != 0) {
-            rc = -1;
-        }
-        p += SW_PAGE;
-    }
-    pthread_mutex_unlock(&s_sw_lock);
-    return rc;
-}
+/* Horizon has no mmap. switch_mem.c provides the three calls this file
+ * makes, on top of process-memory syscalls; see the design note there. */
+#include "switch_mem.h"
+#define mmap     sw_mmap
+#define munmap   sw_munmap
+#define mprotect sw_mprotect
 
 /* newlib has no timegm. Days-from-civil (Howard Hinnant's algorithm),
  * which is all SystemTimeToFileTime needs. */
@@ -916,6 +439,9 @@ static void obj_release(w32_object *o)
         free(o->file_path);
     } else if (o->kind == K_FILEMAP) {
         if (o->fd >= 0) close(o->fd);
+        /* On Switch the backing outlives the handle, as the memory behind
+         * a closed fd does elsewhere: views may still be mapped over it.
+         * Nothing here tracks when the last one goes, so it is kept. */
     }
     pthread_mutex_destroy(&o->lock);
     pthread_cond_destroy(&o->cond);
@@ -2475,6 +2001,7 @@ static size_t view_take(const void *addr)
     return len;
 }
 
+#if !defined(__SWITCH__)
 /* An unnamed file descriptor that ftruncate and mmap both accept. Linux has
  * memfd_create for this; elsewhere an immediately-unlinked temp file does. */
 static int anon_map_fd(const char *name)
@@ -2530,27 +2057,11 @@ static int anon_map_fd(const char *name)
             return fd;
         }
     }
-#elif defined(__SWITCH__)
-    /* No memfd and no shm_open on Horizon: the temp-file fallback the
-     * other branches keep for their failure cases. The glue's TMPDIR
-     * points at a writable folder on the SD card. The fd only sizes
-     * and names the mapping object; the Switch MapViewOfFileEx path
-     * backs views with guest memory, not with this file. */
-    {
-        static int seq;
-        const char *tmp = getenv("TMPDIR");
-        char path[512];
-        snprintf(path, sizeof path, "%s/xbr.%d.%d.XXXXXX",
-                 tmp ? tmp : "sdmc:/switch/jsrf-unleashed",
-                 (int)getpid(), seq++);
-        int fd = mkstemp(path);
-        if (fd >= 0) unlink(path);
-        return fd;
-    }
 #else
     return memfd_create(name ? name : "xbox_map", 0);
 #endif
 }
+#endif
 
 HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
                           DWORD maxSizeHigh, DWORD maxSizeLow, LPCSTR name)
@@ -2559,6 +2070,14 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
     SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
     if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
 
+#if defined(__SWITCH__)
+    /* No descriptor on Horizon: the object's memory is a guest-memory
+     * backing that switch_mem.c creates on the first view. A temp file
+     * would only cost a write of the whole size to the SD card per
+     * launch. */
+    (void)name;
+    int fd = -1;
+#else
     int fd = anon_map_fd(name);
     if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
     if (ftruncate(fd, (off_t)size) != 0) {
@@ -2566,6 +2085,7 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return NULL;
     }
+#endif
 
     w32_object *o = obj_alloc(K_FILEMAP);
     o->fd       = fd;
@@ -2590,56 +2110,21 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
     SIZE_T len = count ? count : (o->map_size - (SIZE_T)off);
     int prot   = PROT_READ | ((access != FILE_MAP_READ) ? PROT_WRITE : 0);
 #if defined(__SWITCH__)
-    /* Horizon: a view is an svcMapProcessMemory mapping of the
-     * mapping object's code-memory window (see the memory block at
-     * the top of this file). The object's backing is created on its
-     * first view and shared by all of them, which is what makes the
-     * base view, the RAM mirrors and the tiled aperture the same
-     * pages. The requested address is honoured exactly or the call
-     * fails: the layout's candidate walk depends on refusal meaning
-     * refusal, as the POSIX comment below explains. */
+    /* Horizon: every view of the object maps the same backing (created
+     * on the first view), which is what makes the base view, the RAM
+     * mirrors and the tiled aperture the same pages. A requested address
+     * is taken exactly or refused, as the layout's candidate walk needs;
+     * see the POSIX comment below. */
     {
         (void)prot;
-        if ((SIZE_T)off + len > o->map_size) {
-            SetLastError(ERROR_INVALID_PARAMETER);
-            return NULL;
-        }
-        pthread_mutex_lock(&s_sw_lock);
-        if (!o->sw_backing_struct) {
-            o->sw_backing_struct = sw_backing_create(o->map_size);
-            if (!o->sw_backing_struct) {
-                pthread_mutex_unlock(&s_sw_lock);
-                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-                return NULL;
-            }
-        }
-        sw_backing *bk = (sw_backing *)o->sw_backing_struct;
-        void *dst = baseAddr;
-        if (!dst) {
-            virtmemLock();
-            dst = virtmemFindAslr(len, SW_PAGE);
-            virtmemUnlock();
-        }
-        int recorded = 0;
-        if (dst && sw_backing_map(bk, (size_t)off, dst, len) == 0) {
-            for (int i = 0; i < SW_MAX_VIEWS; i++) {
-                if (!s_sw_views[i].dst) {
-                    s_sw_views[i].dst = dst;
-                    s_sw_views[i].len = len;
-                    s_sw_views[i].bk  = bk;
-                    s_sw_views[i].off = (size_t)off;
-                    recorded = 1;
-                    break;
-                }
-            }
-        }
-        pthread_mutex_unlock(&s_sw_lock);
-        if (!recorded) {
+        void *p = sw_map_view(&o->sw_backing_struct, o->map_size,
+                              (size_t)off, len, baseAddr);
+        if (!p) {
             SetLastError(ERROR_NOT_ENOUGH_MEMORY);
             return NULL;
         }
-        view_register(dst, len);
-        return dst;
+        view_register(p, len);
+        return p;
     }
 #endif
 
