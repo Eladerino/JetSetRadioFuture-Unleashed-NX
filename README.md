@@ -19,6 +19,39 @@ application.
 game files, no textures, no music, no video. It plays the files from a disc
 you own.
 
+## Nintendo Switch (this fork)
+
+This fork adds a Nintendo Switch target: a homebrew `.nro` for a console
+running Atmosphère. It is a work in progress and has not booted the game yet.
+Everything else in this README describes the upstream project,
+[JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed),
+and its downloads; there is no Switch download.
+
+- **You build it yourself, from your own disc.** The recompiler turns the
+  `default.xbe` on your disc into C on your machine, and that code, the game
+  files and the built `.nro` stay there. None of them are in this repository
+  and none should be added to it.
+- **Launch it through title takeover** (hold R while starting any installed
+  game, then pick it in the homebrew menu). Applet mode, through the Album,
+  does not give homebrew the memory or the system calls the guest memory is
+  built on, and the game says so on screen and exits.
+- **[`tools/switch/build.sh`](tools/switch/build.sh)** does the whole build on
+  Linux or WSL2: installs devkitPro if it is missing (`switch-dev`,
+  `switch-sdl2`, `switch-mesa`), recompiles from a disc image or extracted
+  folder, checks the result is the standalone US build (9333 of 9342
+  functions), builds the engine and lays out the folder for
+  `sdmc:/switch/jsrf-unleashed/`.
+- **[`tools/switch-spike`](tools/switch-spike/README.md)** is a small test
+  program, no game files involved, that runs the Switch guest-memory layer
+  ([`src/platform/switch_mem.c`](src/platform/switch_mem.c)) at full scale on
+  the console. `tools/switch-spike/host/run.sh` runs the same checks on Linux
+  against a stand-in for the Switch system calls.
+
+The Switch-specific code is `port/switch/` (the libnx glue: launch check, SD
+card layout, logging, crash report) and `src/platform/switch_mem.c`, plus
+`__SWITCH__` branches in the platform layer. Each run writes
+`sdmc:/switch/jsrf-unleashed/Logs/last-run.log`.
+
 ---
 
 ## Download

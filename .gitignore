@@ -53,3 +53,9 @@ port/recomp/
 
 # Python venv the Switch build script creates
 .venv/
+
+# Switch builds (built from your own disc; never commit them)
+*.nro
+*.nso
+*.nacp
+*.elf
