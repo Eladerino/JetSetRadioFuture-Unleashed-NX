@@ -50,3 +50,6 @@ port/recomp/
 # Backups and merge leftovers
 *.bak*
 *.orig
+
+# Python venv the Switch build script creates
+.venv/
