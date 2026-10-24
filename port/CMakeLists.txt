@@ -150,7 +150,8 @@ if(SWITCH)
     # first-launch unpack, 16 MB host thread), and the include for
     # "xiso.h" the unpacker shares with Android, plus src/ for main.c's
     # "platform/switch_backtrace.h".
-    target_sources(jsrf_recomp PRIVATE switch/jsrf_switch.c)
+    target_sources(jsrf_recomp PRIVATE switch/jsrf_switch.c
+                                       switch/switch_posix.c)
     target_include_directories(jsrf_recomp PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/ios"
         "${JSRF_REPO}/src")

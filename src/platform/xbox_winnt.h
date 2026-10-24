@@ -108,6 +108,10 @@ extern "C" {
 /* Calling conventions: x86-64 SysV has a single convention. GCC accepts and
  * ignores these attributes on 64-bit, but expanding to nothing is cleaner and
  * avoids -Wattributes noise. */
+#undef __stdcall
+#undef __cdecl
+#undef __fastcall   /* newlib (Switch) defines it as the x86 attribute */
+#undef __thiscall
 #define __stdcall
 #define __cdecl
 #define __fastcall
