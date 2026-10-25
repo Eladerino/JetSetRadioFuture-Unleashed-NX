@@ -2360,6 +2360,28 @@ void sub_001910E0(void)
     }
     if (spin && !force && from == 0x001914C6u && g_eax >= 0x8000u) {
         static unsigned long n;
+        /* JSRF_SPIN_LOG experiment (25 Oct, run 4): do not force the
+         * spinning branch when the pushbuffer ring has wrapped between
+         * GET and PUT (GET numerically ahead of PUT). The spin loop at
+         * 0x001914F0 is a plain unsigned compare of the GPU's position
+         * against a target in the same numbering; across a wrap that
+         * compare can never succeed, because GET is republished as the
+         * new, smaller PUT and the title submits nothing more while it
+         * waits. The sleeping branch is the one built for this case:
+         * it wakes on software method 5, whose NOP sits past the wrap
+         * jump the walk follows. */
+        if (spin_log) {
+            uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+            uint32_t put = *(volatile uint32_t *)(m + 0xFD800040u);
+            uint32_t get = *(volatile uint32_t *)(m + 0xFD800044u);
+            if (get > put) {
+                if (n++ < 3)
+                    fprintf(stderr, "  [NV2A] make-space: GPU %u bytes behind across a wrap "
+                            "(GET 0x%08X > PUT 0x%08X), leaving the sleeping branch (#%lu)\n",
+                            g_eax, get, put, n);
+                return;
+            }
+        }
         if (n++ < 3)
             fprintf(stderr, "  [NV2A] make-space: GPU %u bytes behind, spinning instead of sleeping (#%lu)\n",
                     g_eax, n);
