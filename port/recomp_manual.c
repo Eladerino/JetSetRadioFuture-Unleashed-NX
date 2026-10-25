@@ -2299,16 +2299,37 @@ void sub_00194210(void)
  * 0x001914C6 is never below 32 KB. With the software methods delivered the
  * game plays on; with RECOMP_NV2A_SWM=0 it stops at the first make-space --
  * the 3 October freeze, on demand. */
+/*
+ * With the flush-ack thread on (RECOMP_NV2A_FLUSH_ACK=1, fast_gpu=1 on the
+ * Switch) KickOff no longer holds the title until the GPU thread comes
+ * round, so the title gets well ahead of it and takes the sleeping branch
+ * often -- and on the Switch that sleep never ended: the main thread stayed
+ * in KeWaitForSingleObject from 0x0019151B with software method 5 never
+ * seen in the stream. Answering under 32 KB keeps it on the spinning
+ * branch, which waits for GET -- and GET moves at every pass of the GPU
+ * thread. */
 extern void sub_001910E0_gen(void);
 void sub_001910E0(void)
 {
-    static int force = -1;
+    static int force = -1, spin = -1;
     uint32_t from = GARG(0);
     if (force < 0) {
         const char *e = getenv("JSRF_TEST_MAKESPACE_WAIT");
         force = (e && e[0] == '1') ? 1 : 0;
     }
+    if (spin < 0) {
+        const char *e = getenv("RECOMP_NV2A_FLUSH_ACK");
+        spin = (e && atoi(e) > 0) ? 1 : 0;
+    }
     sub_001910E0_gen();
+    if (spin && !force && from == 0x001914C6u && g_eax >= 0x8000u) {
+        static unsigned long n;
+        if (n++ < 3)
+            fprintf(stderr, "  [NV2A] make-space: GPU %u bytes behind, spinning instead of sleeping (#%lu)\n",
+                    g_eax, n);
+        g_eax = 0x7FFFu;
+        return;
+    }
     if (force && from == 0x001914C6u && g_eax < 0x8000u) {
         static unsigned long n;
         if (n++ < 3)
