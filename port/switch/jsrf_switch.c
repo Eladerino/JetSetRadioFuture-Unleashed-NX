@@ -272,10 +272,28 @@ static const char *const k_env[][2] = {
 /* Set when the binary is loaded, before the runtime's own constructors
  * run (priority 101 comes first): some of them read these, and on a
  * computer the launcher has set them before the engine starts.
- * Anything already set wins. */
+ * Anything already set wins.
+ *
+ * The console has no shell to set a variable in, so <base>/env stands in
+ * for one: KEY=VALUE lines (RECOMP_GL_PROFILE=1, say), '#' for a comment.
+ * They are read first, so they win over the defaults below. The SD card
+ * is mounted by the time constructors run (libnx's __appInit). */
 __attribute__((constructor(101))) static void switch_env(void)
 {
     size_t i;
+    FILE *f = fopen(SWITCH_BASE "/env", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            char *eq = strchr(line, '='), *end;
+            if (line[0] == '#' || !eq || eq == line) continue;
+            *eq = 0;
+            end = eq + 1 + strcspn(eq + 1, "\r\n");
+            *end = 0;
+            setenv(line, eq + 1, 1);
+        }
+        fclose(f);
+    }
     for (i = 0; i < sizeof k_env / sizeof k_env[0]; i++)
         setenv(k_env[i][0], k_env[i][1], 0);
 }
