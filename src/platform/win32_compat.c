@@ -751,11 +751,18 @@ BOOL ReleaseMutex(HANDLE h)
 /* Threads                                                               */
 /* ===================================================================== */
 
+#if defined(__SWITCH__)
+void sw_thread_spread(const char *what, unsigned id);   /* port/switch */
+#endif
+
 static void *thread_trampoline(void *arg)
 {
     w32_object *o = (w32_object *)arg;
     t_self_obj = o;
     t_tid      = o->tid;
+#if defined(__SWITCH__)
+    sw_thread_spread("tid", (unsigned)o->tid);
+#endif
 
     /* CREATE_SUSPENDED gate */
     pthread_mutex_lock(&o->lock);

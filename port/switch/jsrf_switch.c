@@ -415,9 +415,122 @@ static void prepare_game_folder(const char *game)
 
 struct host_call { int (*host)(void); int rc; };
 
+/* ---- cores ----------------------------------------------------------
+ *
+ * libnx starts every pthread on the process's default core and lets it
+ * run nowhere else: the engine's own thread, the GPU thread and every
+ * guest thread queued on core 0 while cores 1 and 2 sat idle. Each
+ * thread the engine starts comes through here first: it may run on any
+ * core the process owns (the kernel moves a waiting thread to an idle
+ * core it is allowed on), and its preferred core is dealt round the
+ * others, so the busy threads start apart. */
+static u32 app_core_mask(void)
+{
+    static u32 mask;
+    u64 m = 0;
+    if (!mask) {
+        if (R_SUCCEEDED(svcGetInfo(&m, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)))
+            mask = (u32)m & 0x7;   /* core 3 is the system's */
+        if (!mask) mask = 1;
+    }
+    return mask;
+}
+
+void sw_thread_spread(const char *what, unsigned id);
+void sw_thread_spread(const char *what, unsigned id)
+{
+    static volatile int next;
+    u32 mask = app_core_mask();
+    int cores[3], n = 0, c, ideal;
+    Result rc;
+    for (c = 0; c < 3; c++) if (mask & (1u << c)) cores[n++] = c;
+    /* core 0 last: the main thread and the system's work live there */
+    ideal = cores[(__atomic_fetch_add(&next, 1, __ATOMIC_RELAXED) + 1) % n];
+    rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, ideal, mask);
+    fprintf(stderr, "[SWITCH] thread %s %u: cores 0x%X, prefers %d%s\n",
+            what, id, mask, ideal, R_SUCCEEDED(rc) ? "" : " (refused)");
+}
+
+/* Every two seconds, how busy each core was, and now and then the clocks
+ * (a profile's overclock applies to a title, and this says whether it
+ * did). The kernel reports a core's idle time only to a thread running
+ * on that core, so there is a small sampler pinned to each. */
+static volatile u64 s_idle[3], s_tick[3];
+
+static void core_sampler(void *arg)
+{
+    int core = (int)(intptr_t)arg;
+    for (;;) {
+        u64 idle = 0;
+        svcGetInfo(&idle, InfoType_IdleTickCount, INVALID_HANDLE, UINT64_MAX);
+        s_idle[core] = idle;
+        s_tick[core] = armGetSystemTick();
+        svcSleepThread(2000000000ull);
+    }
+}
+
+static void log_clocks(void)
+{
+    static int ok = -1;
+    static const struct { PcvModuleId id; const char *name; } m[] = {
+        { PcvModuleId_CpuBus, "cpu" }, { PcvModuleId_GPU, "gpu" }, { PcvModuleId_EMC, "mem" },
+    };
+    u32 hz[3] = { 0, 0, 0 };
+    int i;
+    if (ok < 0) ok = hosversionAtLeast(8, 0, 0) && R_SUCCEEDED(clkrstInitialize());
+    if (!ok) { fprintf(stderr, "[SWPERF] clocks: not readable here\n"); return; }
+    for (i = 0; i < 3; i++) {
+        ClkrstSession s;
+        if (R_SUCCEEDED(clkrstOpenSession(&s, m[i].id, 3))) {
+            clkrstGetClockRate(&s, &hz[i]);
+            clkrstCloseSession(&s);
+        }
+    }
+    fprintf(stderr, "[SWPERF] clocks: cpu %u MHz, gpu %u MHz, mem %u MHz\n",
+            hz[0] / 1000000, hz[1] / 1000000, hz[2] / 1000000);
+}
+
+static void perf_reporter(void *arg)
+{
+    u64 pi[3] = { 0 }, pt[3] = { 0 };
+    u32 mask = app_core_mask();
+    int round = 0, c;
+    (void)arg;
+    for (;; round++) {
+        char line[160];
+        int n = snprintf(line, sizeof line, "[SWPERF] cores busy:");
+        svcSleepThread(2000000000ull);
+        for (c = 0; c < 3; c++) {
+            u64 i = s_idle[c], t = s_tick[c];
+            if (!(mask & (1u << c))) continue;
+            if (pt[c] && t > pt[c])
+                n += snprintf(line + n, sizeof line - n, " %d:%3d%%", c,
+                              (int)(100 - (i - pi[c]) * 100 / (t - pt[c])));
+            pi[c] = i; pt[c] = t;
+        }
+        if (round) fprintf(stderr, "%s\n", line);
+        if (round % 15 == 0) log_clocks();
+    }
+}
+
+static void start_perf_log(void)
+{
+    static Thread samplers[3], reporter;
+    u32 mask = app_core_mask();
+    int c;
+    for (c = 0; c < 3; c++)
+        if ((mask & (1u << c))
+            && R_SUCCEEDED(threadCreate(&samplers[c], core_sampler, (void *)(intptr_t)c,
+                                        NULL, 0x2000, 0x20, c)))
+            threadStart(&samplers[c]);
+    if (R_SUCCEEDED(threadCreate(&reporter, perf_reporter, NULL, NULL, 0x8000, 0x2C, -2)))
+        threadStart(&reporter);
+}
+
 static void *host_thread(void *p)
 {
     struct host_call *c = (struct host_call *)p;
+    sw_thread_spread("engine", 0);
     c->rc = c->host();
     return NULL;
 }
@@ -468,6 +581,10 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     if (chdir(game) != 0)
         fprintf(stderr, "[SWITCH] cannot enter %s: %s\n", game,
                 strerror(errno));
+
+    /* The main thread only waits from here on, but it may wait anywhere. */
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, app_core_mask());
+    start_perf_log();
 
     call.host = host;
     call.rc = 1;
