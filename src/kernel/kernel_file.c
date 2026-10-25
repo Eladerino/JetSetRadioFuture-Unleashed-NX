@@ -125,6 +125,22 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
     return xbox_translate_path(xbox_path, win_path, buf_size);
 }
 
+#if defined(__SWITCH__)
+/* An fd for a directory handle: a read-only open of an empty file kept
+ * beside the game folder for the purpose. */
+static int switch_dir_fd(void)
+{
+    static const char ph[] = "sdmc:/switch/jsrf-unleashed/.dir-handle";
+    int fd = open(ph, O_RDONLY);
+    if (fd < 0) {
+        int c = open(ph, O_WRONLY | O_CREAT, 0644);
+        if (c >= 0) close(c);
+        fd = open(ph, O_RDONLY);
+    }
+    return fd;
+}
+#endif
+
 NTSTATUS __stdcall xbox_NtCreateFile(
     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
@@ -886,6 +902,21 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
             mkdir(host_path, 0755);   /* EEXIST is fine */
         fd = open(host_path, O_RDONLY | O_DIRECTORY);
+#if defined(__SWITCH__)
+        /* Horizon's SD filesystem opens files only: a directory answers
+         * ENOENT, and JSRF reads that as "no hard disk" and quits to the
+         * dashboard. The handle needs an fd of its own all the same (it is
+         * closed with the handle, and checked before every query), so it
+         * gets one on an empty placeholder file, and the queries below stat
+         * the handle's path instead. */
+        if (fd < 0) {
+            struct stat dst;
+            if (stat(host_path, &dst) == 0 && S_ISDIR(dst.st_mode))
+                fd = switch_dir_fd();
+            else if (errno == ENOENT && stat(host_path, &dst) == 0)
+                errno = ENOTDIR;
+        }
+#endif
     } else {
         fd = open(host_path, posix_open_flags(DesiredAccess, CreateDisposition), 0644);
     }
@@ -1063,8 +1094,16 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
 
     struct stat st;
     if (FileInformationClass != XboxFilePositionInformation) {
+#if defined(__SWITCH__)
+        /* A directory handle's fd is the placeholder's: its path is the
+         * truth, and for a file the path and the fd agree. */
+        const char *sp = w32_handle_path(FileHandle);
+        if (!(sp && stat(sp, &st) == 0) && fstat(fd, &st) != 0)
+            return STATUS_UNSUCCESSFUL;
+#else
         if (fstat(fd, &st) != 0)
             return STATUS_UNSUCCESSFUL;
+#endif
     }
 
     switch (FileInformationClass) {

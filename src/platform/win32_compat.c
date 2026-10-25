@@ -1717,7 +1717,21 @@ VOID OutputDebugStringA(LPCSTR str)
     if (str) fputs(str, stderr);
 }
 
+#if defined(__SWITCH__)
+/* exit() in a homebrew .nro returns to the loader and leaves every other
+ * thread running: the GPU, audio and timer threads woke up in an image
+ * that was being taken down, and the console reported the crash. Ending
+ * the process ends them all, and the kernel frees the guest memory views
+ * with it. Logs are flushed first, since nothing runs after this. */
+VOID ExitProcess(UINT exitCode)
+{
+    fprintf(stderr, "[SWITCH] ExitProcess(%u): ending the process\n", exitCode);
+    fflush(NULL);
+    svcExitProcess();
+}
+#else
 VOID ExitProcess(UINT exitCode) { exit((int)exitCode); }
+#endif
 
 BOOL IsDebuggerPresent(void)
 {

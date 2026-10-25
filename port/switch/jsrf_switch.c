@@ -85,10 +85,23 @@ u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
  * hand and written to the log's descriptor directly. A frame pointer
  * is only followed after svcQueryMemory says its page is mapped and
  * readable; a second fault in here would end the report. */
-extern char __start__[];
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 static int s_crash_fd = 2;
+
+/* Where this .nro is loaded. __start__ is no use for this: the linker
+ * script defines it as an absolute 0, which no relocation moves, so it
+ * reads 0 at run time. The code segment comes first in the image, so the
+ * region holding any function in it starts at the module base. */
+static u64 module_base(void)
+{
+    static u64 base;
+    MemoryInfo mi;
+    u32 pi;
+    if (!base && R_SUCCEEDED(svcQueryMemory(&mi, &pi, (u64)(uintptr_t)&module_base)))
+        base = mi.addr;
+    return base;
+}
 
 static void crash_puts(const char *s)
 {
@@ -116,12 +129,9 @@ static void crash_hex(const char *label, u64 v)
 /* "  pc 0x...  (nro+0x...)" when the address is inside this module. */
 static void crash_code(const char *label, u64 a)
 {
-    u64 base = (u64)(uintptr_t)__start__;
-    MemoryInfo mi;
-    u32 pi;
+    u64 base = module_base();
     crash_hex(label, a);
-    if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, base)) && a >= base
-        && a < base + 0x10000000ull)   /* a generous bound on .nro size */
+    if (base && a >= base && a < base + 0x10000000ull)   /* a generous bound on .nro size */
         crash_hex("  (nro+", a - base), crash_puts(")");
     crash_puts("\n");
 }
@@ -434,7 +444,7 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     fprintf(stderr, "[SWITCH] JSRF Unleashed %s\n[SWITCH] game: %s\n"
                     "[SWITCH] data: %s\n", JSRF_VERSION, game, base);
     /* The base addr2line offsets in a crash report are relative to. */
-    fprintf(stderr, "[SWITCH] module base %p\n", (void *)__start__);
+    fprintf(stderr, "[SWITCH] module base %p\n", (void *)module_base());
 
     prepare_game_folder(game);
     if (chdir(game) != 0)
