@@ -40,7 +40,20 @@ LC_ALL=C awk -v map="$tmp/map" '
             name[f[1]] = f[2] (src ~ /^\?/ ? "" : "  [" src "]")
         }
     }
-    /\[SWPROF\] thread/ { sub(/^.*\[SWPROF\] /, ""); print "\n" $0; next }
+    /\[SWPROF\] thread/ { sub(/^.*\[SWPROF\] /, ""); print "\n" $0; stacks = 0; next }
+    /\[SWPROF\].*stack/ {
+        match($0, /[0-9.]+%/); pct = substr($0, RSTART, RLENGTH)
+        rest = $0; out = ""
+        while (match(rest, /nro\+0x[0-9a-f]+|\?/)) {
+            t = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+            if (t == "?") n = "?"
+            else { n = name[substr(t, 5)]; sub(/  \[.*$/, "", n); if (n == "") n = t }
+            out = out (out == "" ? "" : " < ") n
+        }
+        if (!stacks) { print "  -- call chains (where each wait is from) --"; stacks = 1 }
+        printf "  %6s  %s\n", pct, out
+        next
+    }
     /\[SWPROF\].*nro\+0x/ {
         match($0, /nro\+0x[0-9a-f]+/); a = substr($0, RSTART + 4, RLENGTH - 4)
         match($0, /[0-9.]+%/); pct = substr($0, RSTART, RLENGTH)

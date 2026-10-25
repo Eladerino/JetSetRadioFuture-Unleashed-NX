@@ -720,6 +720,74 @@ typedef struct { u64 pc; u32 n; } ProfSlot;
 static ProfSlot s_prof[MAX_PROF_THREADS][PROF_SLOTS];
 static u32 s_prof_total[MAX_PROF_THREADS], s_prof_lost[MAX_PROF_THREADS];
 
+/* The same samples again, keyed on the call chain: pc, lr and two saved
+ * returns up the frame-pointer chain. A thread waiting in an svc shows
+ * up above only as the svc; this says whose wait it is. */
+#define PROF_DEPTH 4
+#define STACK_SLOTS 2048
+typedef struct { u64 a[PROF_DEPTH]; u32 n; } StackSlot;
+static StackSlot s_stk[MAX_PROF_THREADS][STACK_SLOTS];
+
+static void stack_add(int t, const u64 *a)
+{
+    u64 h = a[0] ^ (a[1] * 31) ^ (a[2] * 131) ^ (a[3] * 1031);
+    u32 i = (u32)((h >> 2) * 2654435761u) & (STACK_SLOTS - 1), k;
+    for (k = 0; k < 32; k++, i = (i + 1) & (STACK_SLOTS - 1)) {
+        StackSlot *sl = &s_stk[t][i];
+        if (!sl->n) { memcpy(sl->a, a, sizeof sl->a); sl->n = 1; return; }
+        if (!memcmp(sl->a, a, sizeof sl->a)) { sl->n++; return; }
+    }
+}
+
+static void stack_of(const ThreadContext *ctx, u64 *a)
+{
+    u64 fp = ctx->fp;
+    int d;
+    a[0] = ctx->pc.x;
+    a[1] = ctx->lr;
+    for (d = 2; d < PROF_DEPTH; d++) {
+        const u64 *f;
+        a[d] = 0;
+        if (!crash_readable(fp)) continue;
+        f = (const u64 *)(uintptr_t)fp;
+        a[d] = f[1];
+        if (f[0] <= fp) { fp = 0; continue; }
+        fp = f[0];
+    }
+}
+
+static void stack_dump(int t, u64 base, u32 total)
+{
+    enum { TOP = 12 };
+    StackSlot top[TOP];
+    int n = 0, i, j, d;
+    for (i = 0; i < STACK_SLOTS; i++) {
+        StackSlot sl = s_stk[t][i];
+        if (!sl.n) continue;
+        if (n < TOP) top[n++] = sl;
+        else if (sl.n > top[TOP - 1].n) top[TOP - 1] = sl;
+        else continue;
+        for (j = n - 1; j > 0 && top[j].n > top[j - 1].n; j--) {
+            StackSlot x = top[j]; top[j] = top[j - 1]; top[j - 1] = x;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        char line[256];
+        int k = snprintf(line, sizeof line, "[SWPROF]   %5.1f%%  stack",
+                         100.0 * top[i].n / total);
+        for (d = 0; d < PROF_DEPTH && top[i].a[d]; d++) {
+            u64 a = top[i].a[d];
+            if (a >= base && a < base + 0x10000000ull)
+                k += snprintf(line + k, sizeof line - k, "%s nro+0x%llx", d ? " <" : "",
+                              (unsigned long long)(a - base));
+            else
+                k += snprintf(line + k, sizeof line - k, "%s ?", d ? " <" : "");
+        }
+        fprintf(stderr, "%s\n", line);
+    }
+    memset(s_stk[t], 0, sizeof s_stk[t]);
+}
+
 static void prof_add(int t, u64 pc)
 {
     u32 i = (u32)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1), k;
@@ -760,6 +828,7 @@ static void prof_dump(u64 base)
                 fprintf(stderr, "[SWPROF]   %5.1f%%  0x%llx (outside the .nro)\n",
                         100.0 * top[i].n / total, (unsigned long long)pc);
         }
+        stack_dump(t, base, total);
         memset(s_prof[t], 0, sizeof s_prof[t]);
         s_prof_total[t] = s_prof_lost[t] = 0;
     }
@@ -777,7 +846,10 @@ static void prof_sampler(void *arg)
             ThreadContext ctx;
             if (!h || R_FAILED(svcSetThreadActivity(h, ThreadActivity_Paused))) continue;
             if (R_SUCCEEDED(svcGetThreadContext3(&ctx, h))) {
+                u64 chain[PROF_DEPTH];
                 prof_add(t, ctx.pc.x);
+                stack_of(&ctx, chain);
+                stack_add(t, chain);
                 s_prof_total[t]++;
             }
             svcSetThreadActivity(h, ThreadActivity_Runnable);
