@@ -32,7 +32,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/iosupport.h>
 #include <switch.h>
 #include "xiso.h"
 #include "../xbe_check.h"
@@ -87,7 +89,10 @@ u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
  * readable; a second fault in here would end the report. */
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
-static int s_crash_fd = 2;
+/* The log file (open_log below). A crash report writes to it directly,
+ * past the buffer and its locks; before the log is open, to stderr. */
+static int s_log_fd = -1;
+static void log_drain_final(void);
 
 /* Where this .nro is loaded. __start__ is no use for this: the linker
  * script defines it as an absolute 0, which no relocation moves, so it
@@ -108,7 +113,7 @@ static void crash_puts(const char *s)
     size_t n = 0;
     while (s[n]) n++;
     while (n) {
-        ssize_t w = write(s_crash_fd, s, n);
+        ssize_t w = write(s_log_fd >= 0 ? s_log_fd : 2, s, n);
         if (w <= 0) return;
         s += w;
         n -= (size_t)w;
@@ -162,6 +167,7 @@ void __libnx_exception_handler(ThreadExceptionDump *ctx)
     for (i = 0; i < sizeof k_desc / sizeof k_desc[0]; i++)
         if (k_desc[i].code == ctx->error_desc) what = k_desc[i].name;
 
+    log_drain_final();
     crash_puts("\n[CRASH] ");
     crash_puts(what);
     crash_hex(" (desc ", ctx->error_desc);
@@ -211,32 +217,150 @@ static void mkdir_p(const char *path)
     mkdir(buf, 0755);
 }
 
-/* Logs/last-run.log, the one before it kept as previous-run.log. One
- * open file behind both streams: Horizon will not open a file for writing
- * a second time while the first handle is open, so the earlier version's
- * two freopen calls left stderr -- everything the engine and the crash
- * report write -- going nowhere, and the log held only stdout. stdout now
- * shares stderr's descriptor (and its file offset), unbuffered, so a crash
- * keeps everything up to the fault, in order.
+/* Logs/last-run.log, the one before it kept as previous-run.log.
+ *
+ * stdout and stderr (descriptors 1 and 2) are pointed at a device of
+ * this file's own, so every write lands in memory and a thread moves it
+ * to the card four times a second. Writing each line straight to the
+ * card cost an IPC round trip to the file system per fprintf (stderr is
+ * unbuffered, and the engine flushes after most lines besides): sampled
+ * on the title screen, the game thread spent about a fifth of its time
+ * in those calls and another fifth queued on the stream's lock behind
+ * them, and the GPU thread an eighth. Both streams share one buffer, so
+ * the lines stay in the order they were written.
+ *
+ * Two buffers: the flusher swaps them and writes the full one while the
+ * engine fills the other. A buffer that fills before the flusher comes
+ * round is written by the thread that filled it. A crash report drains
+ * what is buffered before it writes, and then writes straight through
+ * (log_direct below), as does ExitProcess. What a hard freeze can lose
+ * is the last quarter second; log_direct=1 in options.txt writes every
+ * line to the card as before, for chasing one.
  *
  * rename() on Horizon refuses an existing destination, hence the remove. */
+#define LOG_BUF (256u << 10)
+static char s_logbuf[2][LOG_BUF];
+static size_t s_loglen;
+static int s_logcur;
+static volatile int s_log_direct;
+static Mutex s_log_mu, s_log_io;   /* taken in that order */
+
+static void log_out(const char *p, size_t n)
+{
+    while (n) {
+        ssize_t w = write(s_log_fd, p, n);
+        if (w <= 0) return;
+        p += w;
+        n -= (size_t)w;
+    }
+}
+
+static ssize_t log_write_r(struct _reent *r, void *fd, const char *p, size_t n)
+{
+    (void)r; (void)fd;
+    if (s_log_direct) {
+        mutexLock(&s_log_io);
+        log_out(p, n);
+        mutexUnlock(&s_log_io);
+        return (ssize_t)n;
+    }
+    mutexLock(&s_log_mu);
+    if (s_loglen + n > LOG_BUF) {
+        mutexLock(&s_log_io);
+        log_out(s_logbuf[s_logcur], s_loglen);
+        s_loglen = 0;
+        if (n > LOG_BUF) { log_out(p, n); n = 0; }
+        mutexUnlock(&s_log_io);
+    }
+    memcpy(s_logbuf[s_logcur] + s_loglen, p, n);
+    s_loglen += n;
+    mutexUnlock(&s_log_mu);
+    return (ssize_t)n;
+}
+
+static const devoptab_t dotab_log = {
+    .name    = "jsrflog",
+    .write_r = log_write_r,
+};
+
+/* Move what is buffered to the card. */
+static void log_drain(void)
+{
+    int b;
+    size_t n;
+    if (s_log_fd < 0) return;
+    mutexLock(&s_log_mu);
+    b = s_logcur;
+    n = s_loglen;
+    s_logcur ^= 1;
+    s_loglen = 0;
+    mutexLock(&s_log_io);
+    mutexUnlock(&s_log_mu);
+    log_out(s_logbuf[b], n);
+    mutexUnlock(&s_log_io);
+}
+
+/* From the exception handler and on the way out: no waiting on a lock
+ * the faulting thread may hold, and every later write goes straight to
+ * the card. */
+static void log_drain_final(void)
+{
+    int mu, io;
+    if (s_log_fd < 0) return;
+    s_log_direct = 1;
+    mu = mutexTryLock(&s_log_mu);
+    io = mutexTryLock(&s_log_io);
+    log_out(s_logbuf[s_logcur], s_loglen);
+    s_loglen = 0;
+    if (io) mutexUnlock(&s_log_io);
+    if (mu) mutexUnlock(&s_log_mu);
+}
+
+void sw_log_flush(void);
+void sw_log_flush(void)
+{
+    fflush(NULL);
+    log_drain_final();
+}
+
+static void log_flusher(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        svcSleepThread(250000000ull);
+        log_drain();
+    }
+}
+
 static void open_log(const char *data)
 {
+    static Thread flusher;
     char logs[1024], last[1100], prev[1100];
+    const char *d = getenv("JSRF_LOG_DIRECT");
     snprintf(logs, sizeof logs, "%s/Logs", data);
     mkdir_p(logs);
     snprintf(last, sizeof last, "%s/last-run.log", logs);
     snprintf(prev, sizeof prev, "%s/previous-run.log", logs);
     remove(prev);
     rename(last, prev);
-    if (!freopen(last, "w", stderr))
+    s_log_fd = open(last, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (s_log_fd < 0)
         return;
-    setvbuf(stderr, NULL, _IONBF, 0);
+    s_log_direct = d && atoi(d) > 0;
     fflush(stdout);
-    if (dup2(fileno(stderr), fileno(stdout)) < 0)
-        fprintf(stderr, "[SWITCH] stdout not redirected (%s); only stderr"
-                        " is in this log\n", strerror(errno));
+    fflush(stderr);
+    devoptab_list[STD_OUT] = &dotab_log;
+    devoptab_list[STD_ERR] = &dotab_log;
     setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    if (!s_log_direct
+        && R_SUCCEEDED(threadCreate(&flusher, log_flusher, NULL, NULL, 0x4000, 0x2C, -2)))
+        threadStart(&flusher);
+    else
+        s_log_direct = 1;
+    atexit(log_drain_final);
+    fprintf(stderr, "[SWITCH] log: %s\n", s_log_direct ? "written line by line (log_direct=1)"
+                                                    : "buffered, written every 0.25 s");
 }
 
 /* key=value lines (the file the engine's F9/F10 keys write to as well). */
@@ -294,6 +418,7 @@ static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "shader_cache", "RECOMP_SHADER_CACHE", 0 },
     { "profile",      "RECOMP_GL_PROFILE",   1 },
     { "sample",       "JSRF_SAMPLE",         0 },
+    { "log_direct",   "JSRF_LOG_DIRECT",     0 },
 };
 
 /* What the options files said, for the log (which is not open yet here). */
@@ -731,7 +856,6 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     setenv("JSRF_SAVE_DIR", save, 1);
     setenv("JSRF_SETTINGS_FILE", cfg, 1);
     setenv("TMPDIR", tmp, 1);
-    s_crash_fd = fileno(stderr);
     fprintf(stderr, "[SWITCH] JSRF Unleashed %s\n[SWITCH] game: %s\n"
                     "[SWITCH] data: %s\n", JSRF_VERSION, game, base);
     /* The base addr2line offsets in a crash report are relative to. */

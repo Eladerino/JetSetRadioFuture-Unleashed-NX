@@ -1730,10 +1730,11 @@ VOID OutputDebugStringA(LPCSTR str)
  * that was being taken down, and the console reported the crash. Ending
  * the process ends them all, and the kernel frees the guest memory views
  * with it. Logs are flushed first, since nothing runs after this. */
+extern void sw_log_flush(void);   /* port/switch: the log's memory buffer */
 VOID ExitProcess(UINT exitCode)
 {
     fprintf(stderr, "[SWITCH] ExitProcess(%u): ending the process\n", exitCode);
-    fflush(NULL);
+    sw_log_flush();
     svcExitProcess();
 }
 #else

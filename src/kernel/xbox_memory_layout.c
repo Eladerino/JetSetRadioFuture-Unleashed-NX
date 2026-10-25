@@ -229,6 +229,66 @@ static int nv2a_ack_wait(long us)
     pthread_mutex_unlock(&s_kick_mu);
     return kicked;
 }
+
+/* The flush bit, acknowledged on a thread of its own while KickOff waits.
+ *
+ * The ack thread clears it only at the top of its loop, and the loop also
+ * runs the pushbuffer, so a kickoff that lands while the previous segment
+ * is being drawn waits for all of that GL work first. Where the GL driver
+ * is slow, that is most of the frame: sampled on the Switch title screen,
+ * the game thread spent about a third of its time in KickOff's spin while
+ * the ack thread was busy drawing, the two taking turns instead of running
+ * side by side. The bit means "write-combined pushbuffer data has reached
+ * memory", which it always has here, so clearing it at once is the same
+ * acknowledgement the ack thread gives, only without the queue. This
+ * thread sleeps until xbox_nv2a_hurry(1) and clears the bit until
+ * hurry(0); it never touches the pushbuffer.
+ *
+ * RECOMP_NV2A_FLUSH_ACK=1 turns it on, =0 off; it is on by default on the
+ * Switch, where the driver's cost made the wait show, and off elsewhere. */
+static int s_flush_ack = -1;
+static pthread_mutex_t s_flush_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_flush_cv = PTHREAD_COND_INITIALIZER;
+static void nv2a_flush_wake(void)
+{
+    if (s_flush_ack <= 0) return;
+    pthread_mutex_lock(&s_flush_mu);
+    pthread_cond_signal(&s_flush_cv);
+    pthread_mutex_unlock(&s_flush_mu);
+}
+static DWORD WINAPI nv2a_flush_ack_thread(LPVOID param)
+{
+    volatile uint32_t *r = (volatile uint32_t *)((char *)param + 0x100410);
+    while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+        pthread_mutex_lock(&s_flush_mu);
+        if (!s_hurry) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 20000000L;     /* to notice the stop flag */
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_nsec -= 1000000000L; ts.tv_sec++; }
+            pthread_cond_timedwait(&s_flush_cv, &s_flush_mu, &ts);
+        }
+        pthread_mutex_unlock(&s_flush_mu);
+        while (s_hurry) {
+            if (*r & 0x00010000u) __atomic_fetch_and(r, ~0x00010000u, __ATOMIC_SEQ_CST);
+            else sched_yield();
+        }
+    }
+    return 0;
+}
+static void nv2a_flush_ack_start(void *regs)
+{
+    const char *e = getenv("RECOMP_NV2A_FLUSH_ACK");
+#if defined(__SWITCH__)
+    s_flush_ack = e ? atoi(e) : 1;
+#else
+    s_flush_ack = e ? atoi(e) : 0;
+#endif
+    if (s_flush_ack > 0 && !CreateThread(NULL, 0, nv2a_flush_ack_thread, regs, 0, NULL))
+        s_flush_ack = 0;
+    if (s_flush_ack > 0)
+        fprintf(stderr, "  NV2A flush ack: on its own thread during KickOff\n");
+}
 #endif
 void xbox_nv2a_kick(void)
 {
@@ -241,7 +301,12 @@ void xbox_nv2a_hurry(int on)
     if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
     if (!s_kick_on) return;
     s_hurry = on;
-    if (on) xbox_nv2a_kick();   /* out of its sleep now, not at the end of it */
+    if (on) {
+#if !defined(_WIN32)
+        nv2a_flush_wake();
+#endif
+        xbox_nv2a_kick();       /* out of its sleep now, not at the end of it */
+    }
 }
 #else
 void xbox_nv2a_kick(void) { }
@@ -920,6 +985,9 @@ static void xbox_Nv2aAckStart(void)
     if (g_nv2a_ack_thread) {
         fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
                 sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
+#if !defined(_WIN32)
+        nv2a_flush_ack_start(g_nv2a_memory);
+#endif
     }
 }
 

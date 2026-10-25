@@ -269,6 +269,10 @@ EOF
             "# (turn into names with tools/switch/prof.sh)." \
             "sample=0" \
             "" \
+            "# 1 = write every log line to the card at once (slower). Only for" \
+            "# chasing a freeze; normally the log is written every 0.25 s." \
+            "log_direct=0" \
+            "" \
             "# Any other engine variable can go here too as NAME=value" \
             "# (RECOMP_... or JSRF_...)." > "$EXPORT_DIR/options.txt"
     fi
