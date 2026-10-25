@@ -278,6 +278,10 @@ static const char *const k_env[][2] = {
  * in for one: KEY=VALUE lines (RECOMP_GL_PROFILE=1, say), '#' for a comment.
  * They are read first, so they win over the defaults below. The SD card
  * is mounted by the time constructors run (libnx's __appInit). */
+/* What the options files said, for the log (which is not open yet here). */
+static char s_env_seen[512];
+static int s_env_files;
+
 __attribute__((constructor(101))) static void switch_env(void)
 {
     size_t i;
@@ -288,6 +292,9 @@ __attribute__((constructor(101))) static void switch_env(void)
         FILE *f = fopen(names[n], "r");
         char line[512];
         if (!f) continue;
+        s_env_files += snprintf(s_env_seen + strlen(s_env_seen),
+                                sizeof s_env_seen - strlen(s_env_seen), " %s",
+                                strrchr(names[n], '/') + 1) > 0;
         while (fgets(line, sizeof line, f)) {
             char *k = line, *eq, *end;
             if (!memcmp(k, "\xEF\xBB\xBF", 3)) k += 3;   /* a UTF-8 mark */
@@ -298,6 +305,8 @@ __attribute__((constructor(101))) static void switch_env(void)
             end = eq + 1 + strcspn(eq + 1, "\r\n");
             *end = 0;
             setenv(k, eq + 1, 1);
+            snprintf(s_env_seen + strlen(s_env_seen), sizeof s_env_seen - strlen(s_env_seen),
+                     " %s=%s", k, eq + 1);
         }
         fclose(f);
     }
@@ -689,6 +698,8 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
                     "[SWITCH] data: %s\n", JSRF_VERSION, game, base);
     /* The base addr2line offsets in a crash report are relative to. */
     fprintf(stderr, "[SWITCH] module base %p\n", (void *)module_base());
+    fprintf(stderr, "[SWITCH] options:%s\n", s_env_files ? s_env_seen
+            : " none (no env.txt beside the .nro)");
 
     prepare_game_folder(game);
     if (chdir(game) != 0)
