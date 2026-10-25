@@ -25,6 +25,11 @@
 #   SKIP_RECOMP=1      reuse port/recomp/gen from an earlier run (after a
 #                      source change outside the generated code; regenerating
 #                      touches every generated file and recompiles them all)
+#   EXPORT_DIR  a folder the finished .nro is also copied to, for dragging
+#              onto the SD card (default under WSL: Downloads\jsrf-unleashed-switch
+#              in your Windows profile; "none" turns it off). Only the .nro
+#              is replaced there; env, settings or anything else kept in
+#              that folder stays put between builds.
 #
 # Output: $WORK_DIR/dist/switch/jsrf-unleashed/ ready to copy to the
 # SD card, plus $WORK_DIR/dist/debug/ with the .elf and linker map
@@ -193,8 +198,41 @@ first launch checks it and unpacks it into the folder.
 
 The log of every run is sdmc:/switch/jsrf-unleashed/Logs/last-run.log.
 EOF
+# ---------------------------------------------------------------- export
+# dist/ is rebuilt from nothing every time, so files kept beside the .nro
+# there (env, settings) vanished with each build. The export folder is
+# never cleared: the new .nro replaces the old one and nothing else moves.
+# The game folder is not copied (it is gigabytes and already on the card).
+EXPORT_DIR="${EXPORT_DIR:-}"
+if [ -z "$EXPORT_DIR" ] && command -v cmd.exe >/dev/null 2>&1 \
+   && command -v wslpath >/dev/null 2>&1; then
+    # (from C:, so cmd.exe does not complain about starting in a WSL path)
+    WINPROFILE="$( (cd /mnt/c 2>/dev/null; cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null) | tr -d '\r' || true)"
+    if [ -n "$WINPROFILE" ] && [ "$WINPROFILE" != "%USERPROFILE%" ]; then
+        EXPORT_DIR="$(wslpath -u "$WINPROFILE")/Downloads/jsrf-unleashed-switch"
+    fi
+fi
+if [ -n "$EXPORT_DIR" ] && [ "$EXPORT_DIR" != "none" ]; then
+    say "copying the .nro to $EXPORT_DIR"
+    mkdir -p "$EXPORT_DIR"
+    cp "$DIST/jsrf-unleashed.nro" "$EXPORT_DIR/jsrf-unleashed.nro"
+    cat > "$EXPORT_DIR/READ-ME.txt" <<'EOF'
+Drag everything in this folder (except this file) onto the SD card's
+switch/jsrf-unleashed/ folder, replacing what is there.
+
+jsrf-unleashed.nro  is replaced by every build.
+env, settings       are yours: keep them here and they survive builds.
+
+The game/ folder is not copied here; it is already on the card.
+EOF
+    EXPORTED="$EXPORT_DIR"
+fi
+
 say "done"
 echo "nro:  $DIST/jsrf-unleashed.nro ($(stat -c%s "$DIST/jsrf-unleashed.nro") bytes)"
 echo "sha:  $(sha256sum "$DIST/jsrf-unleashed.nro" | cut -d' ' -f1)"
 echo "copy: $WORK_DIR/dist/switch/jsrf-unleashed  ->  sdmc:/switch/jsrf-unleashed"
 echo "logs: $WORK_DIR/logs/ (send these back if anything failed)"
+if [ -n "${EXPORTED:-}" ]; then
+    echo "windows: $(wslpath -w "$EXPORTED" 2>/dev/null || echo "$EXPORTED")"
+fi
