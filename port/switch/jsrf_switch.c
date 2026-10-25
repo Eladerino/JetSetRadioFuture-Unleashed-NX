@@ -274,23 +274,30 @@ static const char *const k_env[][2] = {
  * computer the launcher has set them before the engine starts.
  * Anything already set wins.
  *
- * The console has no shell to set a variable in, so <base>/env stands in
- * for one: KEY=VALUE lines (RECOMP_GL_PROFILE=1, say), '#' for a comment.
+ * The console has no shell to set a variable in, so <base>/env.txt stands
+ * in for one: KEY=VALUE lines (RECOMP_GL_PROFILE=1, say), '#' for a comment.
  * They are read first, so they win over the defaults below. The SD card
  * is mounted by the time constructors run (libnx's __appInit). */
 __attribute__((constructor(101))) static void switch_env(void)
 {
     size_t i;
-    FILE *f = fopen(SWITCH_BASE "/env", "r");
-    if (f) {
+    /* env.txt, so Notepad opens it; plain env as well, as first shipped */
+    static const char *const names[] = { SWITCH_BASE "/env.txt", SWITCH_BASE "/env" };
+    int n;
+    for (n = 0; n < 2; n++) {
+        FILE *f = fopen(names[n], "r");
         char line[512];
+        if (!f) continue;
         while (fgets(line, sizeof line, f)) {
-            char *eq = strchr(line, '='), *end;
-            if (line[0] == '#' || !eq || eq == line) continue;
+            char *k = line, *eq, *end;
+            if (!memcmp(k, "\xEF\xBB\xBF", 3)) k += 3;   /* a UTF-8 mark */
+            while (*k == ' ' || *k == '\t') k++;
+            eq = strchr(k, '=');
+            if (*k == '#' || !eq || eq == k) continue;
             *eq = 0;
             end = eq + 1 + strcspn(eq + 1, "\r\n");
             *end = 0;
-            setenv(line, eq + 1, 1);
+            setenv(k, eq + 1, 1);
         }
         fclose(f);
     }

@@ -221,10 +221,24 @@ Drag everything in this folder (except this file) onto the SD card's
 switch/jsrf-unleashed/ folder, replacing what is there.
 
 jsrf-unleashed.nro  is replaced by every build.
-env, settings       are yours: keep them here and they survive builds.
+env.txt             engine options; open it in Notepad. Made once, then yours.
+settings            game options (widescreen=1 and so on), yours as well.
 
 The game/ folder is not copied here; it is already on the card.
 EOF
+    # The engine options file, made once with everything switched off:
+    # take the # off a line in Notepad to turn it on.
+    if [ ! -f "$EXPORT_DIR/env.txt" ]; then
+        printf '%s\r\n' \
+            "# JSRF Unleashed engine options. Remove the # in front of a line to turn it on." \
+            "# Copy this file to the SD card beside jsrf-unleashed.nro." \
+            "" \
+            "# Where the time goes each second (adds a little overhead):" \
+            "#RECOMP_GL_PROFILE=1" \
+            "" \
+            "# Which functions each thread is busy in, every 10 seconds:" \
+            "#JSRF_SAMPLE=1" > "$EXPORT_DIR/env.txt"
+    fi
     EXPORTED="$EXPORT_DIR"
 fi
 
