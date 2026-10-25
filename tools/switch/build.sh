@@ -28,8 +28,8 @@
 #   EXPORT_DIR  a folder the finished .nro is also copied to, for dragging
 #              onto the SD card (default under WSL: Downloads\jsrf-unleashed-switch
 #              in your Windows profile; "none" turns it off). Only the .nro
-#              is replaced there; env, settings or anything else kept in
-#              that folder stays put between builds.
+#              is replaced there; options.txt (written once, with every
+#              option) and anything else kept there stays put.
 #
 # Output: $WORK_DIR/dist/switch/jsrf-unleashed/ ready to copy to the
 # SD card, plus $WORK_DIR/dist/debug/ with the .elf and linker map
@@ -221,23 +221,56 @@ Drag everything in this folder (except this file) onto the SD card's
 switch/jsrf-unleashed/ folder, replacing what is there.
 
 jsrf-unleashed.nro  is replaced by every build.
-env.txt             engine options; open it in Notepad. Made once, then yours.
-settings            game options (widescreen=1 and so on), yours as well.
+options.txt         every option, in Notepad. Made once, then yours: the build
+                    never overwrites it. (It replaces env.txt and settings;
+                    delete those from here and from the card.)
 
 The game/ folder is not copied here; it is already on the card.
 EOF
-    # The engine options file, made once with everything switched off:
-    # take the # off a line in Notepad to turn it on.
-    if [ ! -f "$EXPORT_DIR/env.txt" ]; then
+    # The options file, made once with every option written out at its
+    # default: change a number in Notepad, save, copy it to the card. The
+    # build never touches it again.
+    if [ ! -f "$EXPORT_DIR/options.txt" ]; then
         printf '%s\r\n' \
-            "# JSRF Unleashed engine options. Remove the # in front of a line to turn it on." \
-            "# Copy this file to the SD card beside jsrf-unleashed.nro." \
+            "# JSRF Unleashed for Switch -- options" \
+            "# Change a value, save, and copy this file to the SD card beside" \
+            "# jsrf-unleashed.nro. 1 means on, 0 means off. Lines starting with #" \
+            "# are notes and are ignored. The log's [SWITCH] options: line shows" \
+            "# what was read." \
             "" \
-            "# Where the time goes each second (adds a little overhead):" \
-            "#RECOMP_GL_PROFILE=1" \
+            "# ---- picture" \
             "" \
-            "# Which functions each thread is busy in, every 10 seconds:" \
-            "#JSRF_SAMPLE=1" > "$EXPORT_DIR/env.txt"
+            "# Widescreen 16:9 in gameplay (the logos and title screen stay 4:3)." \
+            "widescreen=1" \
+            "" \
+            "# Internal resolution: 1 = the Xbox's 640x480, 2 = twice that, up to 4." \
+            "# Each step costs GPU time." \
+            "scale=1" \
+            "" \
+            "# Texture sharpness at an angle (anisotropic filtering): 1 = off, 4, 8, 16." \
+            "aniso=4" \
+            "" \
+            "# Frame rate cap: 60 as on the Xbox. 0 removes the cap (testing only)." \
+            "fps=60" \
+            "" \
+            "# ---- sound" \
+            "" \
+            "mute=0" \
+            "" \
+            "# ---- performance testing (leave at 0 for normal play)" \
+            "" \
+            "# Keep compiled shaders between runs, so stutters only happen once." \
+            "shader_cache=1" \
+            "" \
+            "# Where each frame's time goes, written to the log every second." \
+            "profile=0" \
+            "" \
+            "# Which functions each thread is busy in, every 10 seconds" \
+            "# (turn into names with tools/switch/prof.sh)." \
+            "sample=0" \
+            "" \
+            "# Any other engine variable can go here too as NAME=value" \
+            "# (RECOMP_... or JSRF_...)." > "$EXPORT_DIR/options.txt"
     fi
     EXPORTED="$EXPORT_DIR"
 fi

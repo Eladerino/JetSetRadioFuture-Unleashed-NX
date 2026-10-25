@@ -274,39 +274,77 @@ static const char *const k_env[][2] = {
  * computer the launcher has set them before the engine starts.
  * Anything already set wins.
  *
- * The console has no shell to set a variable in, so <base>/env.txt stands
- * in for one: KEY=VALUE lines (RECOMP_GL_PROFILE=1, say), '#' for a comment.
- * They are read first, so they win over the defaults below. The SD card
- * is mounted by the time constructors run (libnx's __appInit). */
+ * The console has no shell to set a variable in, so <base>/options.txt
+ * stands in for one, in words a player can read: widescreen=1, scale=2,
+ * '#' for a comment (the build writes one with every option listed). A
+ * raw engine variable (RECOMP_..., JSRF_...) works there too, for the
+ * rest. env.txt and env, the earlier names, are still read after it.
+ * All of it is read first, so it wins over the defaults below and over
+ * upstream's settings file. The SD card is mounted by the time
+ * constructors run (libnx's __appInit). */
+
+/* The friendly names. A switch the engine tests only for being set
+ * (presence) is left unset by 0, not set to "0". */
+static const struct { const char *name, *var; int presence; } k_opts[] = {
+    { "widescreen",   "RECOMP_WIDESCREEN",   0 },
+    { "scale",        "RECOMP_GL_SCALE",     0 },
+    { "aniso",        "RECOMP_GL_ANISO",     0 },
+    { "fps",          "RECOMP_FPS",          0 },
+    { "mute",         "RECOMP_MUTE",         0 },
+    { "shader_cache", "RECOMP_SHADER_CACHE", 0 },
+    { "profile",      "RECOMP_GL_PROFILE",   1 },
+    { "sample",       "JSRF_SAMPLE",         0 },
+};
+
 /* What the options files said, for the log (which is not open yet here). */
-static char s_env_seen[512];
+static char s_env_seen[768];
 static int s_env_files;
+
+static void opt_note(const char *fmt, const char *a, const char *b)
+{
+    size_t n = strlen(s_env_seen);
+    snprintf(s_env_seen + n, sizeof s_env_seen - n, fmt, a, b);
+}
 
 __attribute__((constructor(101))) static void switch_env(void)
 {
     size_t i;
-    /* env.txt, so Notepad opens it; plain env as well, as first shipped */
-    static const char *const names[] = { SWITCH_BASE "/env.txt", SWITCH_BASE "/env" };
+    static const char *const names[] = {
+        SWITCH_BASE "/options.txt", SWITCH_BASE "/env.txt", SWITCH_BASE "/env",
+    };
     int n;
-    for (n = 0; n < 2; n++) {
+    for (n = 0; n < 3; n++) {
         FILE *f = fopen(names[n], "r");
         char line[512];
         if (!f) continue;
-        s_env_files += snprintf(s_env_seen + strlen(s_env_seen),
-                                sizeof s_env_seen - strlen(s_env_seen), " %s",
-                                strrchr(names[n], '/') + 1) > 0;
+        s_env_files++;
+        opt_note(" [%s]%s", strrchr(names[n], '/') + 1, "");
         while (fgets(line, sizeof line, f)) {
-            char *k = line, *eq, *end;
+            char *k = line, *eq, *v, *end;
             if (!memcmp(k, "\xEF\xBB\xBF", 3)) k += 3;   /* a UTF-8 mark */
             while (*k == ' ' || *k == '\t') k++;
             eq = strchr(k, '=');
             if (*k == '#' || !eq || eq == k) continue;
-            *eq = 0;
-            end = eq + 1 + strcspn(eq + 1, "\r\n");
+            /* trim both sides of the '=' and the line's end */
+            for (end = eq; end > k && (end[-1] == ' ' || end[-1] == '\t'); end--) ;
             *end = 0;
-            setenv(k, eq + 1, 1);
-            snprintf(s_env_seen + strlen(s_env_seen), sizeof s_env_seen - strlen(s_env_seen),
-                     " %s=%s", k, eq + 1);
+            v = eq + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            end = v + strcspn(v, "\r\n#");
+            while (end > v && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            *end = 0;
+            for (i = 0; i < sizeof k_opts / sizeof k_opts[0]; i++)
+                if (!strcasecmp(k, k_opts[i].name)) break;
+            if (i < sizeof k_opts / sizeof k_opts[0]) {
+                if (k_opts[i].presence && !strcmp(v, "0")) unsetenv(k_opts[i].var);
+                else setenv(k_opts[i].var, v, 1);
+                opt_note(" %s=%s", k, v);
+            } else if (!strncmp(k, "RECOMP_", 7) || !strncmp(k, "JSRF_", 5)) {
+                setenv(k, v, 1);
+                opt_note(" %s=%s", k, v);
+            } else {
+                opt_note(" %s=? (not an option)%s", k, "");
+            }
         }
         fclose(f);
     }
@@ -699,7 +737,7 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     /* The base addr2line offsets in a crash report are relative to. */
     fprintf(stderr, "[SWITCH] module base %p\n", (void *)module_base());
     fprintf(stderr, "[SWITCH] options:%s\n", s_env_files ? s_env_seen
-            : " none (no env.txt beside the .nro)");
+            : " none (no options.txt beside the .nro)");
 
     prepare_game_folder(game);
     if (chdir(game) != 0)
