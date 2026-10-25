@@ -164,7 +164,7 @@ cmake -S port -B "$WORK_DIR/build-switch" \
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"
 
 NRO="$(find "$WORK_DIR/build-switch" -name '*.nro' | head -1)"
-ELF="$(find "$WORK_DIR/build-switch" -name 'jsrf_recomp' -type f | head -1)"
+ELF="$(find "$WORK_DIR/build-switch" -name 'jsrf_recomp.elf' -type f | head -1)"
 MAP="$(find "$WORK_DIR/build-switch" -name 'jsrf_recomp.map' | head -1)"
 [ -n "$NRO" ] || die "build finished but no .nro was produced"
 
