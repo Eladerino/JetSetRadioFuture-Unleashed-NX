@@ -159,8 +159,6 @@ static volatile LONG g_nv2a_ack_stop = 0;
  * old period as its timeout, so a kick is served in microseconds and nothing
  * else changes. RECOMP_NV2A_KICK=0 turns both off (polling only, as before).
  */
-/* The flush-ack thread below is on (it also moves GET, see the ack loop). */
-static int s_flush_ack = -1;
 #if !defined(_WIN32) || defined(XBOXRECOMP_WIN_GL)
 #include <pthread.h>
 #include <sched.h>
@@ -246,8 +244,14 @@ static int nv2a_ack_wait(long us)
  * thread sleeps until xbox_nv2a_hurry(1) and clears the bit until
  * hurry(0); it never touches the pushbuffer.
  *
- * RECOMP_NV2A_FLUSH_ACK=1 turns it on, =0 off; it is on by default on the
- * Switch, where the driver's cost made the wait show, and off elsewhere. */
+ * RECOMP_NV2A_FLUSH_ACK=1 turns it on; it is off by default. Not safe yet:
+ * GET is published before the walk reads the segment, so a title that is
+ * no longer held at KickOff can wrap the ring and rewrite it under the
+ * walk (on the Switch: a stray CALL into unmapped memory before the title
+ * screen). Publishing GET after the walk instead sent JSRF into D3D's
+ * make-space wait (0x0019151B) for good on the loading screen. Walking a
+ * copy of the segment is the likely way to make it safe. */
+static int s_flush_ack = -1;
 static pthread_mutex_t s_flush_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  s_flush_cv = PTHREAD_COND_INITIALIZER;
 static void nv2a_flush_wake(void)
@@ -280,11 +284,7 @@ static DWORD WINAPI nv2a_flush_ack_thread(LPVOID param)
 static void nv2a_flush_ack_start(void *regs)
 {
     const char *e = getenv("RECOMP_NV2A_FLUSH_ACK");
-#if defined(__SWITCH__)
-    s_flush_ack = e ? atoi(e) : 1;
-#else
     s_flush_ack = e ? atoi(e) : 0;
-#endif
     if (s_flush_ack > 0 && !CreateThread(NULL, 0, nv2a_flush_ack_thread, regs, 0, NULL))
         s_flush_ack = 0;
     if (s_flush_ack > 0)
@@ -813,9 +813,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             volatile uint32_t *get =
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
-            /* With the flush-ack thread on, GET moves after the walk below
-             * has read the segment instead (see there). */
-            if (*get != *put && !(s_flush_ack > 0 && s_nv2a_trace)) {
+            if (*get != *put) {
                 *get = *put;
             }
         }
@@ -889,16 +887,6 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     }
                 }
                 last_put = put; last_put_ms = now_ms;
-                /* GET says how far the GPU has read, and D3D reuses the ring
-                 * behind it. Moved before the walk, it told the title a
-                 * segment was consumed while it was still being read; with
-                 * KickOff held until the next pass that never mattered, but
-                 * once the flush-ack thread let the title run on, it wrapped
-                 * the ring and rewrote the segment under the walk, which
-                 * then took a stray data word for a CALL into unmapped
-                 * memory (Switch, before the title screen). */
-                if (s_flush_ack > 0)
-                    *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET) = put;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET
                  * tells those apart -- D3D waits for GET to reach PUT before it
