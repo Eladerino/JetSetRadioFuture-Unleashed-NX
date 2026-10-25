@@ -2309,9 +2309,11 @@ void sub_00194210(void)
  * branch, which waits for GET -- and GET moves at every pass of the GPU
  * thread. */
 extern void sub_001910E0_gen(void);
+extern void xbox_nv2a_swm_stats(unsigned long *, unsigned long *);
+extern int xbox_nv2a_swm_in_flight(void);
 void sub_001910E0(void)
 {
-    static int force = -1, spin = -1;
+    static int force = -1, spin = -1, spin_log = -1;
     uint32_t from = GARG(0);
     if (force < 0) {
         const char *e = getenv("JSRF_TEST_MAKESPACE_WAIT");
@@ -2321,7 +2323,41 @@ void sub_001910E0(void)
         const char *e = getenv("RECOMP_NV2A_FLUSH_ACK");
         spin = (e && atoi(e) > 0) ? 1 : 0;
     }
+    if (spin_log < 0) {
+        const char *e = getenv("JSRF_SPIN_LOG");
+        spin_log = (e && e[0] == '1') ? 1 : 0;
+    }
     sub_001910E0_gen();
+    /* JSRF_SPIN_LOG=1 (options.txt, with fast_gpu=1): once a second while
+     * the make-space caller keeps asking, say what it is actually told --
+     * the real distance before any clamp, the DMA pointers it is supposedly
+     * waiting on, and the software-method state. The 25 Oct fast_gpu run
+     * spun inside sub_00191440 for 60+ s with DMA_PUT == DMA_GET and the
+     * ack thread idle, so one of these values is not what the spin thinks
+     * it is. If these lines STOP while the game is frozen, the loop has
+     * stopped calling here at all, which is its own answer: the exit it
+     * waits on is not the distance. */
+    if (spin_log && spin && from == 0x001914C6u) {
+        static unsigned long calls, shown_calls;
+        static double next;
+        double now = jsrf_now();
+        calls++;
+        if (now >= next) {
+            uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+            uint32_t put = *(volatile uint32_t *)(m + 0xFD800040u);
+            uint32_t get = *(volatile uint32_t *)(m + 0xFD800044u);
+            unsigned long raised = 0, dropped = 0;
+            xbox_nv2a_swm_stats(&raised, &dropped);
+            fprintf(stderr,
+                "  [SPIN] make-space poll: %lu calls (+%lu), real distance %u%s, "
+                "DMA_PUT=0x%08X DMA_GET=0x%08X, swm raised=%lu dropped=%lu in_flight=%d\n",
+                calls, calls - shown_calls, g_eax,
+                g_eax >= 0x8000u ? " (clamped to 0x7FFF)" : "",
+                put, get, raised, dropped, xbox_nv2a_swm_in_flight());
+            shown_calls = calls;
+            next = now + 1.0;
+        }
+    }
     if (spin && !force && from == 0x001914C6u && g_eax >= 0x8000u) {
         static unsigned long n;
         if (n++ < 3)
