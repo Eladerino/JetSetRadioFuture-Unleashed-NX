@@ -436,6 +436,11 @@ static u32 app_core_mask(void)
     return mask;
 }
 
+/* The engine's threads, for the sampling profiler below. */
+#define MAX_PROF_THREADS 32
+static struct { Handle h; unsigned id; char what[8]; } s_threads[MAX_PROF_THREADS];
+static volatile int s_nthreads;
+
 void sw_thread_spread(const char *what, unsigned id);
 void sw_thread_spread(const char *what, unsigned id)
 {
@@ -446,6 +451,14 @@ void sw_thread_spread(const char *what, unsigned id)
     for (c = 0; c < 3; c++) if (mask & (1u << c)) cores[n++] = c;
     /* core 0 last: the main thread and the system's work live there */
     ideal = cores[(__atomic_fetch_add(&next, 1, __ATOMIC_RELAXED) + 1) % n];
+    {
+        int k = __atomic_fetch_add(&s_nthreads, 1, __ATOMIC_RELAXED);
+        if (k < MAX_PROF_THREADS) {
+            s_threads[k].id = id;
+            snprintf(s_threads[k].what, sizeof s_threads[k].what, "%s", what);
+            __atomic_store_n(&s_threads[k].h, threadGetCurHandle(), __ATOMIC_RELEASE);
+        }
+    }
     rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, ideal, mask);
     fprintf(stderr, "[SWITCH] thread %s %u: cores 0x%X, prefers %d%s\n",
             what, id, mask, ideal, R_SUCCEEDED(rc) ? "" : " (refused)");
@@ -513,6 +526,90 @@ static void perf_reporter(void *arg)
     }
 }
 
+/* ---- sampling profiler (JSRF_SAMPLE=1 in <base>/env) ------------------
+ *
+ * Every two milliseconds each engine thread is paused for an instant and
+ * its program counter read (svcSetThreadActivity, svcGetThreadContext3:
+ * the kernel hands a process its own paused threads' registers). Every
+ * ten seconds the busiest addresses per thread go to the log as offsets
+ * into the .nro; tools/switch/prof.sh turns them into function names
+ * with addr2line, on the machine that has the .elf. A thread asleep in
+ * the kernel is counted at the svc it sleeps in, so waiting shows up as
+ * waiting rather than vanishing. */
+#define PROF_SLOTS 8192
+typedef struct { u64 pc; u32 n; } ProfSlot;
+static ProfSlot s_prof[MAX_PROF_THREADS][PROF_SLOTS];
+static u32 s_prof_total[MAX_PROF_THREADS], s_prof_lost[MAX_PROF_THREADS];
+
+static void prof_add(int t, u64 pc)
+{
+    u32 i = (u32)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1), k;
+    for (k = 0; k < 32; k++, i = (i + 1) & (PROF_SLOTS - 1)) {
+        if (s_prof[t][i].pc == pc) { s_prof[t][i].n++; return; }
+        if (!s_prof[t][i].pc) { s_prof[t][i].pc = pc; s_prof[t][i].n = 1; return; }
+    }
+    s_prof_lost[t]++;
+}
+
+static void prof_dump(u64 base)
+{
+    int t, nt = s_nthreads < MAX_PROF_THREADS ? s_nthreads : MAX_PROF_THREADS;
+    for (t = 0; t < nt; t++) {
+        enum { TOP = 24 };
+        ProfSlot top[TOP];
+        int nt2 = 0, i, j;
+        u32 total = s_prof_total[t];
+        if (total < 50) continue;
+        for (i = 0; i < PROF_SLOTS; i++) {
+            ProfSlot sl = s_prof[t][i];
+            if (!sl.n) continue;
+            if (nt2 < TOP) top[nt2++] = sl;
+            else if (sl.n > top[TOP - 1].n) top[TOP - 1] = sl;
+            else continue;
+            for (j = nt2 - 1; j > 0 && top[j].n > top[j - 1].n; j--) {
+                ProfSlot x = top[j]; top[j] = top[j - 1]; top[j - 1] = x;
+            }
+        }
+        fprintf(stderr, "[SWPROF] thread %s %u: %u samples\n",
+                s_threads[t].what, s_threads[t].id, total);
+        for (i = 0; i < nt2; i++) {
+            u64 pc = top[i].pc;
+            if (pc >= base && pc < base + 0x10000000ull)
+                fprintf(stderr, "[SWPROF]   %5.1f%%  nro+0x%llx\n",
+                        100.0 * top[i].n / total, (unsigned long long)(pc - base));
+            else
+                fprintf(stderr, "[SWPROF]   %5.1f%%  0x%llx (outside the .nro)\n",
+                        100.0 * top[i].n / total, (unsigned long long)pc);
+        }
+        memset(s_prof[t], 0, sizeof s_prof[t]);
+        s_prof_total[t] = s_prof_lost[t] = 0;
+    }
+}
+
+static void prof_sampler(void *arg)
+{
+    u64 base = module_base(), last = armGetSystemTick();
+    (void)arg;
+    for (;;) {
+        int t, nt = s_nthreads < MAX_PROF_THREADS ? s_nthreads : MAX_PROF_THREADS;
+        svcSleepThread(2000000ull);
+        for (t = 0; t < nt; t++) {
+            Handle h = __atomic_load_n(&s_threads[t].h, __ATOMIC_ACQUIRE);
+            ThreadContext ctx;
+            if (!h || R_FAILED(svcSetThreadActivity(h, ThreadActivity_Paused))) continue;
+            if (R_SUCCEEDED(svcGetThreadContext3(&ctx, h))) {
+                prof_add(t, ctx.pc.x);
+                s_prof_total[t]++;
+            }
+            svcSetThreadActivity(h, ThreadActivity_Runnable);
+        }
+        if (armTicksToNs(armGetSystemTick() - last) >= 10000000000ull) {
+            prof_dump(base);
+            last = armGetSystemTick();
+        }
+    }
+}
+
 static void start_perf_log(void)
 {
     static Thread samplers[3], reporter;
@@ -525,6 +622,15 @@ static void start_perf_log(void)
             threadStart(&samplers[c]);
     if (R_SUCCEEDED(threadCreate(&reporter, perf_reporter, NULL, NULL, 0x8000, 0x2C, -2)))
         threadStart(&reporter);
+    if (getenv("JSRF_SAMPLE") && atoi(getenv("JSRF_SAMPLE")) > 0) {
+        static Thread sampler;
+        /* above the engine's threads, so a sample lands when it is due */
+        if (R_SUCCEEDED(threadCreate(&sampler, prof_sampler, NULL, NULL, 0x8000, 0x24, -2))) {
+            svcSetThreadCoreMask(sampler.handle, 0, app_core_mask());
+            threadStart(&sampler);
+            fprintf(stderr, "[SWPROF] sampling every 2 ms, reported every 10 s\n");
+        }
+    }
 }
 
 static void *host_thread(void *p)
