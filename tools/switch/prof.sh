@@ -32,7 +32,7 @@ grep -a -o 'nro+0x[0-9a-f]*' "$LOG" | sed 's/nro+//' | sort -u > "$tmp/addrs" ||
 "$ADDR2LINE" -f -C -e "$ELF" $(cat "$tmp/addrs") | paste - - > "$tmp/names"
 paste "$tmp/addrs" "$tmp/names" > "$tmp/map"
 
-awk -v map="$tmp/map" '
+LC_ALL=C awk -v map="$tmp/map" '
     BEGIN {
         while ((getline l < map) > 0) {
             split(l, f, "\t")
