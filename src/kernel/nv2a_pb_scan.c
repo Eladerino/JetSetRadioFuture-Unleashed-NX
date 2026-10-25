@@ -289,6 +289,10 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
 static uint32_t pb_walk_sub(uint32_t target_va)
 {
     uint32_t before = s_tot_words, j, hops = 0;
+    /* A target past the end of RAM is not a call: the walk has lost its
+     * place and is reading data as commands. Following it faulted the
+     * Switch build (a CALL to 0x84AF04AC, 75 MB in). */
+    if ((target_va & 0x0FFFFFFFu) >= 64u * 1024u * 1024u) return 0;
     j = nv2a_pb_scan(target_va, target_va + 0x400000u);
     while (j && hops++ < 64) {
         uint32_t t = 0x80000000u | (j & 0x0FFFFFFFu);
