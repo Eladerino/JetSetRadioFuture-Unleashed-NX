@@ -419,6 +419,7 @@ static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "profile",      "RECOMP_GL_PROFILE",   1 },
     { "sample",       "JSRF_SAMPLE",         0 },
     { "log_direct",   "JSRF_LOG_DIRECT",     0 },
+    { "fast_gpu",     "RECOMP_NV2A_FLUSH_ACK", 0 },
 };
 
 /* What the options files said, for the log (which is not open yet here). */

@@ -177,6 +177,73 @@ void nv2a_pb_scan_report(void)
  * recorded pushbuffer was never drawn. RECOMP_PB_NOCALL=1: the old behaviour.
  */
 static uint32_t s_tot_calls, s_tot_returns;
+
+/*
+ * Walking a copy.
+ *
+ * GET is published before the walk reads the segment, and D3D reuses the
+ * ring behind GET. While the title was held at KickOff until the ack
+ * thread came round again, it could not get far enough to matter; with
+ * the flush-ack thread letting it run on, it wrapped the ring and rewrote
+ * a segment under the walk (on the Switch: a stray CALL into unmapped
+ * memory). So, with that thread on, the ack thread copies what it is
+ * about to acknowledge first (nv2a_pb_snapshot_take) and the walk reads
+ * those words from the copy. Anything outside the copy -- a call's
+ * target, a jump's -- is still read where it is.
+ */
+static uint8_t *s_snap;
+static size_t   s_snap_cap;
+static struct { uint32_t lo, hi; size_t off; } s_win[2];
+static int      s_nwin;
+
+static void snap_add(uint32_t lo, uint32_t hi)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    size_t off = s_nwin ? s_win[s_nwin - 1].off + (s_win[s_nwin - 1].hi - s_win[s_nwin - 1].lo) : 0;
+    size_t n;
+    if (hi > (0x80000000u | (64u << 20))) hi = 0x80000000u | (64u << 20);
+    if (s_nwin >= 2 || hi <= lo) return;
+    n = hi - lo;
+    if (off + n > s_snap_cap) {
+        size_t cap = (off + n + 0xFFFFu) & ~(size_t)0xFFFFu;
+        uint8_t *b = (uint8_t *)realloc(s_snap, cap);
+        if (!b) return;
+        s_snap = b;
+        s_snap_cap = cap;
+    }
+    memcpy(s_snap + off, mem + lo, n);
+    s_win[s_nwin].lo = lo;
+    s_win[s_nwin].hi = hi;
+    s_win[s_nwin].off = off;
+    s_nwin++;
+}
+
+/* last_put and put as the ack loop reads them (physical). Mirrors the
+ * ranges its walk will cover. */
+void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put);
+void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
+{
+    uint32_t from = 0x80000000u | (last_put & 0x0FFFFFFFu);
+    uint32_t to   = 0x80000000u | (put & 0x0FFFFFFFu);
+    s_nwin = 0;
+    if (!last_put || put == last_put) return;
+    if (to > from) {
+        snap_add(from, to - from > 0x400000u ? from + 0x400000u : to);
+    } else {
+        uint32_t back = (put & 0x0FFFFFFFu) < 0x40000u ? (put & 0x0FFFFFFFu) : 0x40000u;
+        snap_add(from, from + 0x20000u);
+        snap_add(to - back, to);
+    }
+}
+
+static inline uint32_t pb_word(const uint8_t *mem, uint32_t va)
+{
+    int i;
+    for (i = 0; i < s_nwin; i++)
+        if (va >= s_win[i].lo && va < s_win[i].hi - 3)
+            return *(const uint32_t *)(s_snap + s_win[i].off + (va - s_win[i].lo));
+    return *(const uint32_t *)(mem + va);
+}
 static int s_in_sub;
 static uint32_t pb_walk_sub(uint32_t target_va);
 
@@ -212,7 +279,7 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
         end_va = start_va + 0x400000u;
 
     while (va < end_va && words < 0x100000u) {
-        uint32_t w = *(const uint32_t *)(mem + va);
+        uint32_t w = pb_word(mem, va);
         va += 4;
         words++;
 
@@ -264,8 +331,7 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                  * acts. Keeping them on one decode means they can never
                  * disagree about what the stream said. */
                 if (s_exec_enabled)
-                    nv2a_pb_exec_method(subch, m,
-                                        *(const uint32_t *)(mem + va));
+                    nv2a_pb_exec_method(subch, m, pb_word(mem, va));
                 va += 4;
                 words++;
             }

@@ -137,6 +137,10 @@ static size_t xbox_TiledApertureSize(void)
 
 static HANDLE g_nv2a_ack_thread = NULL;
 static volatile LONG g_nv2a_ack_stop = 0;
+/* The flush-ack thread (below) is on; the walk's last PUT and the PUT the
+ * ack loop copied up to, for walking a copy of the segment. */
+static int s_flush_ack = -1;
+static uint32_t s_pb_last_put, s_pb_snap_put;
 
 /*
  * Waking the "GPU" when the title kicks it.
@@ -244,14 +248,12 @@ static int nv2a_ack_wait(long us)
  * thread sleeps until xbox_nv2a_hurry(1) and clears the bit until
  * hurry(0); it never touches the pushbuffer.
  *
- * RECOMP_NV2A_FLUSH_ACK=1 turns it on; it is off by default. Not safe yet:
- * GET is published before the walk reads the segment, so a title that is
- * no longer held at KickOff can wrap the ring and rewrite it under the
- * walk (on the Switch: a stray CALL into unmapped memory before the title
- * screen). Publishing GET after the walk instead sent JSRF into D3D's
- * make-space wait (0x0019151B) for good on the loading screen. Walking a
- * copy of the segment is the likely way to make it safe. */
-static int s_flush_ack = -1;
+ * RECOMP_NV2A_FLUSH_ACK=1 turns it on; off by default while it is being
+ * tried. A title no longer held at KickOff can wrap the ring past a GET
+ * that was published before the walk read the segment, so with this on
+ * the walk reads a copy taken before GET moves (nv2a_pb_snapshot_take).
+ * Publishing GET after the walk instead sent JSRF into D3D's make-space
+ * wait (0x0019151B) for good on the loading screen. */
 static pthread_mutex_t s_flush_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  s_flush_cv = PTHREAD_COND_INITIALIZER;
 static void nv2a_flush_wake(void)
@@ -813,8 +815,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             volatile uint32_t *get =
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
-            if (*get != *put) {
-                *get = *put;
+            uint32_t p = *put;
+            /* With the flush-ack thread on, copy what is about to be
+             * acknowledged before GET says so (nv2a_pb_scan.c), and walk
+             * exactly that much below. */
+            if (s_flush_ack > 0 && s_nv2a_trace) {
+                extern void nv2a_pb_snapshot_take(uint32_t, uint32_t);
+                nv2a_pb_snapshot_take(s_pb_last_put, p);
+                s_pb_snap_put = p;
+            }
+            if (*get != p) {
+                *get = p;
             }
         }
         fence_mirrors_tick();
@@ -834,11 +845,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              * title's pushbuffer writer has got to; if it never moves, nothing
              * is being drawn and the missing piece is upstream of the GPU. */
             static DWORD  last_put_ms;
-            static uint32_t last_put;
             DWORD now_ms = GetTickCount();
-            uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
-            if (put != last_put || (now_ms - last_put_ms) > 2000) {
-                int idle = put == last_put, reported = 0;
+            uint32_t put = s_flush_ack > 0 ? s_pb_snap_put
+                         : *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+            if (put != s_pb_last_put || (now_ms - last_put_ms) > 2000) {
+                int idle = put == s_pb_last_put, reported = 0;
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern uint32_t nv2a_pb_scan(uint32_t, uint32_t);
@@ -859,17 +870,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      * The contiguous window IS the physical-address view, so
                      * OR-ing its base is the documented round trip, not a
                      * guess. */
-                    if (last_put && put > last_put) {
-                        nv2a_pb_scan(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
+                    if (s_pb_last_put && put > s_pb_last_put) {
+                        nv2a_pb_scan(XBOX_CONTIG_BASE | (s_pb_last_put & 0x0FFFFFFFu),
                                      XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
-                    } else if (last_put && put < last_put) {
+                    } else if (s_pb_last_put && put < s_pb_last_put) {
                         /* The ring wrapped: PUT went back to its start.
                          * The tail from the old PUT to the jump used to be
                          * skipped outright, and with it whatever the title
                          * had written there -- at worst the fence it was
                          * about to wait on. Walk the tail up to the jump,
                          * then from the jump's target to the new PUT. */
-                        uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
+                        uint32_t from = XBOX_CONTIG_BASE | (s_pb_last_put & 0x0FFFFFFFu);
                         uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
                         uint32_t j = nv2a_pb_scan(from, from + 0x20000u);
                         if (j) {
@@ -886,7 +897,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                         reported = 1;
                     }
                 }
-                last_put = put; last_put_ms = now_ms;
+                s_pb_last_put = put; last_put_ms = now_ms;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET
                  * tells those apart -- D3D waits for GET to reach PUT before it

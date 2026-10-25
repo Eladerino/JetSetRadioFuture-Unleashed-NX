@@ -273,6 +273,10 @@ EOF
             "# chasing a freeze; normally the log is written every 0.25 s." \
             "log_direct=0" \
             "" \
+            "# 1 = let the game hand work to the GPU thread without waiting" \
+            "# for it to finish the last batch (experimental)." \
+            "fast_gpu=0" \
+            "" \
             "# Any other engine variable can go here too as NAME=value" \
             "# (RECOMP_... or JSRF_...)." > "$EXPORT_DIR/options.txt"
     fi
