@@ -125,22 +125,6 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
     return xbox_translate_path(xbox_path, win_path, buf_size);
 }
 
-#if defined(__SWITCH__)
-/* An fd for a directory handle: a read-only open of an empty file kept
- * beside the game folder for the purpose. */
-static int switch_dir_fd(void)
-{
-    static const char ph[] = "sdmc:/switch/jsrf-unleashed/.dir-handle";
-    int fd = open(ph, O_RDONLY);
-    if (fd < 0) {
-        int c = open(ph, O_WRONLY | O_CREAT, 0644);
-        if (c >= 0) close(c);
-        fd = open(ph, O_RDONLY);
-    }
-    return fd;
-}
-#endif
-
 NTSTATUS __stdcall xbox_NtCreateFile(
     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
@@ -874,6 +858,22 @@ static NTSTATUS errno_to_status(int e)
         default:      return STATUS_UNSUCCESSFUL;
     }
 }
+
+#if defined(__SWITCH__)
+/* An fd for a directory handle: a read-only open of an empty file kept
+ * beside the game folder for the purpose. */
+static int switch_dir_fd(void)
+{
+    static const char ph[] = "sdmc:/switch/jsrf-unleashed/.dir-handle";
+    int fd = open(ph, O_RDONLY);
+    if (fd < 0) {
+        int c = open(ph, O_WRONLY | O_CREAT, 0644);
+        if (c >= 0) close(c);
+        fd = open(ph, O_RDONLY);
+    }
+    return fd;
+}
+#endif
 
 NTSTATUS __stdcall xbox_NtCreateFile(
     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
