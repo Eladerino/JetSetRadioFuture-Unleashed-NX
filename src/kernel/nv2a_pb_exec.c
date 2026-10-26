@@ -1453,6 +1453,20 @@ static uint32_t dma_object_base(uint32_t handle, int *ok)
  * report says whether and how often the title relies on them. */
 static unsigned long g_swm_count[17];
 
+/* A non-incrementing run of index words, handed over whole when only the
+ * OpenGL backend wants them (no software rasteriser kept alongside): see
+ * nv2a_gl_indices. Returns 0 when the caller must go word by word. */
+int nv2a_pb_exec_indices(uint32_t subch, uint32_t method, const uint32_t *w, uint32_t n)
+{
+    static int keep_soft = -1;
+    if (subch != 0 || (method != 0x1800 && method != 0x1808) || !nv2a_gl_enabled())
+        return 0;
+    if (keep_soft < 0) keep_soft = getenv("RECOMP_PB_SOFT") ? 1 : 0;
+    if (keep_soft) return 0;
+    nv2a_gl_indices(method, w, n);
+    return 1;
+}
+
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
     if (method == 0x0100 && param) {

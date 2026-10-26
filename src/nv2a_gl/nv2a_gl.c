@@ -9397,6 +9397,38 @@ static void methval_note(uint32_t method, uint32_t param)
     }
 }
 
+/* A run of index words (NV097_ARRAY_ELEMENT16 / 32) at once. They come by
+ * the thousand per draw, and one at a time each went through the executor
+ * and every ranged check above the switch to reach a two-line case: the
+ * Switch profile put nv2a_gl_method's own time at 13% of the GPU thread,
+ * nearly all of it here. Same effect as calling nv2a_gl_method per word. */
+void nv2a_gl_indices(uint32_t method, const uint32_t *w, uint32_t n)
+{
+    uint32_t i;
+    if (!nv2a_gl_enabled() || g_failed) return;
+    if (method != M_ARRAY_ELEMENT16 && method != M_ARRAY_ELEMENT32) {
+        for (i = 0; i < n; i++) nv2a_gl_method(method, w[i]);
+        return;
+    }
+    if (!S.const_attr_init) {           /* first method of the run: the slow path */
+        nv2a_gl_method(method, w[0]);
+        w++; n--;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t param = w[i];
+        methval_note(method, param);
+        split_batch_if_state_moved();
+        if (method == M_ARRAY_ELEMENT16) {
+            if (S.idx_count + 2 <= MAX_INDICES) {
+                S.idx[S.idx_count++] = param & 0xFFFF;
+                S.idx[S.idx_count++] = param >> 16;
+            }
+        } else if (S.idx_count < MAX_INDICES) {
+            S.idx[S.idx_count++] = param;
+        }
+    }
+}
+
 void nv2a_gl_method(uint32_t method, uint32_t param)
 {
     if (!nv2a_gl_enabled() || g_failed) return;

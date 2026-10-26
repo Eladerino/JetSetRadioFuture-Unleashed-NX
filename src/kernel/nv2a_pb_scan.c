@@ -42,6 +42,7 @@ static uint32_t s_tot_words, s_tot_unknown, s_tot_jumps, s_tot_segments;
 /* Executing is opt-in separately from surveying: a survey is read-only, while
  * the executor writes to guest memory. */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+extern int nv2a_pb_exec_indices(uint32_t subch, uint32_t method, const uint32_t *w, uint32_t n);
 extern void nv2a_pb_exec_report(void);
 static int s_exec_enabled = -1;
 static int s_scan_enabled = -1;
@@ -245,6 +246,7 @@ void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
 static inline uint32_t pb_word(const uint8_t *mem, uint32_t va)
 {
     int i;
+    if (!s_nwin) return *(const uint32_t *)(mem + va);
     for (i = 0; i < s_nwin; i++)
         if (va >= s_win[i].lo && va < s_win[i].hi - 3)
             return *(const uint32_t *)(s_snap + s_win[i].off + (va - s_win[i].lo));
@@ -335,6 +337,25 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
             uint32_t method =  w & 0x1FFCu;
             int noninc = (w & 0xE0000000u) == 0x40000000u;
 
+            /* Index runs whole (nv2a_pb_exec_indices): they are most of
+             * the words in a frame. RECOMP_PB_BULK=0 goes word by word. */
+            if (noninc && s_exec_enabled && !s_scan_enabled && subch == 0
+                && (method == 0x1800 || method == 0x1808) && count) {
+                static int bulk = -1;
+                static uint32_t buf[0x800];
+                uint32_t n = count;
+                if (bulk < 0) { const char *e = getenv("RECOMP_PB_BULK");
+                                bulk = e ? atoi(e) != 0 : 1; }
+                if (n > (end_va - va) / 4) n = (end_va - va) / 4;
+                if (bulk && n) {
+                    for (uint32_t i = 0; i < n; i++) buf[i] = pb_word(mem, va + i * 4);
+                    if (nv2a_pb_exec_indices(subch, method, buf, n)) {
+                        va += n * 4;
+                        words += n;
+                        continue;
+                    }
+                }
+            }
             for (uint32_t i = 0; i < count && va < end_va; i++) {
                 uint32_t m = noninc ? method : method + i * 4;
                 /* The inventory is only ever printed under RECOMP_PB_SCAN, so
