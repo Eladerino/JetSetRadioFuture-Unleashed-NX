@@ -8,8 +8,11 @@
 #   ./jsrf-unleashed                  play (asks where the game is, the first time)
 #   ./jsrf-unleashed /path/to/game    use that folder (or a disc image -- see below), and remember it
 #   ./jsrf-unleashed --choose         ask where the game is again
-#   ./jsrf-unleashed --scale N        internal resolution, 1 to 4 times 640x480 (default 2); remembered
+#   ./jsrf-unleashed --scale N        internal resolution, 1 to 6 times 640x480 (default 2; 6 is for
+#                                     a 4K screen); remembered
 #   ./jsrf-unleashed --fullscreen     start full screen
+#   ./jsrf-unleashed --portable       keep the settings, cache, logs and unpacked disc images in this
+#                                     folder from now on (delete portable.txt to undo)
 #   ./jsrf-unleashed --install        add JSRF Unleashed to your applications menu
 #   ./jsrf-unleashed --version        which version this is
 #
@@ -19,9 +22,31 @@
 set -u
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/jsrf-unleashed"
-CFG="$CFG_DIR/settings"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/jsrf-unleashed"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/jsrf-unleashed"
+# Portable: with a file named portable.txt in this folder (--portable makes
+# it), the settings, the cache, the logs and unpacked disc images are kept
+# here instead of in ~/.config, ~/.local/share and ~/.local/state, so the
+# whole folder can move -- to another machine, onto a USB drive. Saves are in
+# the game's folder (UDATA) either way; a game folder inside this one is
+# remembered relative to it.
+PORTABLE=0
+for a in "$@"; do
+    if [ "$a" = --portable ] && [ ! -f "$HERE/portable.txt" ]; then
+        if printf '%s\n' "While this file is here, JSRF Unleashed keeps its settings, cache, logs and" \
+                         "unpacked disc images in this folder. Delete it to keep them in your home" \
+                         "folder instead." > "$HERE/portable.txt" 2>/dev/null; then
+            # Switching with settings already kept: take them along.
+            [ -f "$CFG_DIR/settings" ] && [ ! -f "$HERE/settings" ] && cp "$CFG_DIR/settings" "$HERE/settings"
+        else
+            printf 'This folder cannot be written to, so it cannot be a portable install: %s\n' "$HERE" >&2
+        fi
+    fi
+done
+if [ -f "$HERE/portable.txt" ]; then
+    PORTABLE=1; CFG_DIR="$HERE"; DATA="$HERE"; STATE="$HERE"
+fi
+CFG="$CFG_DIR/settings"
 mkdir -p "$CFG_DIR" "$DATA/save" "$STATE/logs"
 
 cfg_get() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | tail -n 1; }
@@ -89,7 +114,8 @@ relay() {
     done
 }
 
-# A disc image: unpacked once into ~/.local/share/jsrf-unleashed/<name>, by the
+# A disc image: unpacked once into ~/.local/share/jsrf-unleashed/<name> (portable:
+# into this folder), by the
 # engine (--unpack-iso: the unpacker the other apps use, port/ios/xiso.c), so
 # nothing else has to be installed. Checked first, so a zip, another game's
 # disc or another build of the game is named before anything is unpacked.
@@ -167,22 +193,50 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --choose)     CHOOSE=1 ;;
         --scale)      shift
-                      case "${1:-}" in [1-4]) cfg_set scale "$1" ;;
-                                       *) fail "--scale takes 1, 2, 3 or 4." ;; esac ;;
+                      case "${1:-}" in [1-6]) cfg_set scale "$1" ;;
+                                       *) fail "--scale takes 1 to 6 (6 is for a 4K screen)." ;; esac ;;
         --fullscreen) FULLSCREEN=1 ;;
         --install)    install_desktop; exit 0 ;;
         --version)    cat "$HERE/VERSION" 2>/dev/null || "$HERE/bin/jsrf_recomp" --version; exit 0 ;;
-        -h|--help)    sed -n '4,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --portable)   ;;
+        -h|--help)    sed -n '4,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            GAME="$1" ;;
     esac
     shift
 done
 
+# The remembered game folder, relative to this folder when portable and inside it.
+game_recall() {
+    local g; g="$(cfg_get game_dir)"
+    case "$g" in "") ;; /*) printf '%s' "$g" ;; *) printf '%s' "$HERE/$g" ;; esac
+}
+game_store() {
+    if [ "$PORTABLE" = 1 ] && [ "${1#"$HERE"/}" != "$1" ]; then cfg_set game_dir "${1#"$HERE"/}"
+    else cfg_set game_dir "$1"; fi
+}
+# Portable, and nothing remembered: the one game folder (or disc image) put in this folder.
+game_beside() {
+    local d found=""
+    for d in "$HERE"/*/; do
+        d="${d%/}"
+        is_game "$d" || continue
+        [ -n "$found" ] && return 0
+        found="$d"
+    done
+    if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+    local imgs
+    mapfile -t imgs < <(find "$HERE" -maxdepth 1 -type f \( -iname '*.iso' -o -iname '*.xiso' \) 2>/dev/null | sort)
+    [ "${#imgs[@]}" -eq 1 ] && printf '%s' "${imgs[0]}"
+}
+
 # Which game folder: the argument, else the remembered one, else ask.
+if [ -z "$GAME" ] && [ "$CHOOSE" = 0 ] && [ "$PORTABLE" = 1 ] && ! is_game "$(game_recall)"; then
+    GAME="$(game_beside)"
+fi
 if [ -n "$GAME" ]; then
     GAME="$(pick "$GAME")" || exit 1
-elif [ "$CHOOSE" = 0 ] && is_game "$(cfg_get game_dir)"; then
-    GAME="$(cfg_get game_dir)"
+elif [ "$CHOOSE" = 0 ] && is_game "$(game_recall)"; then
+    GAME="$(game_recall)"
 else
     GAME="$(ask_game)"
     [ -n "$GAME" ] || exit 0
@@ -198,9 +252,9 @@ is_game "$GAME" || fail "$(printf "That folder has no default.xbe and Media in i
 # says what the files are; exit 3 = another build or another game.
 why="$(engine --check-game "$GAME" 2>/dev/null)"
 case $? in 2|3) refuse "$why" ;; esac
-cfg_set game_dir "$GAME"
+game_store "$GAME"
 
-SCALE="$(cfg_get scale)"; case "$SCALE" in [1-4]) ;; *) SCALE=2 ;; esac
+SCALE="$(cfg_get scale)"; case "$SCALE" in [1-6]) ;; *) SCALE=2 ;; esac
 
 # The previous run's log is kept (five of them), then a fresh one.
 LOG="$STATE/last-run.log"

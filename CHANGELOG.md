@@ -10,6 +10,211 @@ its version. Downloads are on the
 [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases)
 page.
 
+## 0.5.7 — 26 October 2026
+
+What players reported from 0.5.4 to 0.5.6, and two things they asked for. Every
+platform is new in 0.5.7.
+
+- **Rails, rafters and walkways are no longer missing.** The renderer kept a
+  batch's indices in an array of 16,384 and dropped whatever came after,
+  without a word; the console has no such limit. Most of the game's batches
+  are far smaller, but a few areas send their scenery in longer ones: on
+  Kibogaoka Hill a triangle list of 20,745 indices every frame, in the
+  Fortified Residential Zone lists of up to 35,580. Their last thousands of
+  triangles were never drawn: on Kibogaoka Hill, among others, a walkway
+  and its railing across the back of the square at the start; in the
+  Fortified Residential Zone, up to about 12,000 triangles of scenery a frame.
+  Batches are kept whole now (up to a million indices), and one past the
+  old limit is noted in the log (`[GL] big batch`). Thanks to the players
+  who reported it!
+- **The boost dash's haze no longer breaks up over shadows and glass.** The
+  boost effect draws the frame twice -- sharp, and a small distorted copy --
+  and blends the sharp one over the copy by its alpha. The frame is a 16-bit
+  surface with no alpha on the console, so that alpha is always 1 there; here
+  the targets kept whatever alpha a shadow, a pane of glass or a spray of
+  particles had written, and the distorted copy showed through, blocky and
+  smeared, exactly there. Surfaces with no alpha channel now keep none
+  (`RECOMP_GL_SURF_ALPHA=1`: as before).
+- **Less z-fighting in the distance.** Graffiti, windows and signs are drawn
+  over the walls they sit on. Two things could make them flicker against the
+  wall far away: the position worked out slightly differently by different
+  shaders -- it is invariant now -- and a depth buffer with its precision near
+  the camera. Depth is now kept reversed, in 32-bit floating point, wherever
+  the device allows it (Metal; OpenGL 4.5 or ARB_clip_control, which Windows
+  and Linux drivers have; OpenGL ES with EXT_clip_control), which puts the
+  precision in the distance. On the Mac's OpenGL and on older drivers depth
+  stays as it was; the log says which (`[GL] depth:`).
+  `RECOMP_GL_ZREV=0` and `RECOMP_GL_INVARIANT=0` turn either off.
+- **Up to 6× the resolution, for 4K screens.** The resolution menus
+  (Windows: Video menu and F9; Linux: F9; Mac: Video › Resolution) go to 5×
+  and 6×. 6× is 3840×2880: a 4K screen's width one pixel for one, and in
+  widescreen its 3840×2160 exactly. Android and iPhone stay at up to 4×.
+- **A portable install on Windows and Linux.** On the first start the Windows
+  build asks whether to keep its settings, cache, logs and unpacked disc
+  images beside **JSRF Unleashed.exe** (portable) or in
+  `%LOCALAPPDATA%\JSRF Unleashed`. A file named `portable.txt` beside the exe
+  is the switch: `--portable` makes it later (the settings come along), and
+  deleting it goes back. A game folder or disc image put in that folder is
+  found by itself and remembered relative to it, so the whole folder can move
+  to another computer or onto a USB drive. The Linux build has the same switch
+  (`portable.txt` beside `jsrf-unleashed`, `--portable`). Both launchers take
+  `--scale 1` to `6`.
+- For looking into missing geometry: `RECOMP_GL_PRIMLOG=<s>` counts draws and
+  vertices by primitive type every s seconds, and the draws dropped before
+  they reach the GPU, by reason.
+- Tested on a Mac, Metal and OpenGL, 0.5.6 against 0.5.7: Kibogaoka Hill
+  (the walkway missing in every one of twelve consecutive frames of 0.5.6,
+  there in every one of 0.5.7's) and the Fortified Residential Zone (the
+  batch sizes, and where on screen the part past the old limit lands); the
+  boost dash in the race against Beat on Dogenzaka Hill (the haze clean);
+  Dogenzaka Hill in seven missions with the batch log (none of its batches
+  goes past the old limit); then the release build on the title, on
+  Dogenzaka Hill with SMAA and MSAA 4× (Metal and OpenGL), in the Fortified
+  Residential Zone and on Kibogaoka Hill. Linux (Mesa): the attract demo,
+  depth reversed, and the portable switch. Windows (under Wine): the title
+  screen, depth reversed, the first-start question and the portable switch.
+  The Android and iPhone builds were built and checked, not run.
+
+## 0.5.6 — 25 October 2026
+
+Shadows, which a Windows player reported missing from 0.5.5: they had never
+been drawn, on any platform. Every platform is new in 0.5.6.
+
+- **Shadows are drawn.** The game draws its shadows with stencil volumes:
+  every frame the shadow volume of each character (made by a vertex
+  program) and of the scenery -- buildings, bridges, signs, rails -- is
+  counted into the stencil buffer, and then a black quad at half opacity is
+  drawn over the screen wherever the count says shadow. That quad is sent
+  one vertex at a time (the XDK's `D3DDevice_Begin` / `SetVertexData4f` /
+  `End`), a way of drawing the renderer did not know: such a batch arrived
+  with no vertices and drew nothing. The volumes were counted and the
+  shadows never shown. Now a skater's silhouette falls on the ground under
+  them, and the buildings and bridges shade the streets and whoever skates
+  through the shade. No other batch of this title is sent that way (the log
+  lists each kind, `[IMM]`).
+- Metal: the stencil reference is sent with the first draw of each pass. A
+  pass starts at 0, and the reference went only with draws that tested the
+  stencil, so a test after a pass's first draw could run against 0 -- with
+  the shadows drawn, the whole frame was darkened.
+- For looking into shadows: `RECOMP_GL_STENCILVIS=1` paints, in place of
+  the shadow pass, what the stencil buffer holds there;
+  `RECOMP_GL_SKIPVOL=1`/`2` leaves out the characters' or the scenery's
+  volumes; `RECOMP_GL_IMMEDIATE=0` leaves the one-vertex-at-a-time batches
+  out, as before. `RECOMP_GL_METHTRACE` and `RECOMP_GL_VOLDUMP` log the
+  methods between two draws and the scenery's volumes.
+- Tested on a Mac (Metal and OpenGL): the title's attract demo and Dogenzaka
+  Hill, free and in the race against Beat, with the stencil buffer painted
+  in (Metal and OpenGL identical) and with the characters' or the scenery's
+  volumes left out; then the release build on the title and on Dogenzaka
+  Hill with SMAA and MSAA 4×, on Metal and on OpenGL. Linux (Mesa): the
+  attract demo, with its shadows. Windows (under Wine): the game starts and
+  runs its title screen. The Android and iPhone builds were built and
+  checked, not run.
+
+## 0.5.5 — 24 October 2026
+
+The picture: the game's own mipmaps with anisotropic filtering, anti-aliasing,
+and three rendering faults found while looking into a Windows player's
+report. Every platform is new in 0.5.5.
+
+- **Distant surfaces are drawn from the game's own mipmaps.** Every texture
+  was sampled from its full-size image, so a facade a few hundred units away
+  read it at several texels a pixel and shimmered as the camera moved --
+  what the player took for z-fighting on distant windows. The console
+  sampled the chain of smaller images stored in the texture after its base
+  level; that chain is decoded now (swizzled or DXT-compressed, level by
+  level), as deep as the texture's registers allow, and sampled with 16×
+  anisotropic filtering. `RECOMP_GL_TITLE_MIPS=0` and `RECOMP_GL_ANISO=1`
+  turn them off. A chain made by box-filtering the base image is still not
+  used: on this game's texture atlases it bleeds the pieces into each other.
+- **Anti-aliasing: SMAA and MSAA**, either or both, off by default. SMAA is
+  the reference implementation (Jimenez et al., MIT; its licence is in
+  NOTICE), a pass over each finished frame. MSAA draws every edge with 2, 4
+  or 8 samples a pixel; on OpenGL it follows
+  [spriteice's](https://github.com/spriteice/JetSetRadioFuture-Unleashed/commit/e406839d4f3c28618faa3f805a4a2ac96b9afba9),
+  and anisotropic filtering came first in his fork too
+  ([46c523b](https://github.com/spriteice/JetSetRadioFuture-Unleashed/commit/46c523b19fe1a0f379c44a886df51bc6fe33438b)).
+  Mac: Video › Anti-aliasing (on Metal, a new MSAA count restarts the game).
+  Windows: the Video menu and F8. Linux: F8. iPhone and iPad: the ⚙ sheet.
+  Not on Android yet.
+- **Reflective glass and panels reflect.** The console's transform unit makes
+  the texture coordinates of reflective surfaces from the direction each one
+  faces (`NV097_SET_TEXGEN_*`; this game asks for the eye-space normal), and
+  the renderer did not: those surfaces sampled their reflection texture
+  wherever their own coordinates pointed. On Dogenzaka Hill's footbridge that
+  was dark bars across the roof and glass in odd stripes, shimmering as the
+  camera moved. Normal, reflection and sphere maps are made now, as xemu
+  makes them.
+- **A texture sampled two ways is two textures.** Whichever draw used a
+  texture first fixed its filtering and wrapping for every later draw. The
+  characters are shaded through one shared texture of tone ramps, which some
+  of their materials read clamped and others wrapped, so an arm or a face
+  could take another material's tones depending on what was drawn first.
+- Tested on a Mac (Metal): Dogenzaka Hill, free and in the race against
+  Beat, each change compared on consecutive frames of one run, with and
+  without it; then the release build on the title and on Dogenzaka Hill
+  with SMAA and MSAA 4×, on Metal and on OpenGL. Linux (Mesa) and Windows
+  (under Wine): the game starts and runs its title screen, Windows with
+  SMAA on. The Android and iPhone builds were built and checked, not run.
+
+## 0.5.4 — 22 October 2026
+
+More of **spriteice**'s work from
+[his fork](https://github.com/spriteice/JetSetRadioFuture-Unleashed/tree/TESTING):
+fixes for the hitching some Windows players have seen, a quicker hand-over
+between game threads everywhere, and what it takes to build the game from
+your own disc, which could not be done before. Thank you again, spriteice!
+Each of these commits links the one of his it comes from. Every platform is
+new in 0.5.4.
+
+- **Windows: the engine's short waits last as long as asked.** They went
+  through winpthreads, part of the MinGW toolchain that builds the Windows
+  download, which waits whole milliseconds and then until GetTickCount64,
+  moving in 15.6 ms steps, says the time is up. On spriteice's PC (RTX 2080
+  Ti, 120 Hz) frame pacing's 1 ms slices took 2–3 ms on average and up to
+  17.5 ms, and the GPU thread's 200 µs wait took 12 ms when it timed out.
+  That is the wait the game's vertical-blank handler spins on with the guest
+  lock held, so every game thread waited with it: the timer thread held the
+  lock 13–37% of the time, against 2–5% on Linux. A player's 0.5.3 log (RTX
+  3070) has frames of 30 to 65 ms with no shader or texture work in them.
+  Both waits now use a high-resolution waitable timer: on spriteice's PC,
+  frames reaching the flip late went from 8–26% to 0.7%, and the timer
+  thread held the lock 4.8% of the time.
+- **A game thread hands the lock over without a pause.** When its time slice
+  ran out with another thread queueing, it stood back with Sleep(1): a
+  millisecond or more, with no game thread running for much of it. It now
+  waits until the other has taken the lock, at most 1 ms
+  (`RECOMP_HANDOFF_US`). On a Mac in 99th Street against 0.5.3 (Metal, 225 s
+  each): the lock without a holder 1.5% of the time instead of 7.1%, 727
+  frames late at the flip instead of 1,288 (of about 13,650), and 8 slow
+  frames instead of 34.
+- **Building from source works.** The repository now has spriteice's toolkit
+  (xboxrecomp v0.15.0's and v0.16.0's pipeline, with his disassembler fixes),
+  the runtime pieces the code it generates calls, and the steps in the
+  README. Before, code generated from a disc could not link: the downloads'
+  generated code came from an earlier version of the tools, with two tables
+  (`recomp_seeded.c`, `recomp_holes.c`) made by scripts that were never
+  committed. From a clean default.xbe, on a Mac and on Linux: 9333 of 9342
+  functions, none failed, and the same code on both. The Mac, Linux and
+  Android builds made from it build, and the Mac one plays 99th Street as
+  the downloads do. The downloads stay on the older generated code until the
+  new one has been played through.
+- Windows: MEM_DECOMMIT of guest memory failed every time (guest RAM is one
+  mapped view), about once a frame, each one a line flushed to
+  `xbox_kernel.log` with the guest lock held. The pages' access is taken away
+  instead, as on the other platforms.
+- Mac, Linux, iPhone and Android: a read at an offset is one `pread`, not a
+  seek and a read that another thread reading the same file could get
+  between.
+- The APU's and the NV2A's clocks no longer overflow: count × 10⁹ passed
+  INT64_MAX after 15 minutes of uptime at Windows' 10 MHz counter, and after
+  9 seconds at the 1 GHz the other platforms report.
+- Tested on a Mac in 99th Street against 0.5.3, as above: the same missions
+  reached and the same frame rate; with code generated from source, the
+  same. Linux and Windows (under Wine): the game starts and runs its title
+  screen; Wine does not have Windows' timer problem, so it cannot show that
+  fix. The Android and iPhone builds were built and checked, not run.
+
 ## 0.5.3 — 21 October 2026
 
 Fixes found by **spriteice**, who plays JSRF Unleashed on a ROG Xbox Ally X

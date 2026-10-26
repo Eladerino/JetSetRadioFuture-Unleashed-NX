@@ -642,9 +642,36 @@ static void se_frame(MCPXAPUState *d)
 
 int g_apu_throttle_resets; int64_t g_apu_throttle_lost_us;
 
+/* Above the game's own threads, as on Windows (mcpx_apu_init_standalone): a
+ * busy moment -- a frame of eight hundred draws, a shader being built, the
+ * shaders built ahead at a first start -- should delay the picture, not the
+ * sound this thread makes 5 ms at a time. On a Mac or an iPhone the class
+ * the system gives what the player is interacting with; on Linux and Android
+ * the nice value Android gives audio threads, where the system allows it
+ * (an ordinary Linux user cannot raise a thread, and it stays as it was). */
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <pthread/qos.h>
+static void apu_thread_priority(void)
+{
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+}
+#elif defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+static void apu_thread_priority(void)
+{
+    if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -16) != 0) { /* not allowed: as it was */ }
+}
+#else
+static void apu_thread_priority(void) { }
+#endif
+
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+    apu_thread_priority();
     /* RECOMP_APU_STATS: what the loop did each second -- frames through
      * the whole pipeline, and frames where the APU was not running (counter
      * mode off, front end trapped or halted), which re-send the previous

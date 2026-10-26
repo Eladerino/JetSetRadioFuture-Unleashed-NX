@@ -249,6 +249,24 @@ Java_com_jumatt_jsrfunleashed_JsrfActivity_nativeSetWidescreen(JNIEnv *env, jcla
     nv_window_request_widescreen(on ? 1 : 0);
 }
 
+/* The camera on the right stick (port/recomp_manual.c), as F7 switches it. */
+int  nv_window_pref_rstick_camera(void);
+void nv_window_request_rstick_camera(int on);
+
+JNIEXPORT jboolean JNICALL
+Java_com_jumatt_jsrfunleashed_JsrfActivity_nativeRstickCamera(JNIEnv *env, jclass cls)
+{
+    (void)env; (void)cls;
+    return nv_window_pref_rstick_camera() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_jumatt_jsrfunleashed_JsrfActivity_nativeSetRstickCamera(JNIEnv *env, jclass cls, jboolean on)
+{
+    (void)env; (void)cls;
+    nv_window_request_rstick_camera(on ? 1 : 0);
+}
+
 /* A line for the log, from the Java side. */
 JNIEXPORT void JNICALL
 Java_com_jumatt_jsrfunleashed_JsrfActivity_nativeLog(JNIEnv *env, jclass cls, jstring line)

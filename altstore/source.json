@@ -27,6 +27,42 @@
       },
       "versions": [
         {
+          "version": "0.5.7",
+          "buildVersion": "0.5.7",
+          "date": "2026-10-26T10:26:20Z",
+          "localizedDescription": "Rails, rafters and walkways that were missing (Kibogaoka Hill, the Fortified Residential Zone among them) are drawn again: the game sends that scenery in batches longer than the renderer kept. The boost dash's haze no longer breaks up over shadows and glass, and graffiti, windows and signs flicker less against their walls in the distance.",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.7/JSRF-Unleashed-iOS.ipa",
+          "size": 13359943,
+          "minOSVersion": "15.0"
+        },
+        {
+          "version": "0.5.6",
+          "buildVersion": "0.5.6",
+          "date": "2026-10-25T12:34:11Z",
+          "localizedDescription": "Shadows: skaters cast their shadows on the ground, and buildings and bridges shade the streets -- and whoever skates through the shade. The game worked them out every frame, but its last step, the one that darkens the shadowed places, was never drawn.",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.6/JSRF-Unleashed-iOS.ipa",
+          "size": 13354057,
+          "minOSVersion": "15.0"
+        },
+        {
+          "version": "0.5.5",
+          "buildVersion": "0.5.5",
+          "date": "2026-10-24T18:53:38Z",
+          "localizedDescription": "Sharper in the distance: faraway buildings and windows no longer shimmer -- the game's own mipmaps are used now, with 16x anisotropic filtering. Anti-aliasing, SMAA and MSAA, in the settings (the gear button). Reflective glass, like Dogenzaka Hill's footbridge, reflects as on the console. Thanks to spriteice, whose fork had MSAA and anisotropic filtering first!",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.5/JSRF-Unleashed-iOS.ipa",
+          "size": 13351565,
+          "minOSVersion": "15.0"
+        },
+        {
+          "version": "0.5.4",
+          "buildVersion": "0.5.4",
+          "date": "2026-10-22T21:30:27Z",
+          "localizedDescription": "Smoother: when the game's threads take turns, the one giving way no longer pauses for a millisecond with nothing running in between (on a Mac, 8 slow frames instead of 34 in four minutes of 99th Street). And everything needed to build the game yourself, from your own disc, is now in the repository. Fixes found by spriteice -- thank you!",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.4/JSRF-Unleashed-iOS.ipa",
+          "size": 13288053,
+          "minOSVersion": "15.0"
+        },
+        {
           "version": "0.5.3",
           "buildVersion": "0.5.3",
           "date": "2026-10-21T18:31:11Z",

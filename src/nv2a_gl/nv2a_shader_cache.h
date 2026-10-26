@@ -67,6 +67,26 @@ void nv2a_sc_bin_drop(uint64_t key);
 /* For the report: programs and binaries on disk, and what this run added. */
 void nv2a_sc_stats(int *programs, int *binaries, int *added);
 
+/* States: what each program was translated from -- its combiner state, and
+ * its vertex program's microcode or the fixed-function description -- with
+ * the blend recipes it was drawn with. Unlike the sources these are the same
+ * on every platform and for every translator, so they can be carried from
+ * one machine (or one release) to another and translated again there, before
+ * the game asks for them (nv2a_gl.c, seed_import). Kept in <dir>/states-v1.dat
+ * for the machine's own; a list carried in the engine is added with
+ * nv2a_sc_states_add_blob (read, never written). `id` is the renderer's key for
+ * the program (its table hash). */
+int  nv2a_sc_states_open(const char *dir);
+void nv2a_sc_states_add_blob(const void *data, size_t len);
+int  nv2a_sc_states_count(void);
+int  nv2a_sc_states_local(void);
+int  nv2a_sc_state_get(int i, uint32_t *id, int *kind, const void **vdata, uint32_t *vlen,
+                       const void **psh, uint32_t *pshlen);
+int  nv2a_sc_state_recipes(uint32_t id, uint32_t *out, int max);
+void nv2a_sc_state_note(uint32_t id, int kind, const void *vdata, uint32_t vlen,
+                        const void *psh, uint32_t pshlen);
+void nv2a_sc_state_recipe(uint32_t id, uint32_t recipe);
+
 #ifdef __cplusplus
 }
 #endif

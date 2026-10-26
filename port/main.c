@@ -82,6 +82,21 @@
 #define JSRF_VERSION "dev"
 #endif
 
+#if defined(_WIN32)
+/*
+ * A laptop with two GPUs: the dedicated one, please.
+ *
+ * NVIDIA's Optimus and AMD's switchable graphics run a program their driver
+ * has no profile for on the integrated GPU, and this one has none: a
+ * player's laptop with an RTX 4070 ran the game on its Intel graphics, at 4x.
+ * Both drivers look for these two variables among the exports of the program
+ * that starts, and with them set take the dedicated GPU instead. A PC with
+ * one GPU ignores them. The log's [GL] line names the GPU in use.
+ */
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+#endif
+
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 #include "ohci.h"
@@ -693,6 +708,16 @@ static int host_main(void)
 
     printf("=== JSRF Unleashed %s -- Jet Set Radio Future, statically recompiled ===\n",
            JSRF_VERSION);
+    {
+        /* The shaders the game draws with, collected by playing it, for the
+         * renderer to build ahead (src/nv2a_gl/nv2a_gl.c, seed_import; the
+         * bytes are port/shader_seed.dat, made into shader_seed.c by
+         * port/CMakeLists.txt). */
+        extern const unsigned char jsrf_shader_seed[];
+        extern const size_t jsrf_shader_seed_len;
+        extern void nv2a_set_shader_seed(const void *data, size_t len);
+        nv2a_set_shader_seed(jsrf_shader_seed, jsrf_shader_seed_len);
+    }
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */

@@ -10,14 +10,18 @@
  *   JSRF Unleashed.exe <folder or .iso>   use that, and remember it (dropping a
  *                                         folder or an image on the .exe does this)
  *   JSRF Unleashed.exe --choose           ask where the game is again
- *   JSRF Unleashed.exe --scale N          internal resolution, 1 to 4 times 640x480
- *                                         (default 2); remembered
- *   JSRF Unleashed.exe --fullscreen       start full screen
+ *   JSRF Unleashed.exe --scale N          internal resolution, 1 to 6 times 640x480
+ *                                         (default 2; 6 is for a 4K screen); remembered
+ *   JSRF Unleashed.exe --fullscreen       start full screen this time
+ *   JSRF Unleashed.exe --windowed         start in a window this time
+ *   JSRF Unleashed.exe --portable         keep everything in this folder from now on
  *   JSRF Unleashed.exe --version          which version this is
  *
- * Settings, saves, logs and unpacked disc images live in
- * %LOCALAPPDATA%\JSRF Unleashed. In game: F11 (or Alt+Enter) full screen,
- * F10 widescreen 16:9.
+ * Settings, the cache, logs and unpacked disc images live in
+ * %LOCALAPPDATA%\JSRF Unleashed -- or, portable, in the launcher's own folder
+ * (see "portable" below). In game: F11 (or Alt+Enter) full screen, F10
+ * widescreen 16:9. The game starts the way it was left, in full screen or in
+ * a window; --fullscreen and --windowed choose for one start.
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -43,8 +47,9 @@
 #define APP L"JSRF Unleashed"
 
 static wchar_t g_here[MAX_PATH];       /* the launcher's folder */
-static wchar_t g_base[MAX_PATH];       /* %LOCALAPPDATA%\JSRF Unleashed */
+static wchar_t g_base[MAX_PATH];       /* %LOCALAPPDATA%\JSRF Unleashed, or g_here when portable */
 static wchar_t g_cfg[MAX_PATH];        /* ...\settings, shared with the engine */
+static int     g_portable;             /* portable.txt beside the launcher */
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -153,6 +158,129 @@ static void cfg_set(const char *key, const char *val)
     fprintf(out, "%s=%s\n", key, val);
     fclose(out);
     MoveFileExW(tmp, g_cfg, MOVEFILE_REPLACE_EXISTING);
+}
+
+static int find_image_in(const wchar_t *dir, wchar_t *out, size_t n);
+
+/* ---- portable ----------------------------------------------------------------
+ *
+ * With a file named portable.txt beside JSRF Unleashed.exe, everything the
+ * launcher and the engine keep -- the settings, the cache (shaders, the
+ * game's own cache drive), the logs and unpacked disc images -- goes in this
+ * folder instead of %LOCALAPPDATA%\JSRF Unleashed. Saves are in the game's
+ * folder (UDATA) either way, so a game unpacked here keeps them here too, and
+ * the whole folder can move: to another computer, onto a USB drive. A game
+ * folder inside it is remembered relative to it for that reason.
+ *
+ * The first start asks which, once; --portable switches later (taking the
+ * settings along); deleting portable.txt switches back. */
+
+/* The remembered game folder, as stored: relative to this folder when it is
+ * inside it and portable. */
+static void game_store(const wchar_t *game)
+{
+    char u8[MAX_PATH * 4];
+    size_t lh = wcslen(g_here);
+    if (g_portable && lh && !_wcsnicmp(game, g_here, lh) && game[lh] == L'\\' && game[lh + 1])
+        to_utf8(game + lh + 1, u8, sizeof u8);
+    else
+        to_utf8(game, u8, sizeof u8);
+    cfg_set("game_dir", u8);
+}
+
+static int game_recall(wchar_t *game, size_t n)
+{
+    char u8[MAX_PATH * 4];
+    wchar_t w[MAX_PATH * 2];
+    if (!cfg_get("game_dir", u8, sizeof u8) || !u8[0]) return 0;
+    from_utf8(u8, w, MAX_PATH * 2);
+    /* A drive ("C:...") or a network path ("\\server...") is where it says;
+     * anything else is relative to this folder. */
+    if ((w[0] && w[1] == L':') || (w[0] == L'\\' && w[1] == L'\\')) _snwprintf(game, n, L"%ls", w);
+    else join(game, n, g_here, w);
+    game[n - 1] = 0;
+    return 1;
+}
+
+/* Portable, and nothing remembered: a game folder or a disc image put in this
+ * folder is the one, when there is exactly one. */
+static int game_beside(wchar_t *game, size_t n)
+{
+    wchar_t pat[MAX_PATH * 2], one[MAX_PATH * 2], p[MAX_PATH * 2];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int found = 0;
+    join(pat, MAX_PATH * 2, g_here, L"*");
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+        join(p, MAX_PATH * 2, g_here, fd.cFileName);
+        if (is_game(p)) { if (found++) break; wcscpy(one, p); }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (found == 1) { _snwprintf(game, n, L"%ls", one); game[n - 1] = 0; return 1; }
+    if (found == 0 && find_image_in(g_here, game, n)) return 1;
+    return 0;
+}
+
+/* Where to keep things: decided before anything is read or written. */
+static int choose_base(int want_portable)
+{
+    wchar_t mark[MAX_PATH * 2], la[MAX_PATH], la_cfg[MAX_PATH * 2], here_cfg[MAX_PATH * 2];
+    {
+        PWSTR k = NULL;
+        if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &k)) && k) {
+            join(la, MAX_PATH, k, L"JSRF Unleashed");
+            CoTaskMemFree(k);
+        } else {
+            const wchar_t *e = _wgetenv(L"LOCALAPPDATA");
+            join(la, MAX_PATH, e ? e : g_here, L"JSRF Unleashed");
+        }
+    }
+    join(mark, MAX_PATH * 2, g_here, L"portable.txt");
+    join(la_cfg, MAX_PATH * 2, la, L"settings");
+    join(here_cfg, MAX_PATH * 2, g_here, L"settings");
+    if (!is_file(mark) && !want_portable && !is_file(la_cfg) && !is_file(here_cfg)) {
+        /* The very first start: ask, once. */
+        int r = MessageBoxW(NULL,
+            L"Where should JSRF Unleashed keep its settings, cache, logs and unpacked "
+            L"disc images?\n\n"
+            L"Yes -- in this folder, beside JSRF Unleashed.exe (portable: the whole folder "
+            L"can be moved, to another computer or onto a USB drive).\n\n"
+            L"No -- in your user profile (%LOCALAPPDATA%\\JSRF Unleashed).\n\n"
+            L"Saves are kept in the game's folder either way. You can change this later: "
+            L"start with --portable, or delete portable.txt.",
+            APP, MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND);
+        if (r == IDCANCEL) return 1;
+        if (r == IDYES) want_portable = 1;
+    }
+    if (want_portable && !is_file(mark)) {
+        FILE *f = _wfopen(mark, L"wb");
+        if (!f) {
+            wchar_t msg[1024];
+            _snwprintf(msg, 1024, L"This folder cannot be written to, so JSRF Unleashed cannot keep "
+                                  L"its files in it:\n\n%ls\n\nMove the folder somewhere you can write "
+                                  L"to (not Program Files) for a portable install. For now everything "
+                                  L"is kept in %ls.", g_here, la);
+            msg[1023] = 0;
+            say(msg, MB_ICONWARNING);
+        } else {
+            fputs("While this file is here, JSRF Unleashed keeps its settings, cache, logs and\r\n"
+                  "unpacked disc images in this folder. Delete it to keep them in\r\n"
+                  "%LOCALAPPDATA%\\JSRF Unleashed instead.\r\n", f);
+            fclose(f);
+            /* Switching with settings already kept in the profile: take them
+             * along (the remembered game, the resolution, ...). */
+            if (is_file(la_cfg) && !is_file(here_cfg)) CopyFileW(la_cfg, here_cfg, TRUE);
+        }
+    }
+    g_portable = is_file(mark);
+    _snwprintf(g_base, MAX_PATH, L"%ls", g_portable ? g_here : la);
+    g_base[MAX_PATH - 1] = 0;
+    SHCreateDirectoryExW(NULL, g_base, NULL);
+    join(g_cfg, MAX_PATH, g_base, L"settings");
+    return 0;
 }
 
 /* ---- asking where the game is ---------------------------------------------- */
@@ -342,7 +470,8 @@ static int unpack(const wchar_t *iso, const wchar_t *dest)
     return 0;
 }
 
-/* An image is unpacked into %LOCALAPPDATA%\JSRF Unleashed\<its name>, once. */
+/* An image is unpacked into %LOCALAPPDATA%\JSRF Unleashed\<its name> (portable:
+ * into this folder), once. */
 static int game_from_image(const wchar_t *iso, wchar_t *game, size_t n)
 {
     wchar_t name[MAX_PATH], *dot, msg[1024];
@@ -459,6 +588,8 @@ static const wchar_t *const k_env[][2] = {
     { L"RECOMP_GL_CURTAIN", L"skip" }, { L"RECOMP_MUTE", L"0" }, { L"RECOMP_WINDOW", L"1" },
 };
 
+/* fullscreen: 1 or 0 for this start (--fullscreen, --windowed), -1 to leave it
+ * to the engine, which starts the way the game was left. */
 static int run(const wchar_t *game, int scale, int fullscreen)
 {
     wchar_t engine[MAX_PATH * 2], cmd[MAX_PATH * 6], log[MAX_PATH * 2], logs[MAX_PATH * 2],
@@ -484,7 +615,7 @@ static int run(const wchar_t *game, int scale, int fullscreen)
         SetEnvironmentVariableW(k_env[i][0], k_env[i][1]);
     _snwprintf(sc, 8, L"%d", scale);
     SetEnvironmentVariableW(L"RECOMP_GL_SCALE", sc);
-    if (fullscreen) SetEnvironmentVariableW(L"RECOMP_FULLSCREEN", L"1");
+    if (fullscreen >= 0) SetEnvironmentVariableW(L"RECOMP_FULLSCREEN", fullscreen ? L"1" : L"0");
     SetEnvironmentVariableW(L"JSRF_GAME_DIR", game);
     SetEnvironmentVariableW(L"JSRF_SAVE_DIR", save);
     SetEnvironmentVariableW(L"JSRF_SETTINGS_FILE", g_cfg);
@@ -543,10 +674,10 @@ static int run(const wchar_t *game, int scale, int fullscreen)
 
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
 {
-    int argc = 0, i, choose = 0, fullscreen = 0, scale = 2;
+    int argc = 0, i, choose = 0, fullscreen = -1, scale = 2, portable = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     wchar_t game[MAX_PATH * 2] = L"", arg[MAX_PATH * 2] = L"", *slash;
-    char u8[MAX_PATH * 4], val[64];
+    char val[64];
     INITCOMMONCONTROLSEX icc;
     (void)hi; (void)prev; (void)cmdline; (void)show;
 
@@ -557,25 +688,18 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
 
     GetModuleFileNameW(NULL, g_here, MAX_PATH);
     if ((slash = wcsrchr(g_here, L'\\')) != NULL) *slash = 0;
-    {
-        PWSTR la = NULL;
-        if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &la)) && la) {
-            join(g_base, MAX_PATH, la, L"JSRF Unleashed");
-            CoTaskMemFree(la);
-        } else {
-            const wchar_t *e = _wgetenv(L"LOCALAPPDATA");
-            join(g_base, MAX_PATH, e ? e : g_here, L"JSRF Unleashed");
-        }
-    }
-    SHCreateDirectoryExW(NULL, g_base, NULL);
-    join(g_cfg, MAX_PATH, g_base, L"settings");
+    for (i = 1; i < argc; i++)
+        if (!wcscmp(argv[i], L"--portable")) portable = 1;
+    if (choose_base(portable)) return 0;            /* the first-start question was cancelled */
 
     for (i = 1; i < argc; i++) {
         if (!wcscmp(argv[i], L"--choose")) choose = 1;
         else if (!wcscmp(argv[i], L"--fullscreen")) fullscreen = 1;
+        else if (!wcscmp(argv[i], L"--windowed")) fullscreen = 0;
+        else if (!wcscmp(argv[i], L"--portable")) ;
         else if (!wcscmp(argv[i], L"--scale") && i + 1 < argc) {
             int s = _wtoi(argv[++i]);
-            if (s < 1 || s > 4) return fail(L"--scale takes 1, 2, 3 or 4.");
+            if (s < 1 || s > 6) return fail(L"--scale takes 1 to 6 (6 is for a 4K screen).");
             snprintf(val, sizeof val, "%d", s);
             cfg_set("scale", val);
         } else if (!wcscmp(argv[i], L"--version")) {
@@ -601,10 +725,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
     if (arg[0]) {
         DWORD n = GetFullPathNameW(arg, MAX_PATH * 2, game, NULL);
         if (!n || n >= MAX_PATH * 2) return fail(L"That path is too long.");
-    } else if (!choose && cfg_get("game_dir", u8, sizeof u8)) {
-        from_utf8(u8, game, MAX_PATH * 2);
+    } else if (!choose && game_recall(game, MAX_PATH * 2)) {
         if (!is_game(game)) game[0] = 0;
     }
+    if (!game[0] && !choose && g_portable) game_beside(game, MAX_PATH * 2);
     if (!game[0] && !pick_folder(game, MAX_PATH * 2))
         return 0;                                   /* the dialog was cancelled */
 
@@ -633,11 +757,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         cfg_set("game_dir", "");                    /* ask again next time */
         return 1;
     }
-    to_utf8(game, u8, sizeof u8);
-    cfg_set("game_dir", u8);
+    game_store(game);
     if (cfg_get("scale", val, sizeof val)) {
         int s = atoi(val);
-        if (s >= 1 && s <= 4) scale = s;
+        if (s >= 1 && s <= 6) scale = s;
     }
     return run(game, scale, fullscreen);
 }

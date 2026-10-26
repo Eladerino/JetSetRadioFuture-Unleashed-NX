@@ -166,6 +166,12 @@ extern uint32_t  xbox_ContiguousBlockSerial(uint32_t va);
 #define M_SET_SKIN_MODE             0x0328   /* 0 off, else N-matrix blend */
 #define M_SET_MODEL_VIEW_MATRIX     0x0480   /* 4 matrices of 16 floats */
 #define M_SET_TEXTURE_MATRIX_ENABLE 0x0420   /* +i*4, 4 stages */
+#define M_SET_TEXGEN_S              0x03C0   /* +0x10 a stage, S T R Q at +0 +4 +8 +C */
+#define M_SET_TEXGEN_PLANE_S        0x0840   /* +0x40 a stage, S T R Q at +0 +0x10 ..., 4 floats */
+#define M_SET_POINT_PARAMS_ENABLE   0x0318
+#define M_SET_POINT_SMOOTH_ENABLE   0x031C
+#define M_SET_POINT_SIZE            0x043C
+#define M_SET_POINT_PARAMS          0x0A30   /* 8 floats */
 #define M_SET_COMPOSITE_MATRIX      0x0680   /* 16 floats, model*view*proj */
 #define M_SET_TEXTURE_MATRIX        0x06C0   /* +i*64, 4 matrices of 16 */
 #define M_SET_TRANSFORM_PROGRAM_LD  0x1E9C
@@ -273,8 +279,16 @@ extern uint32_t  xbox_ContiguousBlockSerial(uint32_t va);
 #define PRIM_QUAD_STRIP     9
 #define PRIM_POLYGON        10
 
-#define MAX_INDICES   16384
-#define MAX_INLINE    16384
+/* A batch's indices, and its inline vertex data in words.
+ *
+ * Both were 16384, and what came after was dropped without a word: the
+ * hardware has no such limit, so a batch of more than 16384 indices -- 5461
+ * triangles -- lost its tail, and an inline batch more than 16384 words --
+ * 2048 vertices of eight words -- lost the vertices after that. Room for a
+ * million of either now; batch_size_note says how often a batch went past
+ * the old limits (and, should one ever reach these, that it was cut). */
+#define MAX_INDICES   (1u << 20)
+#define MAX_INLINE    (1u << 22)
 #define NUM_ATTRS     16
 #define NUM_STAGES    4
 
@@ -311,6 +325,16 @@ static struct {
     uint32_t prog_load, prog_start, prog_sub;
     uint32_t xf_mode;        /* SET_TRANSFORM_EXECUTION_MODE, low 2 bits */
     uint32_t ff_texmat_enable;   /* bit per stage */
+    /* NV097_SET_TEXGEN_S..Q (0x03C0, 0x10 a stage, 4 a component): the
+     * OpenGL enum the title wrote, 0 for none; and the planes the two linear
+     * modes would dot with (NV097_SET_TEXGEN_PLANE_S..Q, 0x0840, 0x40 a
+     * stage, 0x10 a component), kept for the log. */
+    uint32_t texgen[4][4];
+    float    texgen_plane[16][4];
+    /* Points (NV097_SET_POINT_PARAMS_ENABLE, _SMOOTH_ENABLE, _SIZE,
+     * _PARAMS), kept for the log: point lists are not drawn. */
+    uint32_t point_params_enable, point_smooth_enable, point_size;
+    float    point_params[8];
     uint32_t ff_skin_mode;       /* NV097_SET_SKIN_MODE */
     uint32_t draws_skinned;      /* draws made with it non-zero */
     int      ff_lighting;
@@ -442,6 +466,9 @@ static struct {
     uint32_t draws_xf[4];   /* draws by transform execution mode */
     int      surf_dirty;    /* offset or clip changed since the last bind */
 } S;
+
+/* do_draw is drawing a batch sent one vertex at a time (see imm_draw). */
+static int g_imm_drawing;
 
 /* ── where a frame's CPU time goes ────────────────────────────────────────
  *
@@ -747,12 +774,28 @@ static struct {
     double   compile_s, compile_worst, tex_s;
     double   idle_s;                            /* building ahead for the shader cache */
     double   pso_ms0;                           /* the backend's pipeline time at the frame's start */
+    double   gpu_busy0, gpu_wait0;              /* and its GPU times (gpu_ms) */
     uint32_t draws0;
 } g_hf;                                         /* this frame */
 static struct {
     unsigned long long hitches, logged, compiles;
     double   compile_s, compile_worst;
 } g_ht;                                         /* the whole run */
+/* Reversed depth (zrev_start, below gfx_init's declaration). */
+static int g_zrev;
+static uint32_t zrev_func(uint32_t f);
+static void zrev_row(float out[4]);
+
+/* The most the resolution menus offer: 6x (3840x2880, for a 4K screen) on a
+ * computer; 4x on Android, as on the iPhone, where 4x already fills the
+ * screen and a 6x frame would be most of the memory a phone has to give.
+ * RECOMP_GL_SCALE itself still takes up to 8. */
+#if defined(__ANDROID__)
+#define NV2A_SCALE_MAX 4
+#else
+#define NV2A_SCALE_MAX 6
+#endif
+
 /*
  * Internal resolution.
  *
@@ -778,6 +821,65 @@ static uint32_t gl_scale(void)
             fprintf(stderr, "  [GL] internal resolution x%u\n", sc);
     }
     return sc;
+}
+
+/*
+ * Anti-aliasing, two kinds, either or both:
+ *
+ *   SMAA (nv2a_smaa.h): the frame is shown through three passes over it that
+ *   find its edges and blend across them (the backend's target_smaa), into a
+ *   copy. Switched on and off at any time, taken at the next flip.
+ *
+ *   Multisampling: every target drawn with 2, 4 or 8 samples a pixel (the
+ *   backend's samples), which smooths what is drawn rather than the picture
+ *   afterwards. OpenGL takes a new count at the next flip, carrying every
+ *   target across; OpenGL ES and Metal only at start, so there a change is
+ *   kept for the next one.
+ *
+ * Nothing the title can observe changes with either -- its surfaces, their
+ * sizes and the raster stay what they were. RECOMP_GL_SMAA=0|1 and
+ * RECOMP_GL_MSAA=n win over the settings (the window's smaa= and msaa=, the
+ * Mac's and the iPhone's preferences); both are off by default.
+ */
+static volatile int g_smaa_want;       /* asked for */
+static int          g_smaa_now;        /* and in use */
+static volatile int g_msaa_want = 1;   /* samples a pixel asked for, 1 none */
+static int          g_msaa_now = 1;    /* and in use */
+static int          g_msaa_max;        /* the most the device offers; 0 not up yet */
+static uint32_t     g_shown_rt;        /* what was put on screen at the last flip */
+
+/* For the windows' menus and settings (nv2a_window_mac.m, the iPhone app's):
+ * what is in use and what can be asked for. Storing a choice is theirs to
+ * do; this only takes it. */
+void nv2a_set_smaa(int on);
+void nv2a_set_smaa(int on) { g_smaa_want = on ? 1 : 0; }
+int  nv2a_smaa(void);
+int  nv2a_smaa(void) { return g_smaa_want; }
+int  nv2a_msaa(void);
+int  nv2a_msaa(void) { return g_msaa_now; }
+int  nv2a_msaa_max(void);
+int  nv2a_msaa_max(void) { return g_msaa_max; }
+static int g_msaa_live;                /* the device takes a new count while running */
+int  nv2a_msaa_live(void);
+int  nv2a_msaa_live(void) { return g_msaa_live; }
+void nv2a_set_msaa(int n);
+void nv2a_set_msaa(int n) { g_msaa_want = n > 1 ? n : 1; }
+
+static void smaa_take(void)
+{
+    if (g_smaa_want == g_smaa_now || !G->target_smaa) return;
+    g_smaa_now = g_smaa_want;
+    fprintf(stderr, "  [GL] SMAA: %s from present %u\n", g_smaa_now ? "on" : "off", S.flips);
+}
+
+static void msaa_take(void)
+{
+    int want = g_msaa_want, was = g_msaa_now;
+    if (want == was || !G->samples || !g_msaa_live) return;
+    g_msaa_now = G->samples(want);
+    fprintf(stderr, "  [GL] MSAA: %dx from present %u (was %dx%s)\n",
+            g_msaa_now, S.flips, was, g_msaa_now != want ? "; fewer than asked" : "");
+    g_msaa_want = g_msaa_now;
 }
 
 static uint32_t g_cur_prog;
@@ -883,11 +985,13 @@ static uint32_t g_frame_chars_prev;  /* ... and in the frame just finished */
 #define TEX_CACHE 4096
 static struct {
     uint32_t offset, format, w, h, pitch, hash;
+    uint32_t levels;        /* of the title's mipmap chain uploaded (tex_title_levels) */
     uint32_t content;       /* every byte of it, hashed (see tcache_verify) */
     uint32_t drawn;         /* the frame it was last looked up in */
     uint32_t last_draw;     /* when this entry was last looked up */
     uint32_t tex;           /* the device's texture */
     uint32_t va, serial;    /* read from: where, and the allocation (contig_serial) */
+    uint32_t sampling;      /* how it is sampled (sampler_key): part of what it is */
     int      bias;          /* uploaded as a bump source (g_upload_bias_bg) */
     int      used;
 } g_tcache[TEX_CACHE];
@@ -1102,6 +1206,7 @@ static void pres_start(void);        /* the presenter, below */
 #endif
 #if defined(_WIN32)
 static void sdl_menu_init(void);     /* the menu bar, below */
+static int  sdl_cfg_get(const char *key, int def);   /* the settings file, below */
 #endif
 
 static int gl_init(uint32_t w, uint32_t h)
@@ -1153,7 +1258,21 @@ static int gl_init(uint32_t w, uint32_t h)
         }
         if ((e = getenv("RECOMP_WINDOW_W")) && atoi(e) >= 320) ww = atoi(e);
         if ((e = getenv("RECOMP_WINDOW_H")) && atoi(e) >= 240) wh = atoi(e);
-        if ((e = getenv("RECOMP_FULLSCREEN")) && atoi(e)) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        /* Full screen: RECOMP_FULLSCREEN when it is set -- the launcher's
+         * --fullscreen (1) and --windowed (0), and a restart at a new
+         * resolution, which says where the game was. Otherwise, on Windows,
+         * the way the game was left: F11, Alt+Enter and Video > Full screen
+         * keep fullscreen= in the settings (sdl_fullscreen_by_player). */
+        if ((e = getenv("RECOMP_FULLSCREEN")) && *e) {
+            if (atoi(e)) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        }
+#if defined(_WIN32)
+        else if (sdl_cfg_get("fullscreen", 0)) {
+            flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+            fprintf(stderr, "[WIN] full screen, as the game was left (fullscreen=1 in the "
+                    "settings; --windowed starts in a window)\n");
+        }
+#endif
         g_window = SDL_CreateWindow("JSRF Unleashed",
                                     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                     ww, wh, flags);
@@ -1282,6 +1401,29 @@ static void sdl_cfg_set(const char *key, int val)
 /* nv2a_widescreen() asks this when RECOMP_WIDESCREEN is not set. */
 int nv_window_pref_widescreen(void) { return sdl_cfg_get("widescreen", 0) != 0; }
 
+/* The camera on the right stick (port/recomp_manual.c): on unless turned off --
+ * Controls in the window's menu bar on Windows, F7 anywhere (and the Android
+ * app's settings), kept as rstick_camera= (0 for off). Asked every frame, so
+ * the file is read once. */
+static volatile int g_rstick_cam = -1;
+int nv_window_pref_rstick_camera(void);
+int nv_window_pref_rstick_camera(void)
+{
+    if (g_rstick_cam < 0) g_rstick_cam = sdl_cfg_get("rstick_camera", 1) != 0;
+    return g_rstick_cam;
+}
+static void nv_window_set_rstick_camera(int on)
+{
+    g_rstick_cam = on ? 1 : 0;
+    sdl_cfg_set("rstick_camera", g_rstick_cam);
+    fprintf(stderr, "[WIN] the camera on the right stick: %s\n", on ? "on" : "off");
+}
+/* Asked for from another thread (the Android app's settings): done at the
+ * next sdl_pump, by the thread that owns the window and the settings file. */
+static volatile int g_sdl_want_rcam = -1;
+void nv_window_request_rstick_camera(int on);
+void nv_window_request_rstick_camera(int on) { g_sdl_want_rcam = on ? 1 : 0; }
+
 /* The keyboard as a gamepad -- the same layout as the Mac's, by key POSITION
  * (scancodes), so W A S D on QWERTY is Z Q S D on AZERTY:
  *   W A S D    left stick + d-pad       arrows   right stick
@@ -1290,7 +1432,8 @@ int nv_window_pref_widescreen(void) { return sdl_cfg_get("widescreen", 0) != 0; 
  *   R          Black                    F  White
  *   Return     Start                    Esc  Back (and Android's Back)
  *   C / V      left / right stick click
- * F11 or Alt+Return: full screen. F10: widescreen. F9: resolution. */
+ * F11 or Alt+Return: full screen. F10: widescreen. F9: resolution. F8:
+ * anti-aliasing. F7: the camera on the right stick. */
 static volatile unsigned short g_sdl_kb_buttons;
 static volatile unsigned char  g_sdl_kb_analog[8];
 
@@ -1376,6 +1519,18 @@ static void sdl_toggle_fullscreen(void)
     fprintf(stderr, "[WIN] full screen %s\n", fs ? "off" : "on");
 }
 
+/* F11, Alt+Enter and Video > Full screen: the player's choice, which the next
+ * start keeps on Windows (gl_init) -- the window as it is after the switch,
+ * so a switch that did not happen is not kept. Not the switches around the
+ * F9 and F8 boxes, which leave full screen while a box is up and go back. */
+static void sdl_fullscreen_by_player(void)
+{
+    sdl_toggle_fullscreen();
+#if defined(_WIN32)
+    sdl_cfg_set("fullscreen", (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : 0);
+#endif
+}
+
 /* Widescreen asked for from another thread (the Android app's settings): done
  * at the next sdl_pump, by the thread that owns the window, as F10 is. */
 static volatile int g_sdl_want_wide = -1;
@@ -1398,8 +1553,12 @@ static void sdl_toggle_widescreen(void)
     fprintf(stderr, "[WIN] widescreen %s\n", on ? "on (16:9)" : "off (4:3)");
 }
 
-/* F9: the internal resolution, 1x to 4x the Xbox's 640x480 -- what the Mac's
- * Video menu and the iPhone's settings offer. The renderer sizes its targets
+/* F9: the internal resolution, 1x to 6x the Xbox's 640x480 (4x on Android,
+ * as the iPhone's settings) -- what the Mac's Video menu offers. 6x is
+ * 3840x2880: a 4K screen's width, one pixel for one, with the height drawn
+ * finer than the screen shows it -- in widescreen, where the 640x480 surface
+ * holds a 16:9 view squeezed, that is 3840x2160 exactly across. The
+ * renderer sizes its targets
  * once, at start-up, so a new one means starting again: after asking, the
  * choice is stored under the launchers' own "scale" key (they pass it on as
  * RECOMP_GL_SCALE), put in the environment and the engine relaunches itself
@@ -1432,9 +1591,13 @@ static void sdl_keys_release(void)
 
 static void sdl_choose_scale(void)
 {
-    static const char *const names[4] = {
-        "1x  640x480", "2x  1280x960", "3x  1920x1440", "4x  2560x1920" };
-    SDL_MessageBoxButtonData b[5];
+    static const char *const names[NV2A_SCALE_MAX] = {
+        "1x  640x480", "2x  1280x960", "3x  1920x1440", "4x  2560x1920",
+#if NV2A_SCALE_MAX > 4
+        "5x  3200x2400", "6x  3840x2880 (4K)"
+#endif
+    };
+    SDL_MessageBoxButtonData b[NV2A_SCALE_MAX + 1];
     SDL_MessageBoxData box;
     char msg[512];
     int cur = (int)gl_scale(), pick = -1, i, was_fs;
@@ -1448,31 +1611,32 @@ static void sdl_choose_scale(void)
     was_fs = 0;     /* the app is always full screen, and the box shows over it */
 #endif
     if (was_fs) sdl_toggle_fullscreen();
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < NV2A_SCALE_MAX; i++) {
         b[i].flags    = i + 1 == cur ? SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT : 0;
         b[i].buttonid = i + 1;
         b[i].text     = names[i];
     }
-    b[4].flags    = SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT;
-    b[4].buttonid = 0;
-    b[4].text     = "Cancel";
+    b[NV2A_SCALE_MAX].flags    = SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT;
+    b[NV2A_SCALE_MAX].buttonid = 0;
+    b[NV2A_SCALE_MAX].text     = "Cancel";
     /* Short lines: SDL's own X11 message box does not wrap, and cut the
      * first line off at its width. */
     snprintf(msg, sizeof msg,
              "The game is drawn at a multiple of the Xbox's 640x480,\n"
              "then fitted to the window. Higher is sharper and asks\n"
-             "more of the graphics card. Now: %dx (%dx%d).\n\n"
+             "more of the graphics card.%s\nNow: %dx (%dx%d).\n\n"
              "Changing it restarts the game: anything since\n"
              "your last save is lost.",
+             NV2A_SCALE_MAX > 4 ? " 6x suits a 4K screen." : "",
              cur, 640 * cur, 480 * cur);
     memset(&box, 0, sizeof box);
     box.flags      = SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT;
     box.window     = g_window;
     box.title      = "Resolution";
     box.message    = msg;
-    box.numbuttons = 5;
+    box.numbuttons = NV2A_SCALE_MAX + 1;
     box.buttons    = b;
-    if (SDL_ShowMessageBox(&box, &pick) != 0 || pick < 1 || pick > 4 || pick == cur) {
+    if (SDL_ShowMessageBox(&box, &pick) != 0 || pick < 1 || pick > NV2A_SCALE_MAX || pick == cur) {
         if (was_fs) sdl_toggle_fullscreen();
         sdl_keys_release();
         return;
@@ -1480,32 +1644,130 @@ static void sdl_choose_scale(void)
     sdl_restart_at(pick, was_fs);
 }
 
+/* Anti-aliasing, as the menu (Windows) and F8 choose it: taken at the next
+ * flip and kept as smaa= and msaa= (0 for none), as F10 keeps widescreen=. A
+ * device that only takes a count of samples at start (OpenGL ES) keeps the
+ * choice for the next one. */
+static void sdl_pick_smaa(int on)
+{
+    if (!G || !G->target_smaa) return;
+    g_smaa_want = on ? 1 : 0;
+    sdl_cfg_set("smaa", g_smaa_want);
+    sdl_menu_update();
+    fprintf(stderr, "[WIN] SMAA %s\n", on ? "on" : "off");
+}
+
+static void sdl_pick_msaa(int n)
+{
+    if (n < 1) n = 1;
+    if (g_msaa_max && n > g_msaa_max) n = g_msaa_max;
+    sdl_cfg_set("msaa", n > 1 ? n : 0);
+    if (g_msaa_live) g_msaa_want = n;
+    sdl_menu_update();
+    fprintf(stderr, "[WIN] MSAA %dx%s\n", n, g_msaa_live ? "" : " from the next start");
+}
+
+/* F8: the same choices in a box -- SMAA on or off, or a number of samples --
+ * for a window without a menu bar (Linux) and in full screen. */
+static void sdl_choose_aa(void)
+{
+    static const char *const ms[4] = { "MSAA off", "MSAA 2x", "MSAA 4x", "MSAA 8x" };
+    SDL_MessageBoxButtonData b[6];
+    SDL_MessageBoxData box;
+    char msg[640];
+    int pick = -1, nb = 0, i, was_fs;
+    was_fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+#if defined(__ANDROID__)
+    was_fs = 0;
+#endif
+    if (was_fs) sdl_toggle_fullscreen();     /* see sdl_choose_scale */
+    if (G && G->target_smaa) {
+        b[nb].flags = 0; b[nb].buttonid = 100; b[nb].text = g_smaa_want ? "SMAA off" : "SMAA on";
+        nb++;
+    }
+    for (i = 0; i < 4; i++) {
+        if (g_msaa_max && (1 << i) > g_msaa_max) break;
+        b[nb].flags = (1 << i) == g_msaa_want ? SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT : 0;
+        b[nb].buttonid = 1 << i;
+        b[nb].text = ms[i];
+        nb++;
+    }
+    b[nb].flags = SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT; b[nb].buttonid = 0; b[nb].text = "Cancel";
+    nb++;
+    /* Short lines, as in sdl_choose_scale. */
+    snprintf(msg, sizeof msg,
+             "SMAA smooths the jagged edges in each finished\n"
+             "frame, for a small cost, the HUD's with the rest.\n"
+             "MSAA draws every edge with 2, 4 or 8 samples a\n"
+             "pixel: cleaner, and more work for the graphics\n"
+             "card. The two can be on together.\n\n"
+             "Now: SMAA %s, MSAA %s.%s",
+             g_smaa_want ? "on" : "off",
+             g_msaa_want > 1 ? (g_msaa_want == 2 ? "2x" : g_msaa_want == 4 ? "4x" : "8x") : "off",
+             g_msaa_live ? "" : "\nA new MSAA is used the next time the game starts.");
+    memset(&box, 0, sizeof box);
+    box.flags      = SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT;
+    box.window     = g_window;
+    box.title      = "Anti-aliasing";
+    box.message    = msg;
+    box.numbuttons = nb;
+    box.buttons    = b;
+    if (SDL_ShowMessageBox(&box, &pick) == 0) {
+        if (pick == 100) sdl_pick_smaa(!g_smaa_want);
+        else if (pick >= 1) sdl_pick_msaa(pick);
+    }
+    if (was_fs) sdl_toggle_fullscreen();
+    sdl_keys_release();
+}
+
+/* F7 and Controls > Camera on the Right Stick: on or off, kept. */
+static void sdl_toggle_rstick_camera(void)
+{
+    nv_window_set_rstick_camera(!nv_window_pref_rstick_camera());
+    sdl_menu_update();
+}
+
 #if defined(_WIN32)
 /*
- * The window's menu bar (Windows): Video -- the resolution, widescreen and
- * full screen, which is what the Mac's Video menu has and what F9, F10 and
- * F11 do. Not in full screen, where it would sit across the top of the
- * picture; the keys work there, and leaving full screen brings it back.
- * SDL hands the menu's WM_COMMAND over as a system event (sdl_pump).
+ * The window's menu bar (Windows): Video -- the resolution, anti-aliasing,
+ * widescreen and full screen, which is what the Mac's Video menu has and what
+ * F9, F8, F10 and F11 do. Not in full screen, where it would sit across the
+ * top of the picture; the keys work there, and leaving full screen brings it
+ * back. SDL hands the menu's WM_COMMAND over as a system event (sdl_pump).
  *
  * Holding a menu open holds the thread that owns the window, which is the
  * one that runs the GPU, so the game waits while it is open -- as a pause
  * menu would. Choosing a resolution asks before it restarts.
  */
 #include <SDL2/SDL_syswm.h>
-enum { MENU_RES1 = 101, MENU_WIDE = 110, MENU_FULL = 111 };
+enum { MENU_RES1 = 101, MENU_WIDE = 110, MENU_FULL = 111, MENU_SMAA = 120, MENU_MSAA1 = 121,
+       MENU_RCAM = 130 };
 static HWND  g_menu_hwnd;
-static HMENU g_menu_bar, g_menu_video, g_menu_res;
+static HMENU g_menu_bar, g_menu_video, g_menu_res, g_menu_aa, g_menu_controls;
 
 static void sdl_menu_update(void)
 {
     int i, cur = (int)gl_scale();
     if (!g_menu_bar) return;
-    for (i = 1; i <= 4; i++)
+    for (i = 1; i <= NV2A_SCALE_MAX; i++)
         CheckMenuItem(g_menu_res, MENU_RES1 + i - 1,
                       MF_BYCOMMAND | (i == cur ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu_video, MENU_WIDE,
                   MF_BYCOMMAND | (nv2a_widescreen() ? MF_CHECKED : MF_UNCHECKED));
+    /* Anti-aliasing: what is asked for, and only what the device can do. */
+    CheckMenuItem(g_menu_aa, MENU_SMAA, MF_BYCOMMAND | (g_smaa_want ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(g_menu_aa, MENU_SMAA,
+                   MF_BYCOMMAND | (!G || G->target_smaa ? MF_ENABLED : MF_GRAYED));
+    for (i = 0; i < 4; i++) {
+        int n = 1 << i;
+        CheckMenuItem(g_menu_aa, MENU_MSAA1 + i,
+                      MF_BYCOMMAND | (n == g_msaa_want ? MF_CHECKED : MF_UNCHECKED));
+        EnableMenuItem(g_menu_aa, MENU_MSAA1 + i,
+                       MF_BYCOMMAND | (!g_msaa_max || n <= g_msaa_max ? MF_ENABLED : MF_GRAYED));
+    }
+    if (g_menu_controls)
+        CheckMenuItem(g_menu_controls, MENU_RCAM,
+                      MF_BYCOMMAND | (nv_window_pref_rstick_camera() ? MF_CHECKED : MF_UNCHECKED));
 }
 
 /* The menu takes its height from the window, not from the picture: the
@@ -1529,15 +1791,29 @@ static void sdl_menu_init(void)
     g_menu_bar   = CreateMenu();
     g_menu_video = CreatePopupMenu();
     g_menu_res   = CreatePopupMenu();
-    if (!g_menu_bar || !g_menu_video || !g_menu_res) { g_menu_bar = NULL; return; }
+    g_menu_aa    = CreatePopupMenu();
+    if (!g_menu_bar || !g_menu_video || !g_menu_res || !g_menu_aa) { g_menu_bar = NULL; return; }
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 0, L"1x  (640 x 480)");
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 1, L"2x  (1280 x 960)");
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 2, L"3x  (1920 x 1440)");
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 3, L"4x  (2560 x 1920)");
+    AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 4, L"5x  (3200 x 2400)");
+    AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 5, L"6x  (3840 x 2880) -- 4K");
+    AppendMenuW(g_menu_aa, MF_STRING, MENU_SMAA, L"&SMAA");
+    AppendMenuW(g_menu_aa, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_menu_aa, MF_STRING, MENU_MSAA1 + 0, L"MSAA &off");
+    AppendMenuW(g_menu_aa, MF_STRING, MENU_MSAA1 + 1, L"MSAA &2x");
+    AppendMenuW(g_menu_aa, MF_STRING, MENU_MSAA1 + 2, L"MSAA &4x");
+    AppendMenuW(g_menu_aa, MF_STRING, MENU_MSAA1 + 3, L"MSAA &8x");
     AppendMenuW(g_menu_video, MF_POPUP, (UINT_PTR)g_menu_res, L"&Resolution\tF9");
+    AppendMenuW(g_menu_video, MF_POPUP, (UINT_PTR)g_menu_aa, L"&Anti-aliasing\tF8");
     AppendMenuW(g_menu_video, MF_STRING, MENU_WIDE, L"&Widescreen\tF10");
     AppendMenuW(g_menu_video, MF_STRING, MENU_FULL, L"&Full screen\tF11");
     AppendMenuW(g_menu_bar, MF_POPUP, (UINT_PTR)g_menu_video, L"&Video");
+    if ((g_menu_controls = CreatePopupMenu()) != NULL) {
+        AppendMenuW(g_menu_controls, MF_STRING, MENU_RCAM, L"Camera on the &Right Stick\tF7");
+        AppendMenuW(g_menu_bar, MF_POPUP, (UINT_PTR)g_menu_controls, L"&Controls");
+    }
     SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
     sdl_menu_update();
     sdl_menu_show(!(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP));
@@ -1545,7 +1821,7 @@ static void sdl_menu_init(void)
 
 static void sdl_menu_command(unsigned id)
 {
-    if (id >= MENU_RES1 && id < MENU_RES1 + 4) {
+    if (id >= MENU_RES1 && id < MENU_RES1 + NV2A_SCALE_MAX) {
         int pick = (int)(id - MENU_RES1) + 1, ans = 0;
         char msg[256];
         SDL_MessageBoxButtonData b[2];
@@ -1569,7 +1845,13 @@ static void sdl_menu_command(unsigned id)
     } else if (id == MENU_WIDE) {
         sdl_toggle_widescreen();
     } else if (id == MENU_FULL) {
-        sdl_toggle_fullscreen();
+        sdl_fullscreen_by_player();
+    } else if (id == MENU_SMAA) {
+        sdl_pick_smaa(!g_smaa_want);
+    } else if (id >= MENU_MSAA1 && id < MENU_MSAA1 + 4) {
+        sdl_pick_msaa(1 << (id - MENU_MSAA1));
+    } else if (id == MENU_RCAM) {
+        sdl_toggle_rstick_camera();
     }
 }
 #endif
@@ -2004,6 +2286,11 @@ static void sdl_pump(void)
         g_sdl_want_wide = -1;
         if (want != nv2a_widescreen()) sdl_toggle_widescreen();
     }
+    if (g_sdl_want_rcam >= 0) {
+        int want = g_sdl_want_rcam;
+        g_sdl_want_rcam = -1;
+        if (want != nv_window_pref_rstick_camera()) sdl_toggle_rstick_camera();
+    }
     while (SDL_PollEvent(&ev)) {
         switch (ev.type) {
         case SDL_QUIT:
@@ -2016,11 +2303,13 @@ static void sdl_pump(void)
                 SDL_Scancode k = ev.key.keysym.scancode;
                 if (k == SDL_SCANCODE_F11
                  || (k == SDL_SCANCODE_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
-                    sdl_toggle_fullscreen();
+                    sdl_fullscreen_by_player();
                     break;
                 }
                 if (k == SDL_SCANCODE_F10) { sdl_toggle_widescreen(); break; }
                 if (k == SDL_SCANCODE_F9)  { sdl_choose_scale(); break; }
+                if (k == SDL_SCANCODE_F8)  { sdl_choose_aa(); break; }
+                if (k == SDL_SCANCODE_F7)  { sdl_toggle_rstick_camera(); break; }
             }
             sdl_key(ev.key.keysym.scancode, 1);
             break;
@@ -2410,6 +2699,59 @@ static uint32_t psh_hash(void)
  * fetch(), which copies the constant into the packed vertex, so "has an
  * array" and "has a value" are the same question here. Position is always
  * present -- do_draw() rejects a batch without it before this is reached. */
+/* RECOMP_GL_TEXGEN=0: no generated coordinates, as before; =ab: every other
+ * displayed frame without them, for a before-and-after from one run. */
+static int texgen_off(void)
+{
+    static int off = -1;
+    if (off < 0) { const char *v = getenv("RECOMP_GL_TEXGEN");
+                   off = !v ? 0 : *v == '0' ? 1 : (*v == 'a' || *v == 'A') ? 2 : 0; }
+    return off == 2 ? (int)(S.frames & 1u) : off;
+}
+
+/*
+ * Texture coordinate generation, for the fixed-function transform
+ * (NV097_SET_TEXGEN_S..Q): which components of which stage the T&L unit makes
+ * itself, and what that needs read.
+ *
+ * The normal-based modes are made (see emit_ff). The two linear modes would
+ * need the planes as uniforms of their own and this title has not been seen
+ * to ask for them: their components stay the vertex's own, and the first
+ * batch that asks says so. RECOMP_GL_TEXGEN=0 makes none, as before.
+ */
+static void texgen_describe(Nv2aVshFixed *f)
+{
+    int s, c, nrm = 0;
+    if (texgen_off()) return;
+    for (s = 0; s < 4; s++) {
+        int any = 0;
+        for (c = 0; c < 4; c++) {
+            uint8_t code = NV2A_TEXGEN_OFF;
+            switch (S.texgen[s][c]) {
+            case 0x2402: if (c < 2) code = NV2A_TEXGEN_SPHERE_MAP; break;
+            case 0x8511: if (c < 3) code = NV2A_TEXGEN_NORMAL_MAP; break;
+            case 0x8512: if (c < 3) code = NV2A_TEXGEN_REFLECTION_MAP; break;
+            case 0: break;
+            default: {
+                static int said;
+                if (said++ < 4)
+                    fprintf(stderr, "[GL] texture coordinates generated by mode %04X (stage %d, %c) "
+                            "are not made: the vertex's own are used\n", S.texgen[s][c], s, "STRQ"[c]);
+                break; }
+            }
+            f->texgen[s][c] = code;
+            if (code) { any = 1; nrm = 1; }
+        }
+        /* The components left to the vertex read its coordinate -- the
+         * attribute's latched value when the batch has no array of them. */
+        if (any) f->inputs_read |= 1u << (9 + s);
+    }
+    if (nrm && !f->lit) {
+        if (S.attr[2].size || sticky_attrs()) { f->inputs_read |= 1u << 2; f->has_normal = 1; }
+        f->tg_normalize = S.normalization ? 1 : 0;
+    }
+}
+
 static void ff_describe(Nv2aVshFixed *f)
 {
     int i;
@@ -2444,6 +2786,7 @@ static void ff_describe(Nv2aVshFixed *f)
                             | (S.normalization ? 8 : 0));
         f->light_mask = (uint16_t)(S.light_enable_mask & 0xFFFFu);
     }
+    texgen_describe(f);
 }
 
 
@@ -2472,6 +2815,13 @@ static void dump_msl_pair(uint32_t hash, const char *vsrc, const char *fsrc)
     f = fopen(nm, "wb");
     if (f) { fputs(fsrc, f); fclose(f); }
 }
+
+/* The program being built right now, by its key in g_pcache -- for a backend
+ * to file the blend recipes it draws it with under (the shader seed, at
+ * shader_cache_start). 0 outside a build. */
+static uint32_t g_seed_building;
+uint32_t nv2a_seed_building_id(void);
+uint32_t nv2a_seed_building_id(void) { return g_seed_building; }
 
 static int ff_program_for_current(void)
 {
@@ -2512,10 +2862,14 @@ static int ff_program_for_current(void)
         free(fsrc); free(vsrc); S.shader_fails++; return -1;
     }
     if (msl && getenv("RECOMP_GL_DUMP_MSL")) dump_msl_pair(hash, vsrc, fsrc);
+    g_seed_building = hash;
     prog = build_program(vsrc, fsrc, "fixed-function transform + combiners");
+    g_seed_building = 0;
     free(vsrc);
     free(fsrc);
     if (!prog) { S.shader_fails++; return -1; }
+    /* What it was made from, for the next start, here or anywhere. */
+    nv2a_sc_state_note(hash, 2, &f, (uint32_t)sizeof f, &S.psh, (uint32_t)sizeof S.psh);
     if (g_pcache[slot].used && g_pcache[slot].prog) G->prog_free(g_pcache[slot].prog);
     free(g_pcache[slot].dis);
     memset(&g_pcache[slot], 0, sizeof g_pcache[slot]);
@@ -2701,8 +3055,12 @@ static int program_for_current(void)
                 S.psh.tex_alpha_only[3], S.psh.alpha_test, S.psh.alpha_func,
                 S.psh.alpha_ref, fsrc ? fsrc : "(solid)");
       } }
+    g_seed_building = fsrc ? hash : 0;
     prog = build_program(vsrc, fsrc ? fsrc : frag_solid(),
                          "translated vertex program + combiners");
+    g_seed_building = 0;
+    if (prog && fsrc)   /* what it was made from (a diagnostic's solid colour: not) */
+        nv2a_sc_state_note(hash, 1, S.prog + start * 4, (uint32_t)len * 16u, &S.psh, (uint32_t)sizeof S.psh);
     free(vsrc);
     free(fsrc);
     if (!prog) { S.shader_fails++; return -1; }
@@ -2881,6 +3239,135 @@ static void tex_alpha_census(const uint8_t *rgba, uint32_t w, uint32_t h,
     fflush(stderr);
 }
 
+/* One level of a texture -- w x h texels at `src`, `pitch` bytes a row for a
+ * linear one -- decoded to RGBA8, row 0 first, into `rgba`. 0 for a format
+ * this cannot decode. */
+static int g_upload_bias_bg;   /* see psh_sync_textures: bump sources */
+static int decode_level(uint32_t color, const uint8_t *src, uint32_t w, uint32_t h,
+                        uint32_t pitch, uint8_t *rgba)
+{
+    if (fmt_is_dxt(color)) {
+        /* Decoded here rather than handed to the driver compressed.
+         *
+         * Passing the blocks straight through is faster and exact, but it
+         * makes every texture in the game depend on the host advertising
+         * S3TC -- and when it does not, glCompressedTexImage2D fails, the
+         * texture stays undefined, and every surface samples black. That is
+         * a whole-screen failure caused by a driver capability, which is not
+         * a trade worth making for an upload that happens once per texture
+         * and is cached afterwards.
+         *
+         * A block at a time: decoded per texel, every block was decoded
+         * sixteen times -- 4 ms a texture, and the 49 a new area brings at
+         * once were a 200 ms stall in the middle of play. */
+        uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bb = d3d8_format_dxt_block_bytes(color);
+        uint32_t bx, by, k;
+        for (by = 0; by < bh; by++)
+            for (bx = 0; bx < bw; bx++) {
+                uint32_t px[16];
+                d3d8_dxt_decode_block(src + ((size_t)by * bw + bx) * bb, color, px);
+                for (k = 0; k < 16; k++) {
+                    uint32_t x = bx * 4 + (k & 3u), y = by * 4 + (k >> 2), argb = px[k];
+                    uint8_t *o;
+                    if (x >= w || y >= h) continue;
+                    if (g_upload_bias_bg) argb ^= 0x00008080u;
+                    o = rgba + ((size_t)y * w + x) * 4;
+                    o[0] = (uint8_t)(argb >> 16);
+                    o[1] = (uint8_t)(argb >> 8);
+                    o[2] = (uint8_t)argb;
+                    o[3] = (uint8_t)(argb >> 24);
+                }
+            }
+        return 1;
+    } else {
+        /* Where each column and each row lands in a swizzled image, worked
+         * out once per level: swizzle_offset(x, y) is offx[x] | offy[y], and
+         * working it out per texel was most of the time a swizzled upload
+         * took. */
+        static uint32_t offx[4096], offy[4096];
+        uint32_t lin = fmt_is_swz(color) ? swz_to_linear(color) : color;
+        uint32_t bpp = linear_bpp(lin);
+        uint32_t x, y;
+        int swz = fmt_is_swz(color);
+        if (!bpp) return 0;
+        if (swz) {
+            uint32_t mx, my;
+            xbox_swizzle_masks(w, h, &mx, &my);
+            for (x = 0; x < w; x++) offx[x] = swizzle_deposit(x, mx);
+            for (y = 0; y < h; y++) offy[y] = swizzle_deposit(y, my);
+        }
+        for (y = 0; y < h; y++) {
+            for (x = 0; x < w; x++) {
+                const uint8_t *p;
+                uint32_t argb;
+                if (swz)
+                    p = src + (size_t)(offx[x] | offy[y]) * bpp;
+                else
+                    p = src + (size_t)y * (pitch ? pitch : w * bpp) + (size_t)x * bpp;
+                argb = decode_texel(lin, p);
+                if (g_upload_bias_bg) argb ^= 0x00008080u;
+                rgba[((size_t)y * w + x) * 4 + 0] = (uint8_t)(argb >> 16);
+                rgba[((size_t)y * w + x) * 4 + 1] = (uint8_t)(argb >> 8);
+                rgba[((size_t)y * w + x) * 4 + 2] = (uint8_t)argb;
+                rgba[((size_t)y * w + x) * 4 + 3] = (uint8_t)(argb >> 24);
+            }
+        }
+        return 1;
+    }
+}
+
+/*
+ * The title's own mipmap chain: how many of its levels to upload.
+ *
+ * The console sampled a mipmapped texture from the chain stored in it, level
+ * after level -- each a swizzled or compressed image half the size of the one
+ * before, packed one after another from the texture's address, as many as
+ * the format register's MIPMAP_LEVELS says. For a long time only level 0 was
+ * decoded here, and a chain made by box-filtering it (RECOMP_GL_MIPMAP=1)
+ * blurred this title's texture atlases into each other; so a distant surface
+ * sampled its full-size image at several texels a pixel and shimmered. The
+ * title's chain is what it was drawn with.
+ *
+ * All of it when the stage samples with a mipmapped filter (3 to 6), as many
+ * as the format register says -- no more than the size allows, and no more
+ * than TEXTURE_CONTROL0's MAX_LOD_CLAMP lets the sampler reach, as xemu reads
+ * it -- and 1 otherwise: a linear texture has no chain. RECOMP_GL_TITLE_MIPS=0
+ * uploads the base level alone, as before.
+ */
+static uint32_t tex_title_levels(const TexStage *t, uint32_t w, uint32_t h)
+{
+    static int on = -1;
+    uint32_t minf = (t->filter >> 16) & 0xF, n, m, maxl, clamp;
+    if (on < 0) { const char *v = getenv("RECOMP_GL_TITLE_MIPS"); on = v ? atoi(v) != 0 : 1; }
+    if (!on || minf < 3 || minf > 6 || t->levels < 2) return 1;
+    if (!fmt_is_swz(t->color) && !fmt_is_dxt(t->color)) return 1;
+    m = w > h ? w : h;
+    for (maxl = 1; (1u << (maxl - 1)) < m; maxl++) { }
+    n = t->levels < maxl ? t->levels : maxl;
+    clamp = ((t->control0 >> 6) & 0xFFFu) >> 8;      /* MAX_LOD_CLAMP, 4.8 fixed point */
+    if (clamp + 1 < n) n = clamp + 1;
+    return n ? n : 1;
+}
+
+/* Anisotropic filtering for a mipmapped texture: 16x, or RECOMP_GL_ANISO
+ * (1 turns it off), and never less than the title asked for itself
+ * (TEXTURE_CONTROL0's LOG_MAX_ANISO). With the chain, the level is chosen for
+ * a surface's narrow side and up to that many samples are taken along its
+ * long one: a road or a wall seen at a glancing angle stays sharp instead of
+ * going to the blur of the level its long side needs. */
+static uint8_t tex_aniso(const TexStage *t)
+{
+    static int forced = -1;
+    int title = 1 << ((t->control0 >> 4) & 3);
+    if (forced < 0) {
+        const char *v = getenv("RECOMP_GL_ANISO");
+        forced = v ? atoi(v) : 16;
+        if (forced < 1) forced = 1;
+        if (forced > 16) forced = 16;
+    }
+    return (uint8_t)(forced > title ? forced : title);
+}
+
 static uint32_t upload_texture_inner(const TexStage *t);
 /*
  * The texture for a stage whose address is a surface this backend renders
@@ -2895,7 +3382,6 @@ static uint32_t upload_texture_inner(const TexStage *t);
  * undefined; the console reads whatever is there. The surface is copied
  * first and the copy is sampled.
  */
-static int g_upload_bias_bg;   /* see psh_sync_textures: bump sources */
 static int g_fb_copies;
 static uint32_t surface_texture_for(const TexStage *t, float *sx, float *sy, int *slot_out)
 {
@@ -2967,9 +3453,14 @@ static uint32_t tex_content(uint32_t color, uint32_t height, uint32_t pitch,
 static void tcache_drop(uint32_t k)
 {
     if (g_tcache[k].used && g_tcache[k].tex) {
+        uint32_t l, wl = g_tcache[k].w, hl = g_tcache[k].h;
         G->tex_free(g_tcache[k].tex);
         g_prof.tex_held--;
-        g_prof.tex_held_bytes -= (unsigned long long)g_tcache[k].w * g_tcache[k].h * 4;
+        for (l = 0; l < (g_tcache[k].levels ? g_tcache[k].levels : 1); l++) {
+            g_prof.tex_held_bytes -= (unsigned long long)wl * hl * 4;
+            wl = wl > 1 ? wl / 2 : 1;
+            hl = hl > 1 ? hl / 2 : 1;
+        }
     }
     g_tcache[k].tex = 0;
     g_tcache[k].offset = 0xFFFFFFFFu;
@@ -3034,17 +3525,164 @@ static void tcache_verify(void)
         }
     }
 }
+
+/* How a texture is sampled, from its stage's registers: filtering and
+ * wrapping, for `nlev` levels of the title's chain (tex_title_levels). */
+static void tex_sampler(const TexStage *t, uint32_t nlev, Nv2aSampler *out)
+{
+    Nv2aSampler smp;
+    /*
+     * Filtering, as the title asked for it.
+     *
+     * NV097_SET_TEXTURE_FILTER was being read into t->filter and then
+     * ignored: every texture in the game got LINEAR/LINEAR and no mipmaps at
+     * all. That is wrong in both directions. A title that asks for point
+     * sampling -- interface art, palettised sprites, anything whose texels
+     * are meant to be square -- got it blurred; and a title that asks for a
+     * mipmapped minification filter, which this one does for most of the
+     * city, got none, so every surface at a distance sampled its full-size
+     * texture at one texel per several pixels and aliased.
+     *
+     * The aliasing gets worse the better the rest of the renderer gets. At
+     * 640x480 it is a shimmer; at the 2560x1920 the launcher now uses, the
+     * same surfaces are being minified four times as hard and it is the most
+     * obvious thing left in a still frame.
+     *
+     * The chain is generated rather than decoded from the title's own levels.
+     * The console supplies its mipmaps in the texture and this reads only
+     * level zero, so glGenerateMipmap is not what the hardware sampled -- it
+     * is a box filter over the same image. For a title's own artist-authored
+     * chain the difference is visible in principle and small in practice, and
+     * it costs one call at upload against decoding a swizzled, DXT-compressed
+     * chain per level. Worth revisiting; not worth blocking the fix on.
+     */
+    {
+        uint32_t minf = (t->filter >> 16) & 0xF;
+        uint32_t magf = (t->filter >> 24) & 0xF;
+        static int want_mips = -1;
+        if (want_mips < 0) {
+            const char *v = getenv("RECOMP_GL_MIPMAP");
+            want_mips = v ? atoi(v) : 0;
+        }
+
+        /* A generated chain is not the title's chain, and on this title's art
+         * that difference is not small.
+         *
+         * The reasoning above was that a box filter over level zero is close
+         * enough to an artist's chain to be worth having. On a photograph it
+         * would be. This title's textures are mostly ATLASES -- many small
+         * pieces packed into one image, addressed by uv rectangle -- and a box
+         * filter does not know where the seams are. Every level mixes
+         * neighbouring pieces into each other, and by the third level a sign
+         * is carrying its neighbour's colour. Trilinear then blends toward
+         * those levels for anything not filling the screen, so the whole
+         * world goes soft and slightly wrong at once. The first player to
+         * see it called it straight away: worse than before.
+         *
+         * The console had the real chain sitting in the texture. Until this
+         * decodes it -- swizzled and DXT-compressed, per level -- the honest
+         * thing is to sample level zero, which is what the port did for
+         * months and what nobody complained about. The half of the fix that
+         * was a real bug stays: the title asks for NEAREST on art that must
+         * not be blurred, and for mirrored wrap, and was getting neither.
+         *
+         * So a mipmapped mode is honoured as its base filter -- 3 and 5 are
+         * the NEAREST pair, 4 and 6 the LINEAR pair -- and no chain is
+         * invented. RECOMP_GL_MIPMAP=1 puts the generated chain back for
+         * anyone who wants to compare.
+         *
+         * The title's own chain is decoded now (tex_title_levels), and a
+         * texture that has one is sampled as the title asked, mipmaps,
+         * trilinear and all, with anisotropic filtering (tex_aniso). One
+         * without a chain is still sampled at its base level.
+         */
+        memset(&smp, 0, sizeof smp);
+        if (minf >= 3 && minf <= 6) {
+            if (nlev > 1 || want_mips) {
+                /* 3 and 5 sample nearest within a level, 4 and 6 linear;
+                 * 3 and 4 take the nearest level, 5 and 6 blend two. */
+                smp.min_linear = (minf == 4 || minf == 6);
+                smp.mip = (minf == 3 || minf == 4) ? 1 : 2;
+                /* The title's levels, in rgba after the base; none (0)
+                 * asks the device to make a chain itself. */
+                smp.levels = (uint8_t)(nlev > 1 ? nlev : 0);
+                /* Anisotropy only makes sense alongside a chain, and it was
+                 * the other half of what made distant surfaces look smeared
+                 * rather than sharp. It goes with the chain. */
+                smp.aniso = tex_aniso(t);
+            } else {
+                smp.min_linear = !(minf == 3 || minf == 5);
+            }
+        } else {
+            smp.min_linear = (minf != 1);
+        }
+        smp.mag_linear = (magf != 1);
+    }
+    /* Wrap. Mode 1 is repeat, 2 mirrors, 4 uses the border colour and 3 and 5
+     * clamp; everything that was not 1 used to clamp, so a mirrored texture
+     * came out as its left half stretched across the whole surface. Fixing
+     * that was the point and it stays fixed.
+     *
+     * Mode 4 goes back to clamping, though, and for the same reason the
+     * invented mipmaps had to go: it needs a border colour this does not
+     * read yet. NV097_SET_TEXTURE_BORDER_COLOR is not decoded anywhere here,
+     * so asking GL for CLAMP_TO_BORDER asks for GL's default border, which
+     * is transparent black -- and a texture atlas sampled a hair outside its
+     * rectangle then returns black instead of the neighbouring texel. That
+     * is a thin dark line along every seam in the world, which is exactly
+     * what the player saw appear. Clamping is wrong in the same small way it was
+     * wrong before, and wrong invisibly rather than wrong in black. */
+    /* 0 clamp, 1 repeat, 2 mirrored repeat -- in the device's terms. */
+    { static const uint8_t wrap_of[8] = { 0, 1, 2, 0, 0, 0, 0, 0 };
+      smp.wrap_s = wrap_of[t->addr & 7u];
+      smp.wrap_t = wrap_of[(t->addr >> 8) & 7u]; }
+    *out = smp;
+}
+
+/*
+ * The sampler as one number, for the texture cache to tell two apart.
+ *
+ * A device texture is made with its sampling (Nv2aSampler) and keeps it, so
+ * the cache has to treat one picture sampled two ways as two textures. It did
+ * not: whichever draw uploaded a texture first fixed its wrapping and filtering
+ * for every draw after it. The characters are shaded through one shared
+ * texture of tone ramps -- a coordinate from the light on the surface picks
+ * the tone -- which some of their materials address clamped and some wrapped.
+ * A ramp read past its end then came back from the far side of the picture
+ * where the title asked for its edge, or the other way round, depending on
+ * which material happened to be drawn first in the session: a face or an arm
+ * in another material's tones.
+ */
+static uint32_t sampler_key(const Nv2aSampler *s)
+{
+    return (uint32_t)s->min_linear | (uint32_t)s->mag_linear << 1 | (uint32_t)(s->mip & 3) << 2
+         | (uint32_t)(s->wrap_s & 3) << 4 | (uint32_t)(s->wrap_t & 3) << 6 | (uint32_t)s->aniso << 8
+         | (uint32_t)s->levels << 16;
+}
+
 static uint32_t upload_texture_inner(const TexStage *t)
 {
     uint32_t va = resolve(t->offset);
     const uint8_t *src = guest(va);
-    uint32_t w = t->width, h = t->height, i, hash, key, bytes;
+    uint32_t w = t->width, h = t->height, i, hash, key, bytes, nlev, sampling;
+    int other_sampling = 0;
     uint32_t tex;
     uint8_t *rgba = NULL;
+    size_t rgba_bytes = 0;
     Nv2aSampler smp;
     int slot = -1, stale = -1, tomb = -1;
 
     if (!w || !h || w > 4096 || h > 4096) return 0;
+    nlev = tex_title_levels(t, w, h);
+    tex_sampler(t, nlev, &smp);
+    sampling = sampler_key(&smp);
+    /* RECOMP_GL_TEX_ONESAMPLER=1: one texture however it is sampled -- the
+     * first draw's sampling for all -- as before, to compare (=ab: every
+     * other displayed frame, from textures of their own). */
+    { static int one = -1;
+      if (one < 0) { const char *v = getenv("RECOMP_GL_TEX_ONESAMPLER");
+                     one = !v ? 0 : (*v == 'a' || *v == 'A') ? 2 : 1; }
+      if (one == 1 || (one == 2 && (S.frames & 1u))) sampling = 0x80000000u; }
 
     /* Same routing census as the vertex arrays, for textures: a texture at
      * a heap VA below the arena mark is decoded from the window instead. */
@@ -3079,7 +3717,8 @@ static uint32_t upload_texture_inner(const TexStage *t)
         uint32_t k = (key + i) % TEX_CACHE;
         if (g_tcache[k].used && g_tcache[k].offset == t->offset
          && g_tcache[k].format == t->color && g_tcache[k].w == w
-         && g_tcache[k].h == h && g_tcache[k].bias == g_upload_bias_bg) {
+         && g_tcache[k].h == h && g_tcache[k].bias == g_upload_bias_bg
+         && g_tcache[k].levels == nlev && g_tcache[k].sampling == sampling) {
             if (g_tcache[k].hash != hash) {
                 /* The sample changed. Not this frame's: upload over it,
                  * unless a later entry already holds the new picture. */
@@ -3090,6 +3729,9 @@ static uint32_t upload_texture_inner(const TexStage *t)
             g_tcache[k].last_draw = S.draws;
             return g_tcache[k].tex;
         }
+        if (g_tcache[k].used && g_tcache[k].offset == t->offset && g_tcache[k].format == t->color
+         && g_tcache[k].w == w && g_tcache[k].h == h && g_tcache[k].sampling != sampling)
+            other_sampling = 1;
         if (!g_tcache[k].used) { slot = (int)k; break; }
         if (!g_tcache[k].tex && tomb < 0) tomb = (int)k;   /* see tcache_drop */
     }
@@ -3124,94 +3766,53 @@ static uint32_t upload_texture_inner(const TexStage *t)
     /* Until the new texture exists the slot holds nothing. */
     tcache_drop((uint32_t)slot);
 
-    if (fmt_is_dxt(t->color)) {
-        /* Decoded here rather than handed to the driver compressed.
-         *
-         * Passing the blocks straight through is faster and exact, but it
-         * makes every texture in the game depend on the host advertising
-         * S3TC -- and when it does not, glCompressedTexImage2D fails, the
-         * texture stays undefined, and every surface samples black. That is
-         * a whole-screen failure caused by a driver capability, which is not
-         * a trade worth making for an upload that happens once per texture
-         * and is cached afterwards.
-         *
-         * A block at a time: decoded per texel, every block was decoded
-         * sixteen times -- 4 ms a texture, and the 49 a new area brings at
-         * once were a 200 ms stall in the middle of play. */
-        uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bb = d3d8_format_dxt_block_bytes(t->color);
-        uint32_t bx, by, k;
-
-        rgba = (uint8_t *)malloc((size_t)w * h * 4);
+    /* Level 0, and the rest of the title's chain after it when it has one
+     * (tex_title_levels): each level decoded as the base is, from where the
+     * last one ended, into one buffer level after level. */
+    {
+        uint32_t l, wl = w, hl = h;
+        size_t so = 0, dof = 0;
+        for (l = 0; l < nlev; l++) {
+            rgba_bytes += (size_t)wl * hl * 4;
+            wl = wl > 1 ? wl / 2 : 1;
+            hl = hl > 1 ? hl / 2 : 1;
+        }
+        rgba = (uint8_t *)malloc(rgba_bytes);
         if (!rgba) return 0;
-        for (by = 0; by < bh; by++)
-            for (bx = 0; bx < bw; bx++) {
-                uint32_t px[16];
-                d3d8_dxt_decode_block(src + ((size_t)by * bw + bx) * bb, t->color, px);
-                for (k = 0; k < 16; k++) {
-                    uint32_t x = bx * 4 + (k & 3u), y = by * 4 + (k >> 2), argb = px[k];
-                    uint8_t *o;
-                    if (x >= w || y >= h) continue;
-                    if (g_upload_bias_bg) argb ^= 0x00008080u;
-                    o = rgba + ((size_t)y * w + x) * 4;
-                    o[0] = (uint8_t)(argb >> 16);
-                    o[1] = (uint8_t)(argb >> 8);
-                    o[2] = (uint8_t)argb;
-                    o[3] = (uint8_t)(argb >> 24);
+        for (l = 0, wl = w, hl = h; l < nlev; l++) {
+            if (!decode_level(t->color, src + so, wl, hl, t->pitch, rgba + dof)) {
+                /* Say so: a texture in a format this cannot decode draws as
+                 * nothing (or black), and it is otherwise invisible in every
+                 * log. Once per distinct format and size, then a count. */
+                static uint32_t seen[32]; static int nseen; static unsigned long total;
+                uint32_t k = (t->color << 16) ^ (w << 4) ^ h; int q, found = 0;
+                total++;
+                for (q = 0; q < nseen; q++) if (seen[q] == k) { found = 1; break; }
+                if (!found && nseen < 32) {
+                    seen[nseen++] = k;
+                    fprintf(stderr, "  [GL] TEXTURE FORMAT %02X NOT DECODED: %ux%u at %08X "
+                            "(pitch %u, draw %u; %lu such uploads so far)\n",
+                            t->color, w, h, t->offset, t->pitch, S.draws, total);
                 }
+                free(rgba);
+                return 0;
             }
-        tex_alpha_census(rgba, w, h, t->color, 1);
-    } else {
-        uint32_t lin = fmt_is_swz(t->color) ? swz_to_linear(t->color) : t->color;
-        uint32_t bpp = linear_bpp(lin);
-        uint32_t x, y;
-
-        if (!bpp) {
-            /* Say so: a texture in a format this cannot decode draws as
-             * nothing (or black), and it is otherwise invisible in every log.
-             * Once per distinct format and size, then a count. */
-            static uint32_t seen[32]; static int nseen; static unsigned long total;
-            uint32_t k = (t->color << 16) ^ (w << 4) ^ h; int q, found = 0;
-            total++;
-            for (q = 0; q < nseen; q++) if (seen[q] == k) { found = 1; break; }
-            if (!found && nseen < 32) {
-                seen[nseen++] = k;
-                fprintf(stderr, "  [GL] TEXTURE FORMAT %02X NOT DECODED: %ux%u at %08X "
-                        "(pitch %u, draw %u; %lu such uploads so far)\n",
-                        t->color, w, h, t->offset, t->pitch, S.draws, total);
-            }
-            return 0;
+            so  += tex_bytes(t->color, wl, hl);
+            dof += (size_t)wl * hl * 4;
+            wl = wl > 1 ? wl / 2 : 1;
+            hl = hl > 1 ? hl / 2 : 1;
         }
-        /* Where each column and each row lands in a swizzled image, worked
-         * out once: swizzle_offset(x, y) is offx[x] | offy[y], and working
-         * it out per texel was most of the time a swizzled upload took. */
-        static uint32_t offx[4096], offy[4096];
-        int swz = fmt_is_swz(t->color);
-        if (swz) {
-            uint32_t mx, my;
-            xbox_swizzle_masks(w, h, &mx, &my);
-            for (x = 0; x < w; x++) offx[x] = swizzle_deposit(x, mx);
-            for (y = 0; y < h; y++) offy[y] = swizzle_deposit(y, my);
-        }
-        rgba = (uint8_t *)malloc((size_t)w * h * 4);
-        if (!rgba) return 0;
-        for (y = 0; y < h; y++) {
-            for (x = 0; x < w; x++) {
-                const uint8_t *p;
-                uint32_t argb;
-                if (swz)
-                    p = src + (size_t)(offx[x] | offy[y]) * bpp;
-                else
-                    p = src + (size_t)y * (t->pitch ? t->pitch : w * bpp)
-                            + (size_t)x * bpp;
-                argb = decode_texel(lin, p);
-                if (g_upload_bias_bg) argb ^= 0x00008080u;
-                rgba[((size_t)y * w + x) * 4 + 0] = (uint8_t)(argb >> 16);
-                rgba[((size_t)y * w + x) * 4 + 1] = (uint8_t)(argb >> 8);
-                rgba[((size_t)y * w + x) * 4 + 2] = (uint8_t)argb;
-                rgba[((size_t)y * w + x) * 4 + 3] = (uint8_t)(argb >> 24);
-            }
-        }
-        tex_alpha_census(rgba, w, h, t->color, 0);
+        tex_alpha_census(rgba, w, h, t->color, fmt_is_dxt(t->color));
+        /* How much of the city has a chain, once a while: uploads with one,
+         * and the levels they carried. */
+        { static unsigned long n, with, lv, twice;
+          n++;
+          if (nlev > 1) { with++; lv += nlev; }
+          if (other_sampling) twice++;
+          if (n == 200 || n % 2000 == 0)
+              fprintf(stderr, "  [GL] mipmaps: %lu of %lu textures uploaded with the title's own "
+                              "chain (%.1f levels each); %lu a second time, sampled another way\n",
+                      with, n, with ? (double)lv / with : 0.0, twice); }
     }
     /* RECOMP_GL_DUMP_TEX=<prefix>: every texture as uploaded. A frame that
      * shades to black is either sampling the wrong place or sampling a black
@@ -3288,111 +3889,6 @@ static uint32_t upload_texture_inner(const TexStage *t)
             }
         } }
     }
-    /*
-     * Filtering, as the title asked for it.
-     *
-     * NV097_SET_TEXTURE_FILTER was being read into t->filter and then
-     * ignored: every texture in the game got LINEAR/LINEAR and no mipmaps at
-     * all. That is wrong in both directions. A title that asks for point
-     * sampling -- interface art, palettised sprites, anything whose texels
-     * are meant to be square -- got it blurred; and a title that asks for a
-     * mipmapped minification filter, which this one does for most of the
-     * city, got none, so every surface at a distance sampled its full-size
-     * texture at one texel per several pixels and aliased.
-     *
-     * The aliasing gets worse the better the rest of the renderer gets. At
-     * 640x480 it is a shimmer; at the 2560x1920 the launcher now uses, the
-     * same surfaces are being minified four times as hard and it is the most
-     * obvious thing left in a still frame.
-     *
-     * The chain is generated rather than decoded from the title's own levels.
-     * The console supplies its mipmaps in the texture and this reads only
-     * level zero, so glGenerateMipmap is not what the hardware sampled -- it
-     * is a box filter over the same image. For a title's own artist-authored
-     * chain the difference is visible in principle and small in practice, and
-     * it costs one call at upload against decoding a swizzled, DXT-compressed
-     * chain per level. Worth revisiting; not worth blocking the fix on.
-     */
-    {
-        uint32_t minf = (t->filter >> 16) & 0xF;
-        uint32_t magf = (t->filter >> 24) & 0xF;
-        static int want_mips = -1;
-        if (want_mips < 0) {
-            const char *v = getenv("RECOMP_GL_MIPMAP");
-            want_mips = v ? atoi(v) : 0;
-        }
-
-        /* A generated chain is not the title's chain, and on this title's art
-         * that difference is not small.
-         *
-         * The reasoning above was that a box filter over level zero is close
-         * enough to an artist's chain to be worth having. On a photograph it
-         * would be. This title's textures are mostly ATLASES -- many small
-         * pieces packed into one image, addressed by uv rectangle -- and a box
-         * filter does not know where the seams are. Every level mixes
-         * neighbouring pieces into each other, and by the third level a sign
-         * is carrying its neighbour's colour. Trilinear then blends toward
-         * those levels for anything not filling the screen, so the whole
-         * world goes soft and slightly wrong at once. The first player to
-         * see it called it straight away: worse than before.
-         *
-         * The console had the real chain sitting in the texture. Until this
-         * decodes it -- swizzled and DXT-compressed, per level -- the honest
-         * thing is to sample level zero, which is what the port did for
-         * months and what nobody complained about. The half of the fix that
-         * was a real bug stays: the title asks for NEAREST on art that must
-         * not be blurred, and for mirrored wrap, and was getting neither.
-         *
-         * So a mipmapped mode is honoured as its base filter -- 3 and 5 are
-         * the NEAREST pair, 4 and 6 the LINEAR pair -- and no chain is
-         * invented. RECOMP_GL_MIPMAP=1 puts the generated chain back for
-         * anyone who wants to compare.
-         */
-        memset(&smp, 0, sizeof smp);
-        if (minf >= 3 && minf <= 6) {
-            if (want_mips) {
-                /* 3 and 5 sample nearest within a level, 4 and 6 linear;
-                 * 3 and 4 take the nearest level, 5 and 6 blend two. */
-                smp.min_linear = (minf == 4 || minf == 6);
-                smp.mip = (minf == 3 || minf == 4) ? 1 : 2;
-                /* Anisotropy only makes sense alongside a chain, and it was
-                 * the other half of what made distant surfaces look smeared
-                 * rather than sharp. It goes with the chain. */
-                { static int aniso = -1;
-                  if (aniso < 0) {
-                      const char *v = getenv("RECOMP_GL_ANISO");
-                      aniso = v ? atoi(v) : 4;
-                      if (aniso < 1) aniso = 1;
-                      if (aniso > 16) aniso = 16;
-                  }
-                  smp.aniso = (uint8_t)aniso; }
-            } else {
-                smp.min_linear = !(minf == 3 || minf == 5);
-            }
-        } else {
-            smp.min_linear = (minf != 1);
-        }
-        smp.mag_linear = (magf != 1);
-    }
-    /* Wrap. Mode 1 is repeat, 2 mirrors, 4 uses the border colour and 3 and 5
-     * clamp; everything that was not 1 used to clamp, so a mirrored texture
-     * came out as its left half stretched across the whole surface. Fixing
-     * that was the point and it stays fixed.
-     *
-     * Mode 4 goes back to clamping, though, and for the same reason the
-     * invented mipmaps had to go: it needs a border colour this does not
-     * read yet. NV097_SET_TEXTURE_BORDER_COLOR is not decoded anywhere here,
-     * so asking GL for CLAMP_TO_BORDER asks for GL's default border, which
-     * is transparent black -- and a texture atlas sampled a hair outside its
-     * rectangle then returns black instead of the neighbouring texel. That
-     * is a thin dark line along every seam in the world, which is exactly
-     * what the player saw appear. Clamping is wrong in the same small way it was
-     * wrong before, and wrong invisibly rather than wrong in black. */
-    /* 0 clamp, 1 repeat, 2 mirrored repeat -- in the device's terms. */
-    { static const uint8_t wrap_of[8] = { 0, 1, 2, 0, 0, 0, 0, 0 };
-      smp.wrap_s = wrap_of[t->addr & 7u];
-      smp.wrap_t = wrap_of[(t->addr >> 8) & 7u]; }
-
     tex = G->tex_new(w, h, rgba, &smp);
     free(rgba);
     if (!tex) return 0;
@@ -3400,10 +3896,12 @@ static uint32_t upload_texture_inner(const TexStage *t)
     g_prof.n_tex_upload++;
     g_hf.tex_new++;
     g_prof.tex_held++;
-    g_prof.tex_held_bytes += (unsigned long long)w * h * 4;
+    g_prof.tex_held_bytes += (unsigned long long)rgba_bytes;
     g_tcache[slot].used = 1;
     g_tcache[slot].offset = t->offset; g_tcache[slot].format = t->color;
     g_tcache[slot].w = w; g_tcache[slot].h = h; g_tcache[slot].pitch = t->pitch;
+    g_tcache[slot].levels = nlev;
+    g_tcache[slot].sampling = sampling;
     g_tcache[slot].hash = hash; g_tcache[slot].tex = tex;
     g_tcache[slot].bias = g_upload_bias_bg;
     g_tcache[slot].va = va; g_tcache[slot].serial = contig_serial(va);
@@ -3630,6 +4128,16 @@ static void write_bmp(const char *nm, const uint8_t *buf,
     fclose(f);
 }
 
+/* How many times the frame dumps (RECOMP_GL_DUMP_FB) fire: 24, or
+ * RECOMP_GL_DUMP_MAX (up to the 72 pictures a surface is allowed). */
+static int dump_max(void)
+{
+    static int n = -1;
+    if (n < 0) { const char *v = getenv("RECOMP_GL_DUMP_MAX");
+                 n = v ? atoi(v) : 24; if (n < 1) n = 24; if (n > 72) n = 72; }
+    return n;
+}
+
 /* Write the current framebuffer out as a BMP, for looking at.
  *
  * Reads back rather than sharing the present path's buffer: the two are asked
@@ -3686,6 +4194,7 @@ static void dump_fbo(uint32_t rt, const char *prefix, int *counter, int limit)
                   fprintf(stderr, "  [GL] depth readback: not on the %s backend\n", G->name);
                   return;
               }
+              if (g_zrev) for (i = 0; i < np; i++) zb[i] = 1.0f - zb[i];
               for (i = 0; i < np; i++) {
                   if (zb[i] < lo) lo = zb[i];
                   if (zb[i] < 1.0f && zb[i] > hi) hi = zb[i];
@@ -3705,6 +4214,16 @@ static void dump_fbo(uint32_t rt, const char *prefix, int *counter, int limit)
                   if (z >= 1.0f) { at1++; continue; }
                   h[(int)(z * 10.0f) % 10]++;
               }
+              /* And what a w-buffered frame's depths are in the title's own
+               * units (w = depth x 2^24): the spread of a sample of them. */
+              { static float smp[4096]; uint32_t ns = 0, step = np / 4096 + 1, a, b;
+                for (j = 0; j < np && ns < 4096; j += step) if (zb[j] < 1.0f) smp[ns++] = zb[j];
+                for (a = 1; a < ns; a++) { float v = smp[a]; for (b = a; b > 0 && smp[b-1] > v; b--) smp[b] = smp[b-1]; smp[b] = v; }
+                if (ns) fprintf(stderr, "  [GL] depth as w (x 2^24): 1%% %.2f, 10%% %.2f, median %.2f, "
+                                "90%% %.2f, 99%% %.2f (%u samples)\n",
+                                smp[ns / 100] * 16777216.0, smp[ns / 10] * 16777216.0,
+                                smp[ns / 2] * 16777216.0, smp[ns * 9 / 10] * 16777216.0,
+                                smp[ns * 99 / 100] * 16777216.0, ns); }
               snprintf(nm, sizeof nm, "%s%03d_z.bmp", prefix, *counter - 1);
               write_bmp(nm, buf, pw, ph);
               fprintf(stderr, "  [GL] wrote %s -- %u px at the far plane "
@@ -3722,6 +4241,45 @@ static void dump_fbo(uint32_t rt, const char *prefix, int *counter, int limit)
  * NV2A's index list is already expanded in the pushbuffer, and a flat array
  * sidesteps having to reproduce the hardware's per-attribute strides on the
  * GL side. It costs a little bandwidth and removes a whole class of bug. */
+/*
+ * A surface with no alpha channel keeps none.
+ *
+ * Most of this title's surfaces are R5G6B5 -- the frame, and the copies of it
+ * the boost dash's heat haze is made from -- and the console stores no alpha
+ * for them at all: a blend that writes alpha writes nothing, and a texture
+ * read of the surface afterwards gives alpha 1. The targets here are RGBA,
+ * so the alpha a blend wrote stayed in them: where a shadow had been laid
+ * over the scene (black at half alpha, blended), on glass, under a spray of
+ * particles, the copy came back partly transparent, and the haze -- the copy
+ * blended over a distorted second copy by its alpha -- showed through there
+ * and nowhere else. So for those formats the alpha channel is never written
+ * (clears put 1 there), as it is never stored on the console.
+ * RECOMP_GL_SURF_ALPHA=1: write it as before.
+ */
+static int surf_has_alpha(uint32_t fmt)
+{
+    switch (fmt & 0xF) {
+    case 0:                    /* not set yet: leave it alone */
+    case 6: case 7:            /* X1A7R8G8B8 */
+    case 8:                    /* A8R8G8B8 */
+        return 1;
+    default:                   /* X1R5G5B5, R5G6B5, X8R8G8B8, B8, G8B8 */
+        return 0;
+    }
+}
+
+static uint32_t surf_color_mask(void)
+{
+    static int keep = -1;
+    uint32_t cm = S.color_mask ? S.color_mask : 0x01010101u;   /* 0: never set, all */
+    if (keep < 0) keep = getenv("RECOMP_GL_SURF_ALPHA") ? 1 : 0;
+    if (keep || surf_has_alpha(S.surf_format)) return S.color_mask;
+    cm &= ~0x01000000u;
+    /* The backends read 0 as "never set", so a mask that is left with no
+     * channel at all says so with a bit no channel uses. */
+    return cm ? cm : 0x80000000u;
+}
+
 /*
  * Bind the surface the title has set up, at the moment it is used.
  *
@@ -4408,6 +4966,169 @@ static void vc_report(const char *when)
             g_vc_st.converted / 1000, g_vc_st.hashed >> 10, g_vc_st.uploaded >> 10);
 }
 
+/* How big batches get, against the 16384 indices and 16384 inline words
+ * that used to be the limit (see MAX_INDICES): every batch that would have
+ * been cut then is counted, the first few described; and a batch that fills
+ * even today's room says so. */
+static void batch_size_note(int inl, uint32_t n)
+{
+    static unsigned long over_idx, over_inl, said, full;
+    static uint32_t big_idx, big_inl;
+    if (inl) {
+        if (S.inline_count >= MAX_INLINE && full++ < 4)
+            fprintf(stderr, "  [GL] draw %u: an inline batch filled %u words and was cut\n", S.draws, MAX_INLINE);
+        if (S.inline_count <= 16384) return;
+        over_inl++;
+        if (S.inline_count > big_inl) big_inl = S.inline_count;
+    } else {
+        if (n >= MAX_INDICES && full++ < 4)
+            fprintf(stderr, "  [GL] draw %u: a batch filled %u indices and was cut\n", S.draws, MAX_INDICES);
+        if (n <= 16384) return;
+        over_idx++;
+        if (n > big_idx) big_idx = n;
+    }
+    if (said < 12 || (over_idx + over_inl) % 1000 == 0) {
+        said++;
+        fprintf(stderr, "  [GL] big batch: draw %u flip %u prim %u %s %u %s -- past the old 16384 "
+                        "(%lu index batches so far, largest %u; %lu inline, largest %u words)\n",
+                S.draws, S.flips, S.prim, S.xf_mode == NV2A_XF_MODE_FIXED ? "ff" : "vp",
+                inl ? S.inline_count : n, inl ? "inline words" : "indices",
+                over_idx, big_idx, over_inl, big_inl);
+    }
+}
+
+/* Draws that never reach the backend, and why -- printed with the census
+ * below. A missing piece of the world is either never sent, or sent and
+ * dropped here, or drawn and hidden; this says whether it is the second. */
+enum { DROP_PRIM, DROP_POINTS, DROP_NOVSIZE, DROP_EMPTY, DROP_NOPOS,
+       DROP_NOPROG, DROP_SHORT, DROP_NOMEM, DROP_LOST, DROP_N };
+static unsigned long g_drop[DROP_N];
+
+/* RECOMP_GL_PRIMLOG=<s>: draws and vertices by primitive type (the
+ * NV097_SET_BEGIN_END numbers: 1 points, 2 lines, 3 line loop, 4 line strip,
+ * 5 triangles, 6 strip, 7 fan, 8 quads, 9 quad strip, 10 polygon), fixed-
+ * function and programmable apart, every s seconds -- what a scene is drawn
+ * with, when something in it is missing. */
+static void prim_note(int inl)
+{
+    static int on = -1; static double every, next;
+    static unsigned long draws[2][11], verts[2][11];
+    uint32_t n = inl ? S.inline_count : S.idx_count, p = S.prim;
+    int k, i;
+    if (on < 0) { const char *v = getenv("RECOMP_GL_PRIMLOG");
+                  on = v ? 1 : 0; every = v ? atof(v) : 0.0; if (every <= 0) every = 10.0;
+                  next = mono_now() + every; }
+    if (!on || p > 10) return;
+    k = (S.xf_mode == NV2A_XF_MODE_FIXED) ? 0 : 1;
+    draws[k][p]++; verts[k][p] += n;
+    if (mono_now() >= next) {
+        next = mono_now() + every;
+        for (k = 0; k < 2; k++) {
+            fprintf(stderr, "[PRIMS] %s:", k ? "programs" : "fixed-function");
+            for (i = 1; i <= 10; i++)
+                if (draws[k][i]) fprintf(stderr, " p%d %lu draws %lu verts;", i, draws[k][i], verts[k][i]);
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "[PRIMS] not drawn: %lu unknown primitive, %lu points, %lu inline without "
+                        "attributes, %lu empty, %lu no position, %lu no program, %lu too short, "
+                        "%lu no memory, %lu surface lost\n",
+                g_drop[DROP_PRIM], g_drop[DROP_POINTS], g_drop[DROP_NOVSIZE], g_drop[DROP_EMPTY],
+                g_drop[DROP_NOPOS], g_drop[DROP_NOPROG], g_drop[DROP_SHORT], g_drop[DROP_NOMEM],
+                g_drop[DROP_LOST]);
+        fflush(stderr);
+    }
+}
+
+/*
+ * RECOMP_GL_POINTLOG=<s>: the point lists the title draws -- which are not
+ * drawn (see do_draw_body) -- a line each for the first few, with the point
+ * state, then a count every s seconds.
+ */
+static void points_note(int inl)
+{
+    static int on = -1, lines; static double every, next;
+    static unsigned long draws[2], verts[2];
+    int k;
+    uint32_t n = inl ? S.inline_count : S.idx_count;
+    if (on < 0) { const char *v = getenv("RECOMP_GL_POINTLOG");
+                  on = v ? 1 : 0; every = v ? atof(v) : 0.0; if (every <= 0) every = 10.0;
+                  next = mono_now() + every; }
+    if (!on) return;
+    k = (S.xf_mode == NV2A_XF_MODE_FIXED) ? 0 : 1;
+    draws[k]++; verts[k] += n;
+    if (lines < 24) {
+        lines++;
+        fprintf(stderr, "[POINTS] draw %u flip %u %s start %u, %u %s; size %u/8, params %s "
+                "(%g %g %g %g %g %g %g %g), smooth %s; tex0 %s %ux%u fmt %08X; blend %d, depth test %d mask %d\n",
+                S.draws, S.flips, k ? "prog" : "ff", S.prog_start, n, inl ? "inline words" : "indices",
+                S.point_size, S.point_params_enable ? "on" : "off",
+                S.point_params[0], S.point_params[1], S.point_params[2], S.point_params[3],
+                S.point_params[4], S.point_params[5], S.point_params[6], S.point_params[7],
+                S.point_smooth_enable ? "on" : "off",
+                S.tex[0].enabled ? "on" : "off", S.tex[0].width, S.tex[0].height, S.tex[0].format,
+                S.blend_enable, S.depth_test, S.depth_mask);
+    }
+    if (mono_now() >= next) {
+        next = mono_now() + every;
+        fprintf(stderr, "[POINTS] so far: %lu fixed-function draws (%lu), %lu programmable (%lu)\n",
+                draws[0], verts[0], draws[1], verts[1]);
+    }
+}
+
+/*
+ * RECOMP_GL_TEXGENLOG=<s>: the fixed-function batches that generate texture
+ * coordinates -- a line for each new arrangement, with its texture matrix,
+ * then a count every s seconds. RECOMP_GL_SKIP_TEXGEN=1 leaves them out of the
+ * picture, to see what they are (=ab: every other frame). Returns 1 to drop
+ * the draw.
+ */
+static int texgen_note(uint32_t n)
+{
+    static int on = -1, skip, lines; static double every, next;
+    static unsigned long draws, tris;
+    static uint32_t seen[64]; static int nseen;
+    int s, c, any = 0;
+    uint32_t key = 0;
+    if (on < 0) { const char *v = getenv("RECOMP_GL_TEXGENLOG");
+                  on = v ? 1 : 0; every = v ? atof(v) : 0.0; if (every <= 0) every = 10.0;
+                  next = mono_now() + every;
+                  { const char *k = getenv("RECOMP_GL_SKIP_TEXGEN");
+                    skip = !k ? 0 : (*k == 'a' || *k == 'A') ? 2 : 1; } }
+    if (!on && !skip) return 0;
+    for (s = 0; s < 4; s++)
+        for (c = 0; c < 4; c++)
+            if (S.texgen[s][c]) { any = 1; key = key * 31u + (uint32_t)(s * 4 + c) * 0x10001u + S.texgen[s][c]; }
+    if (!any) return 0;
+    if (on) {
+        int i, found = 0;
+        draws++; tris += n / 3;
+        key = key * 31u + S.ff_texmat_enable * 7u + (uint32_t)S.ff_lighting * 3u
+            + (S.attr[2].size ? 1u : 0u) + (S.tex[0].enabled ? 0x100u : 0u) + (S.tex[1].enabled ? 0x200u : 0u);
+        for (i = 0; i < nseen; i++) if (seen[i] == key) { found = 1; break; }
+        if (!found && nseen < 64 && lines < 40) {
+            const float *m = &S.u.ff_texmat[0][0];
+            seen[nseen++] = key; lines++;
+            fprintf(stderr, "[TEXGEN] draw %u flip %u n %u: stage0 %04X %04X %04X %04X stage1 %04X %04X %04X %04X; "
+                    "texmat %X; lit %d normal array %d normalize %u; tex0 %s %ux%u fmt %08X tex1 %s %ux%u fmt %08X; "
+                    "texmat0 [%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n",
+                    S.draws, S.flips, n,
+                    S.texgen[0][0], S.texgen[0][1], S.texgen[0][2], S.texgen[0][3],
+                    S.texgen[1][0], S.texgen[1][1], S.texgen[1][2], S.texgen[1][3],
+                    S.ff_texmat_enable, S.ff_lighting, S.attr[2].size ? 1 : 0, S.normalization,
+                    S.tex[0].enabled ? "on" : "off", S.tex[0].width, S.tex[0].height, S.tex[0].format,
+                    S.tex[1].enabled ? "on" : "off", S.tex[1].width, S.tex[1].height, S.tex[1].format,
+                    m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                    m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+        }
+        if (mono_now() >= next) {
+            next = mono_now() + every;
+            fprintf(stderr, "[TEXGEN] so far: %lu draws, %lu triangles\n", draws, tris);
+        }
+    }
+    /* =ab: every other displayed frame without them */
+    return skip == 2 ? (int)(S.frames & 1u) : skip;
+}
+
 static void do_draw_body(void);
 /* A draw, timed whole for the profile (it has a great many ways out). */
 static void do_draw(void)
@@ -4444,10 +5165,12 @@ static void do_draw_body(void)
     surface_sync();
 
     mode = nv2a_prim(S.prim, &fan_expand);
+    prim_note(inl);
+    if (mode == NV2A_PRIM_POINTS) points_note(inl);
     /* Points included: this tested a GLenum against zero, and GL_POINTS is
      * zero, so point lists have never been drawn. Kept that way here so the
      * two backends agree; drawing them is a change to make on purpose. */
-    if (!mode || mode == NV2A_PRIM_POINTS) return;
+    if (!mode || mode == NV2A_PRIM_POINTS) { g_drop[mode ? DROP_POINTS : DROP_PRIM]++; return; }
 
     /* Indices: an explicit list, a DRAW_ARRAYS range, or the implicit
      * 0..n-1 of an inline batch. */
@@ -4465,7 +5188,7 @@ static void do_draw_body(void)
             S.attr[i].offset = vsize;
             vsize += bytes;
         }
-        if (!vsize) return;
+        if (!vsize) { g_drop[DROP_NOVSIZE]++; return; }
         for (i = 0; i < NUM_ATTRS; i++)
             if (S.attr[i].size) S.attr[i].stride = vsize;
         n = S.inline_count * 4 / vsize;
@@ -4477,7 +5200,8 @@ static void do_draw_body(void)
          * indices, and NV097_DRAW_ARRAYS appends the ranges it names. */
         n = S.idx_count;
     }
-    if (n < 1) return;
+    batch_size_note(inl, n);
+    if (n < 1) { g_drop[DROP_EMPTY]++; return; }
 
     /* The attributes this draw fetched from arrays keep its last vertex's
      * values (see sticky_attrs). Done before anything below can drop the
@@ -4529,7 +5253,7 @@ static void do_draw_body(void)
           }
       } }
 
-    if (!S.attr[0].size) { S.skipped_no_pos++; return; }
+    if (!S.attr[0].size) { S.skipped_no_pos++; g_drop[DROP_NOPOS]++; return; }
     /* RECOMP_GL_NO_TEX1: drop every draw that has a second texture stage.
      * JSRF paints its cel shading as a second blended pass over the same
      * geometry, so this shows what is underneath -- which separates "the base
@@ -4562,9 +5286,25 @@ static void do_draw_body(void)
       if (only_xf == -2) { const char *v = getenv("RECOMP_GL_ONLY_XF");
                            only_xf = v ? atol(v) : -1; }
       if (only_xf >= 0 && (long)S.xf_mode != only_xf) return; }
+    if (S.xf_mode == NV2A_XF_MODE_FIXED && texgen_note(n)) return;
+    /* RECOMP_GL_SKIPVOL=1 / =2 (a probe): leave out the shadow volumes drawn
+     * by vertex programs (the characters') / by the fixed-function pipeline
+     * (the scenery's): the batches that only count in the stencil buffer. */
+    { static int sv = -1;
+      if (sv < 0) { const char *e = getenv("RECOMP_GL_SKIPVOL"); sv = e ? atoi(e) : 0; }
+      if (sv && S.stencil_en && S.stencil_func == 0x207
+          && (S.stencil_op[2] == 0x1E02 || S.stencil_op[2] == 0x1E03)
+          && (sv == 1) == (S.xf_mode != NV2A_XF_MODE_FIXED)) return; }
+    /* RECOMP_GL_SKIP_LIT=1: leave out the fixed-function batches the T&L
+     * unit lights (=ab: every other displayed frame), to see what they are. */
+    { static int sk = -1;
+      if (sk < 0) { const char *k = getenv("RECOMP_GL_SKIP_LIT");
+                    sk = !k ? 0 : (*k == 'a' || *k == 'A') ? 2 : 1; }
+      if (sk && S.xf_mode == NV2A_XF_MODE_FIXED && S.ff_lighting
+          && (sk == 1 || (S.frames & 1u))) return; }
 
     slot = program_for_current();
-    if (slot < 0) return;
+    if (slot < 0) { g_drop[DROP_NOPROG]++; return; }
 
     /* RECOMP_GL_ONLY_A0=1 draws only the batches that pick their transform
      * out of the constant palette; =0 draws only the rest.
@@ -4591,7 +5331,7 @@ static void do_draw_body(void)
     out_n = n;
     if (fan_expand == 1) out_n = (n / 4) * 6;
     if (fan_expand == 2) out_n = (n >= 4) ? ((n - 2) / 2) * 6 : 0;
-    if (!out_n) return;
+    if (!out_n) { g_drop[DROP_SHORT]++; return; }
 
     /*
      * The vertex layout, cut down to what this draw actually needs.
@@ -4791,7 +5531,7 @@ static void do_draw_body(void)
             vbuf_cap = out_n * stride_floats + 4096;
             free(vbuf);
             vbuf = (float *)malloc(vbuf_cap * sizeof(float));
-            if (!vbuf) { vbuf_cap = 0; return; }
+            if (!vbuf) { vbuf_cap = 0; g_drop[DROP_NOMEM]++; return; }
         }
         for (k = 0; k < out_n; k++) {
             uint32_t src_i;
@@ -5339,8 +6079,11 @@ static void do_draw_body(void)
     /* Model-view 0: the lighting's eye space, and the fog distance's. */
     if (uses(slot, NV2A_U_FFMV))
         G->uniform_f(NV2A_U_FFMV, &S.ff_mv[0][0], 4);
-    if (uses(slot, NV2A_U_LTSCENEAMB)) {
+    /* Its inverse: the lighting's normals, and the generated texture
+     * coordinates' of an unlit batch. */
+    if (uses(slot, NV2A_U_FFIMV))
         G->uniform_f(NV2A_U_FFIMV, &S.ff_imv[0][0], 4);
+    if (uses(slot, NV2A_U_LTSCENEAMB)) {
         G->uniform_f(NV2A_U_LTSCENEAMB, S.scene_ambient, 1);
         G->uniform_f(NV2A_U_LTMATEM, S.material_emission, 1);
         uni1f(NV2A_U_LTMATALPHA, S.material_alpha);
@@ -5361,6 +6104,11 @@ static void do_draw_body(void)
          * fits back to an exponent. Not reconstructed here yet -- every lit
          * batch this title draws has a black specular colour. */
         uni1f(NV2A_U_LTSPECPOW, 16.0f);
+    }
+    if (g_zrev && S.xf_mode == NV2A_XF_MODE_FIXED && uses(slot, NV2A_U_ZREV)) {
+        float r[4];
+        zrev_row(r);
+        G->uniform_f(NV2A_U_ZREV, r, 1);
     }
     if (uses(slot, NV2A_U_FFMAT)) {
         G->uniform_f(NV2A_U_FFMAT, &S.u.ff_mat[0][0], 4);
@@ -5710,13 +6458,15 @@ static void do_draw_body(void)
           { static int ge2le = -1;
             if (ge2le < 0) ge2le = getenv("RECOMP_GL_GEQUAL_AS_LEQUAL") ? 1 : 0;
             if (ge2le && rs.depth_func == 0x206) rs.depth_func = 0x203; }
+          /* Reversed depth: nearer is larger (zrev_start). */
+          if (g_zrev) rs.depth_func = zrev_func((uint32_t)rs.depth_func);
         }
         rs.blend_enable = S.blend_enable;
         rs.blend_src    = S.blend_src;
         rs.blend_dst    = S.blend_dst;
         rs.alpha_test   = S.alpha_test;
         rs.cull_enable  = S.cull_enable;
-        rs.color_mask   = S.color_mask;
+        rs.color_mask   = surf_color_mask();
         rs.zclamp       = S.zminmax;
         rs.w_buffer     = S.psh.w_buffer;
         rs.cull_face    = S.cull_face;
@@ -6936,6 +7686,8 @@ static void do_draw_body(void)
         if (vc_vb && !vc_seq) G->draw_indexed(mode, out_n, vc_i32);
         else                  G->draw(mode, out_n);
         PROF_ADD(draw);
+    } else if (g_surf_lost) {
+        g_drop[DROP_LOST]++;
     }
     xray_done: ;
     /*
@@ -7531,6 +8283,102 @@ static void do_draw_body(void)
      * whether it is a wrong constant, a wrong viewport, or the title
      * genuinely drawing off-screen and relying on a clip we do not apply.
      */
+    /* RECOMP_GL_CHARLOG=<dir>: the characters' draws -- programmable ones
+     * that pick their matrices with the address register -- one entry per
+     * distinct program, combiner and set of textures (the first 40): every
+     * texture stage's words, the combiners, what the program writes for the
+     * first three vertices (run on the CPU), the program and the fragment
+     * shader once each, and each texture written into the directory as it
+     * sits in memory, level 0. Which texture a skin samples, and where, is
+     * what this answers. */
+    { static const char *dir = (const char *)1; static uint32_t seen[64]; static int nseen;
+      static uint32_t seen_prog[64], seen_psh[64]; static int nprog, npsh;
+      if (dir == (const char *)1) dir = getenv("RECOMP_GL_CHARLOG");
+      if (dir && nseen < 40 && slot >= 0 && S.xf_mode != NV2A_XF_MODE_FIXED
+          && g_pcache[slot].uses_a0 && out_n >= 30 && !vc_vb) {
+          uint32_t ph = psh_hash(), key, i;
+          int q, found = 0, k;
+          key = S.prog_start * 2654435761u ^ ph;
+          for (i = 0; i < 4; i++) key = key * 31u + (S.psh.tex_bound[i] ? S.tex[i].offset : 0u);
+          for (q = 0; q < nseen; q++) if (seen[q] == key) { found = 1; break; }
+          if (!found) {
+              Nv2aVshProgram vp;
+              uint32_t pstart = S.prog_start < NV2A_VSH_MAX_INSNS ? S.prog_start : 0;
+              int have_vp = nv2a_vsh_decode(S.prog + pstart * 4, (int)(NV2A_VSH_MAX_INSNS - pstart), &vp) > 0;
+              seen[nseen++] = key;
+              fprintf(stderr, "[CHAR] #%d draw %u flip %u: prog start %u psh %08X n %u prim %u | blend %d %04X/%04X | alpha test %d func %X ref %.3f"
+                              " | depth %d func %X mask %d | cull %d face %X | stages 0x%05X\n",
+                      nseen - 1, S.draws, S.flips, S.prog_start, ph, out_n, S.prim, S.blend_enable, S.blend_src, S.blend_dst,
+                      S.alpha_test, S.alpha_func, S.alpha_ref, S.depth_test, S.depth_func, S.depth_mask,
+                      S.cull_enable, S.cull_face, S.shader_stage_prog);
+              for (i = 0; i < 4; i++) {
+                  fprintf(stderr, "[CHAR]   tex%u off %08X fmt %08X (colour %02X) %ux%u levels %u addr %08X ctl0 %08X filt %08X en %d bound %d mode %u\n",
+                          i, S.tex[i].offset, S.tex[i].format, S.tex[i].color, S.tex[i].width, S.tex[i].height, S.tex[i].levels,
+                          S.tex[i].addr, S.tex[i].control0, S.tex[i].filter, S.tex[i].enabled, S.psh.tex_bound[i],
+                          (unsigned)S.psh.tex_mode[i]);
+                  /* the texture itself, level 0, as the title stored it */
+                  if (S.psh.tex_bound[i] && S.tex[i].width && S.tex[i].height
+                      && S.tex[i].width <= 1024 && S.tex[i].height <= 1024) {
+                      uint32_t w = S.tex[i].width, h = S.tex[i].height;
+                      uint8_t *rgba = (uint8_t *)malloc((size_t)w * h * 4);
+                      if (rgba && decode_level(S.tex[i].color, guest(resolve(S.tex[i].offset)), w, h,
+                                               S.tex[i].pitch, rgba)) {
+                          char nm[512]; FILE *f;
+                          snprintf(nm, sizeof nm, "%s/char%02d_t%u_%08X_f%02X_%ux%u.ppm", dir, nseen - 1, i,
+                                   S.tex[i].offset, S.tex[i].color, w, h);
+                          f = fopen(nm, "wb");
+                          if (f) { uint32_t p; fprintf(f, "P6\n%u %u\n255\n", w, h);
+                                   for (p = 0; p < w * h; p++) fwrite(rgba + p * 4, 1, 3, f); fclose(f); }
+                          snprintf(nm, sizeof nm, "%s/char%02d_t%u_%08X_alpha.pgm", dir, nseen - 1, i, S.tex[i].offset);
+                          f = fopen(nm, "wb");
+                          if (f) { uint32_t p; fprintf(f, "P5\n%u %u\n255\n", w, h);
+                                   for (p = 0; p < w * h; p++) fputc(rgba[p * 4 + 3], f); fclose(f); }
+                      }
+                      free(rgba);
+                  }
+              }
+              fprintf(stderr, "[CHAR]   combiners control %08X final %08X %08X c0 %08X c1 %08X\n", S.psh.control,
+                      S.psh.final_abcd, S.psh.final_efg, S.psh.final_c0, S.psh.final_c1);
+              for (k = 0; k < (int)(S.psh.control & 0xF) && k < NV2A_PSH_STAGES; k++)
+                  fprintf(stderr, "[CHAR]   stage %d rgb icw %08X ocw %08X | alpha icw %08X ocw %08X | c0 %08X c1 %08X\n",
+                          k, S.psh.rgb_icw[k], S.psh.rgb_ocw[k], S.psh.alpha_icw[k], S.psh.alpha_ocw[k], S.psh.c0[k], S.psh.c1[k]);
+              if (have_vp) {
+                  uint32_t v;
+                  for (v = 0; v < out_n && v < 3; v++) {
+                      float vin[16][4], op[4]; int a;
+                      memset(vin, 0, sizeof vin);
+                      for (a = 0; a < NUM_ATTRS; a++) {
+                          if (attr_at[a] >= 0) memcpy(vin[a], &vbuf[(size_t)v * stride_floats + attr_at[a]], 16);
+                          else memcpy(vin[a], S.const_attr[a], 16);
+                      }
+                      if (nv2a_vsh_interp(&vp, vin, S.u.c, op))
+                          fprintf(stderr, "[CHAR]   vertex %u: oD0 %.3f %.3f %.3f %.3f oD1 %.3f %.3f %.3f %.3f | oT0 %.4f %.4f %.4f %.4f"
+                                          " | oT1 %.4f %.4f %.4f %.4f | oT2 %.4f %.4f %.4f %.4f | oT3 %.4f %.4f %.4f %.4f\n", v,
+                                  g_interp_out[3][0], g_interp_out[3][1], g_interp_out[3][2], g_interp_out[3][3],
+                                  g_interp_out[4][0], g_interp_out[4][1], g_interp_out[4][2], g_interp_out[4][3],
+                                  g_interp_out[9][0], g_interp_out[9][1], g_interp_out[9][2], g_interp_out[9][3],
+                                  g_interp_out[10][0], g_interp_out[10][1], g_interp_out[10][2], g_interp_out[10][3],
+                                  g_interp_out[11][0], g_interp_out[11][1], g_interp_out[11][2], g_interp_out[11][3],
+                                  g_interp_out[12][0], g_interp_out[12][1], g_interp_out[12][2], g_interp_out[12][3]);
+                  }
+              }
+              for (q = 0; q < nprog; q++) if (seen_prog[q] == S.prog_start) break;
+              if (q == nprog && nprog < 64 && have_vp) {
+                  static char dis[16384];
+                  seen_prog[nprog++] = S.prog_start;
+                  if (nv2a_vsh_disasm(&vp, dis, sizeof dis)) fprintf(stderr, "[CHAR] ----- program at %u -----\n%s", S.prog_start, dis);
+              }
+              for (q = 0; q < npsh; q++) if (seen_psh[q] == ph) break;
+              if (q == npsh && npsh < 64) {
+                  char *fs = (char *)malloc(96 * 1024);
+                  seen_psh[npsh++] = ph;
+                  if (fs && nv2a_psh_emit_glsl(&S.psh, fs, 96 * 1024))
+                      fprintf(stderr, "[CHAR] ----- combiners %08X -----\n%s\n", ph, fs);
+                  free(fs);
+              }
+              fflush(stderr);
+          }
+      } }
     /* RECOMP_GL_SPY_TEX=<hex offset>: everything about the first draws that
      * sample the texture at that address -- combiner words, texture words,
      * blend and test state, the vertex program, and the fragment shader as
@@ -8374,6 +9222,10 @@ static void do_draw_body(void)
          * wide, the data is there and the loss is downstream. One line
          * splits the search in half. */
         float t0lo[2] = { 1e30f, 1e30f }, t0hi[2] = { -1e30f, -1e30f };
+        /* And the positions as they came in: whether two draws are the
+         * same polygons (a second pass, a decal over its wall) or merely
+         * close to each other. */
+        float plo[3] = { 1e30f, 1e30f, 1e30f }, phi[3] = { -1e30f, -1e30f, -1e30f }, p0[3] = { 0, 0, 0 };
         uint32_t v; int c;
         for (v = 0; v < out_n; v++)
             for (c = 0; c < 2; c++) {
@@ -8381,11 +9233,21 @@ static void do_draw_body(void)
                 if (t < t0lo[c]) t0lo[c] = t;
                 if (t > t0hi[c]) t0hi[c] = t;
             }
+        if (attr_at[0] >= 0 && out_n) {
+            for (v = 0; v < out_n; v++)
+                for (c = 0; c < 3; c++) {
+                    float t = vbuf[(size_t)v * stride_floats + (size_t)attr_at[0] + (size_t)c];
+                    if (t < plo[c]) plo[c] = t;
+                    if (t > phi[c]) phi[c] = t;
+                }
+            for (c = 0; c < 3; c++) p0[c] = vbuf[(size_t)attr_at[0] + (size_t)c];
+        }
         fprintf(stderr, "[DRAW] f%ld %4u verts %5u prim %u prog %2d "
                 "vp %s tex0 %08X %ux%u f%02X en%d tex1 en%d "
                 "blend %d %04X/%04X depth %d/%d ctl %08X final %08X/%08X "
                 "| xf%u a9 off=%08X t%u s%u st%u u[%.3f..%.3f] v[%.3f..%.3f] "
-                "in%04X | sten %u f%X r%X m%X w%X op%X/%X/%X dfunc %X cm %08X%s\n",
+                "in%04X | sten %u f%X r%X m%X w%X op%X/%X/%X dfunc %X cm %08X | cull %d %X %X zc %X"
+                " | a0 off=%08X st%u p0 %.3f %.3f %.3f box %.3f..%.3f %.3f..%.3f %.3f..%.3f%s%s\n",
                 (long)S.flips, S.since_present, out_n, S.prim, slot,
                 S.u.vp_off[0] > 100.0f ? "3D" : "2D",
                 S.tex[0].offset, S.tex[0].width, S.tex[0].height,
@@ -8400,6 +9262,10 @@ static void do_draw_body(void)
                 S.stencil_en, S.stencil_func, S.stencil_ref, S.stencil_fmask,
                 S.stencil_wmask, S.stencil_op[0], S.stencil_op[1], S.stencil_op[2],
                 (unsigned)S.depth_func, S.color_mask,
+                S.cull_enable, (unsigned)S.cull_face, (unsigned)S.front_face, S.zminmax,
+                S.attr[0].offset, S.attr[0].stride, p0[0], p0[1], p0[2],
+                plo[0], phi[0], plo[1], phi[1], plo[2], phi[2],
+                g_imm_drawing ? " | IMMEDIATE" : "",
                 g_wide_squeeze ? " | WIDE-SQUEEZED" : "");
         if (nv2a_wide_scene() && g_pcache[slot].inputs == 0x1F9B)
             fprintf(stderr, "[DRAW] f%ld %4u   2D ndc x[%.2f..%.2f] y[%.2f..%.2f]%s\n",
@@ -8421,6 +9287,34 @@ static void do_draw_body(void)
                     S.const_attr[2][0], S.const_attr[2][1], S.const_attr[2][2], S.const_attr[2][3],
                     S.ff_imv[0][0], S.ff_imv[0][1], S.ff_imv[0][2], S.ff_imv[1][0], S.ff_imv[1][1], S.ff_imv[1][2],
                     S.ff_imv[2][0], S.ff_imv[2][1], S.ff_imv[2][2]);
+        /* RECOMP_GL_VOLDUMP=1: a fixed-function shadow volume (stencil
+         * incremented or decremented, colour untouched) of the first logged
+         * frame, every vertex: as sent, then through the composite matrix
+         * (clip x y z w, and z/w). */
+        { static int vd = -1;
+          if (vd < 0) vd = getenv("RECOMP_GL_VOLDUMP") ? 1 : 0;
+          if (vd && (long)S.flips <= g_draw_log_flip + 1 && S.xf_mode == NV2A_XF_MODE_FIXED
+              && S.stencil_en && (S.stencil_op[2] == 0x1E02 || S.stencil_op[2] == 0x1E03)
+              && attr_at[0] >= 0) {
+              const float (*m)[4] = S.u.ff_mat;
+              uint32_t q;
+              fprintf(stderr, "[VOLM] f%ld %u mat %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | vpoff %g %g clip %g %g\n",
+                      (long)S.flips, S.since_present,
+                      m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
+                      m[2][0], m[2][1], m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
+                      S.vp_off_reg[0], S.vp_off_reg[1], S.u.z_clip[0], S.u.z_clip[1]);
+              for (q = 0; q < out_n && q < 1200; q++) {
+                  const float *vv = &vbuf[(size_t)q * stride_floats + (size_t)attr_at[0]];
+                  float c4[4]; int r;
+                  for (r = 0; r < 4; r++)
+                      c4[r] = vv[0] * m[r][0] + vv[1] * m[r][1] + vv[2] * m[r][2] + vv[3] * m[r][3];
+                  fprintf(stderr, "[VOLV] f%ld %u %u %.3f %.3f %.3f %.3f | %.3f %.3f %.1f %.4f | %.2f %.2f %.1f\n",
+                          (long)S.flips, S.since_present, q, vv[0], vv[1], vv[2], vv[3],
+                          c4[0], c4[1], c4[2], c4[3],
+                          c4[3] != 0.0f ? c4[0] / c4[3] : 0.0f, c4[3] != 0.0f ? c4[1] / c4[3] : 0.0f,
+                          c4[3] != 0.0f ? c4[2] / c4[3] : 0.0f);
+              }
+          } }
     }
 
     /* Record what this draw was, for the order dump. The extent only while
@@ -8705,7 +9599,8 @@ static void do_clear(uint32_t param)
             break;
         }
         default:                   /* the 32-bit formats */
-            a = ((S.clear_color >> 24) & 0xFF) / 255.0f;
+            /* X8R8G8B8 has no alpha either: see surf_has_alpha. */
+            a = surf_has_alpha(S.surf_format) ? ((S.clear_color >> 24) & 0xFF) / 255.0f : 1.0f;
             r = ((S.clear_color >> 16) & 0xFF) / 255.0f;
             g = ((S.clear_color >> 8)  & 0xFF) / 255.0f;
             b = ( S.clear_color        & 0xFF) / 255.0f;
@@ -8717,6 +9612,9 @@ static void do_clear(uint32_t param)
     if (param & 0x01) {
         /* Z is the top 24 bits of the combined z/stencil clear value. */
         depth = (float)((double)(S.clear_zstencil >> 8) / 16777215.0);
+        /* Reversed depth keeps 1 - z (zrev_start); done in double, so that
+         * the far plane's 1 comes out exactly 0. */
+        if (g_zrev) depth = (float)(1.0 - (double)(S.clear_zstencil >> 8) / 16777215.0);
         mask |= 2u;
     }
     /* NV097_CLEAR_SURFACE_STENCIL, bit 1, is its own request: this used to
@@ -8986,23 +9884,34 @@ static void frame_pace(void)
                           double other = ms - 1000.0 * (g_hf.compile_s + g_hf.tex_s + g_hf.idle_s) - pso;
                           char pl[96] = "";
                           if (G->pipeline_ms) snprintf(pl, sizeof pl, ", pipelines %.1f ms", pso);
+                          char gp[96] = "";
                           if (g_hf.idle_s > 0.0)
                               snprintf(pl + strlen(pl), sizeof pl - strlen(pl), ", %.1f ms building ahead",
                                        1000.0 * g_hf.idle_s);
+                          /* Of the rest, the GPU's part: what it was busy with
+                           * in the meantime (earlier frames' work included),
+                           * and how long the render thread waited for it. */
+                          if (G->gpu_ms) {
+                              double busy = 0.0, waited = 0.0;
+                              G->gpu_ms(&busy, &waited);
+                              snprintf(gp, sizeof gp, " (GPU busy %.1f ms, waited for %.1f)",
+                                       busy - g_hf.gpu_busy0, waited - g_hf.gpu_wait0);
+                          }
                           g_ht.logged++;
                           fprintf(stderr, "[HITCH] frame %u: %.1f ms flip to flip, %u draws | "
                                   "%u programs built in %.1f ms (worst %.1f)%s | %u textures new, "
-                                  "%.1f ms in textures | %.1f ms the rest\n",
+                                  "%.1f ms in textures | %.1f ms the rest%s\n",
                                   S.frames, ms, S.draws - g_hf.draws0, g_hf.compiles,
                                   1000.0 * g_hf.compile_s, 1000.0 * g_hf.compile_worst, pl,
-                                  g_hf.tex_new, 1000.0 * g_hf.tex_s, other < 0.0 ? 0.0 : other);
+                                  g_hf.tex_new, 1000.0 * g_hf.tex_s, other < 0.0 ? 0.0 : other, gp);
                       }
                   }
               }
               g_pace_st.last = t;
               memset(&g_hf, 0, sizeof g_hf);
               g_hf.draws0 = S.draws;
-              if (G->pipeline_ms) g_hf.pso_ms0 = G->pipeline_ms(); }
+              if (G->pipeline_ms) g_hf.pso_ms0 = G->pipeline_ms();
+              if (G->gpu_ms) G->gpu_ms(&g_hf.gpu_busy0, &g_hf.gpu_wait0); }
         }
 }
 
@@ -9084,6 +9993,10 @@ static void present(int is_frame)
 
     if (is_frame) { PROF_T0(); cache_idle_frame(); frame_pace(); PROF_ADD(pace); }
 
+    /* Anti-aliasing turned on, off or changed since the last flip: between
+     * frames, before this one is shown. */
+    if (is_frame) { smaa_take(); msaa_take(); }
+
     /* Put the finished frame on screen: the surface the title has set up
      * when it flips, which is what the window showed while surfaces were
      * bound as their methods arrived (JSRF: the display buffer it copies
@@ -9099,6 +10012,9 @@ static void present(int is_frame)
             pw = g_surf[g_present_slot].w * gl_scale();
             ph = g_surf[g_present_slot].h * gl_scale();
         }
+        /* With SMAA, what is shown is the copy of it with its edges smoothed. */
+        if (g_smaa_now && G->target_smaa) prt = G->target_smaa(prt);
+        g_shown_rt = prt;
 #if defined(NV2A_GL_USE_CGL)
         /* OpenGL on a Mac: read the finished frame and hand it to the window.
          *
@@ -9246,11 +10162,37 @@ static void present(int is_frame)
             g_dump_burst_left--;
             dump_due = 1;
         } else
-        dump_due = pfx && dump_shots < 24 && chars_ok
+        dump_due = pfx && dump_shots < dump_max() && chars_ok
                 && (dump_after_tris ? S.frame_tris >= dump_after_tris
                     : dump_3d ? S.draws_3d >= dump_3d
                     : S.flips >= dump_after)
                 && (S.flips % dump_every) == 0;
+        /* RECOMP_GL_DUMP_SECS=<s>: none before s seconds into the run --
+         * flips are no clock, a loading screen runs hundreds a second. */
+        { static double t0 = -1.0, after_s = -1.0;
+          if (t0 < 0.0) { const char *v = getenv("RECOMP_GL_DUMP_SECS");
+                          t0 = mono_now(); after_s = v ? atof(v) : 0.0; }
+          if (dump_due && after_s > 0.0 && mono_now() - t0 < after_s) dump_due = 0; }
+        /* RECOMP_GL_DUMP_SHOWN: a shot that falls on the end of a pass rather
+         * than of a frame is kept for the next frame. Flips count passes, and
+         * a scene that ends k passes a frame puts its frames on one residue
+         * mod k: an interval that k divides could fall on a pass every time,
+         * and every shot was spent writing nothing. */
+        { static int so = -1, owed;
+          int shows = is_frame && g_present_slot >= 0 && g_surf[g_present_slot].used;
+          if (so < 0) so = getenv("RECOMP_GL_DUMP_SHOWN") ? 1 : 0;
+          if (so) {
+              if (dump_due && !shows) { owed = 1; dump_due = 0; }
+              else if (owed && shows && pfx && dump_shots < dump_max()) { owed = 0; dump_due = 1; }
+          } }
+        /* RECOMP_GL_DUMP_PAIRS=1: each dump and the frame straight after it --
+         * with RECOMP_GL_TEXGEN=ab, the same moment with and without. */
+        { static int pairs = -1, second;
+          if (pairs < 0) pairs = getenv("RECOMP_GL_DUMP_PAIRS") ? 1 : 0;
+          if (pairs && is_frame) {
+              if (second && pfx && dump_shots < dump_max()) { dump_due = 1; second = 0; }
+              else if (dump_due) second = 1;
+          } }
 
         if (!dump_due && (!every || (S.flips % (uint32_t)every) != 0)) {
             S.flips++;
@@ -9263,9 +10205,13 @@ static void present(int is_frame)
             /* Every surface, not just the one that happens to be current: a
              * title that builds its frame off-screen and composites leaves
              * the picture somewhere other than where the capture is pointed,
-             * and one image per surface says which. */
+             * and one image per surface says which. RECOMP_GL_DUMP_SHOWN=1:
+             * only what the window is given, for looking at the picture
+             * rather than at how it was made. */
             int k;
-            for (k = 0; k < SURF_CACHE; k++) {
+            static int shown_only = -1;
+            if (shown_only < 0) shown_only = getenv("RECOMP_GL_DUMP_SHOWN") ? 1 : 0;
+            for (k = 0; k < SURF_CACHE && !shown_only; k++) {
                 char pf[256];
                 static int per_surf[SURF_CACHE];
                 if (!g_surf[k].used) continue;
@@ -9287,9 +10233,16 @@ static void present(int is_frame)
                 g_fbo_w = g_surf[k2].w; g_fbo_h = g_surf[k2].h;
                 g_fbo_pw = g_surf[k2].w * gl_scale(); g_fbo_ph = g_surf[k2].h * gl_scale();
                 dump_fbo(g_surf[k2].rt, pf, &shown_n, 72);
+                /* And the picture the window was given, where anti-aliasing
+                 * made it another one: the same frame, before and after. */
+                if (g_shown_rt && g_shown_rt != g_surf[k2].rt) {
+                    static int aa_n;
+                    snprintf(pf, sizeof pf, "%s_shown_aa_", pfx);
+                    dump_fbo(g_shown_rt, pf, &aa_n, 72);
+                }
                 g_fbo_w = sw; g_fbo_h = sh; g_fbo_pw = spw; g_fbo_ph = sph;
-                fprintf(stderr, "  [GL] shown at this flip: slot %d = surface %08X %ux%u\n",
-                        k2, g_surf[k2].offset, g_surf[k2].w, g_surf[k2].h);
+                fprintf(stderr, "  [GL] shown at this flip: slot %d = surface %08X %ux%u (frame %u, %d shown)\n",
+                        k2, g_surf[k2].offset, g_surf[k2].w, g_surf[k2].h, S.frames, shown_n);
             }
             { char nm[256]; FILE *sf;
               snprintf(nm, sizeof nm, "%s_slots_%03d.txt",
@@ -9382,6 +10335,74 @@ static void present(int is_frame)
  */
 static void ensure_ready(void);   /* defined just below */
 static int gfx_init(uint32_t w, uint32_t h);
+
+/*
+ * Reversed depth: the depth buffer holds 1 - z, in 32-bit floating point --
+ * floating point's precision where the far end of the scene needs it, which
+ * the console's 24-bit z (and z kept as z in a float) puts at the near end.
+ * The why is in nv2a_vsh.c (depth_defines); here, the parts that follow from
+ * it: the comparisons turned around, clears to 1 - z, and for the
+ * fixed-function batches the row that makes 1 - z from the position.
+ *
+ * On wherever the device can (Metal; OpenGL with glClipControl), unless
+ * RECOMP_GL_ZREV=0. Decided once, before the first target and program.
+ * (g_zrev is declared near the top.)
+ */
+
+static uint32_t zrev_func(uint32_t f)
+{
+    switch (f) {
+    case 0x201: return 0x204;          /* LESS     -> GREATER */
+    case 0x203: return 0x206;          /* LEQUAL   -> GEQUAL  */
+    case 0x204: return 0x201;          /* GREATER  -> LESS    */
+    case 0x206: return 0x203;          /* GEQUAL   -> LEQUAL  */
+    default:    return f;              /* NEVER, EQUAL, NOTEQUAL, ALWAYS */
+    }
+}
+
+/*
+ * 1 - z, times w, as one row of the fixed-function transform.
+ *
+ * The epilogue's z is (p.z / p.w - z0) / (z1 - z0), with p the composite
+ * matrix times the position and z0..z1 the screen-space range it maps to
+ * 0..1 (CLIP_MIN/MAX, or the viewport's z offset and scale). So
+ *
+ *     (1 - z) * p.w = (z1 * p.w - p.z) / (z1 - z0)
+ *                   = dot(position, (z1 * row_w - row_z) / (z1 - z0))
+ *
+ * -- a row worked out here in double precision, from the title's own
+ * single-precision rows, and one dot product on the GPU. Computed the long
+ * way there instead, 1 - z near the far plane would be the difference of two
+ * numbers close to 1, and every bit the reversal was for would be gone.
+ */
+static void zrev_row(float out[4])
+{
+    double z0, z1;
+    int k;
+    if (S.u.z_clip[1] > S.u.z_clip[0]) {
+        z0 = S.u.z_clip[0];
+        z1 = S.u.z_clip[1];
+    } else {
+        double sc = S.u.vp_scale[2] != 0.0f ? (double)S.u.vp_scale[2] : 1.0;
+        z0 = S.u.vp_off[2];
+        z1 = z0 + sc;
+    }
+    for (k = 0; k < 4; k++)
+        out[k] = (float)((z1 * (double)S.u.ff_mat[3][k] - (double)S.u.ff_mat[2][k]) / (z1 - z0));
+}
+
+static void zrev_start(void)
+{
+    const char *v = getenv("RECOMP_GL_ZREV");
+    int want = v ? atoi(v) != 0 : 1;
+    g_zrev = (want && G->zrev) ? (G->zrev(1) ? 1 : 0) : 0;
+    nv2a_vsh_zrev = g_zrev;
+    nv2a_vsh_gl_clip_z01 = g_zrev && G->lang == NV2A_LANG_GLSL;
+    fprintf(stderr, "  [GL] depth: %s\n",
+            g_zrev ? "reversed, 32-bit float"
+                   : want ? "as the console keeps it (this device cannot reverse it)"
+                          : "as the console keeps it (RECOMP_GL_ZREV=0)");
+}
 
 static void split_batch_if_state_moved(void)
 {
@@ -9488,10 +10509,300 @@ void nv2a_gl_indices(uint32_t method, const uint32_t *w, uint32_t n)
     }
 }
 
+/*
+ * Immediate-mode vertices.
+ *
+ * Besides its vertex arrays, the NV2A takes vertices one attribute write at a
+ * time between SET_BEGIN_END and its END: NV097_SET_VERTEX3F/4F and the
+ * SET_VERTEX_DATA* methods write the current value of an attribute, and the
+ * write that completes the POSITION (attribute 0) sends a vertex made of every
+ * attribute's current value (xemu: pgraph_finish_inline_buffer_vertex). The
+ * XDK's D3DDevice_Begin / SetVertexData4f / End is this path.
+ *
+ * Here those methods only ever set the constant an array-less attribute
+ * reads, so a batch sent this way ended with no vertices and drew nothing --
+ * among them, the one that darkens what this title's shadow volumes marked in
+ * the stencil buffer: the volumes were drawn, the shadows never were.
+ *
+ * RECOMP_GL_IMMEDIATE=0: as before, nothing drawn.
+ */
+#define MAX_IMM 2048
+static float    g_imm[MAX_IMM][NUM_ATTRS][4];
+static uint32_t g_imm_n, g_imm_dropped;
+
+static int imm_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("RECOMP_GL_IMMEDIATE"); on = v ? atoi(v) != 0 : 1; }
+    return on;
+}
+
+/* The position is complete: a vertex, of every attribute's current value. */
+static void imm_emit(void)
+{
+    if (!S.prim || !imm_on()) return;     /* outside Begin/End: a value, not a vertex */
+    if (g_imm_n >= MAX_IMM) { g_imm_dropped++; return; }
+    memcpy(g_imm[g_imm_n], S.const_attr, sizeof g_imm[0]);
+    g_imm_n++;
+}
+
+static void imm_set(uint32_t a, int c, float v)
+{
+    S.const_attr[a][c] = v;
+    S.const_set[a][c] = v;
+}
+
+/* 1 if `method` is one of the per-vertex attribute methods (handled here). */
+static int imm_method(uint32_t method, uint32_t param)
+{
+    float f;
+    uint32_t a, part;
+    memcpy(&f, &param, 4);
+    if (method >= 0x1500 && method < 0x150C) {            /* SET_VERTEX3F */
+        part = (method - 0x1500) / 4;
+        imm_set(0, (int)part, f); imm_set(0, 3, 1.0f);
+        if (part == 2) imm_emit();
+        return 1;
+    }
+    if (method >= 0x1518 && method < 0x1528) {            /* SET_VERTEX4F */
+        part = (method - 0x1518) / 4;
+        imm_set(0, (int)part, f);
+        if (part == 3) imm_emit();
+        return 1;
+    }
+    if (method >= 0x1530 && method < 0x153C) {            /* SET_NORMAL3F */
+        imm_set(2, (int)((method - 0x1530) / 4), f);
+        return 1;
+    }
+    if (method >= 0x1540 && method < 0x1548) {            /* SET_NORMAL3S */
+        float lo = (float)(int16_t)(param & 0xFFFF) / 32767.0f;
+        float hi = (float)(int16_t)(param >> 16) / 32767.0f;
+        if (lo < -1.0f) lo = -1.0f;
+        if (hi < -1.0f) hi = -1.0f;
+        if (method == 0x1540) { imm_set(2, 0, lo); imm_set(2, 1, hi); }
+        else imm_set(2, 2, lo);
+        return 1;
+    }
+    /* Diffuse (3) and specular (4): 4F, 3F (alpha 1), 4UB. */
+    if ((method >= 0x1550 && method < 0x1560) || (method >= 0x1570 && method < 0x1580)) {
+        a = method < 0x1570 ? 3 : 4;
+        imm_set(a, (int)((method & 0xF) / 4), f);
+        return 1;
+    }
+    if ((method >= 0x1560 && method < 0x156C) || (method >= 0x1580 && method < 0x158C)) {
+        a = method < 0x1570 ? 3 : 4;
+        imm_set(a, (int)(((method - (a == 3 ? 0x1560 : 0x1580))) / 4), f);
+        imm_set(a, 3, 1.0f);
+        return 1;
+    }
+    if (method == 0x156C || method == 0x158C) {           /* SET_*_COLOR4UB */
+        int c;
+        a = method == 0x156C ? 3 : 4;
+        for (c = 0; c < 4; c++) imm_set(a, c, (float)((param >> (8 * c)) & 0xFF) / 255.0f);
+        return 1;
+    }
+    /* Texture coordinates 0..3 (attributes 9..12): 2F, 2S, 4F, 4S. */
+    {
+        static const uint32_t b2f[4] = { 0x1590, 0x15B8, 0x15E0, 0x1608 };
+        static const uint32_t b2s[4] = { 0x1598, 0x15C0, 0x15E8, 0x1610 };
+        static const uint32_t b4f[4] = { 0x15A0, 0x15C8, 0x15F0, 0x1620 };
+        static const uint32_t b4s[4] = { 0x15B0, 0x15D8, 0x1600, 0x1630 };
+        int t;
+        for (t = 0; t < 4; t++) {
+            a = 9 + (uint32_t)t;
+            if (method >= b2f[t] && method < b2f[t] + 8) {
+                imm_set(a, (int)((method - b2f[t]) / 4), f);
+                imm_set(a, 2, 0.0f); imm_set(a, 3, 1.0f);
+                return 1;
+            }
+            if (method == b2s[t]) {
+                imm_set(a, 0, (float)(int16_t)(param & 0xFFFF));
+                imm_set(a, 1, (float)(int16_t)(param >> 16));
+                imm_set(a, 2, 0.0f); imm_set(a, 3, 1.0f);
+                return 1;
+            }
+            if (method >= b4f[t] && method < b4f[t] + 16) {
+                imm_set(a, (int)((method - b4f[t]) / 4), f);
+                return 1;
+            }
+            if (method >= b4s[t] && method < b4s[t] + 8) {
+                part = (method - b4s[t]) / 4;
+                imm_set(a, (int)part * 2, (float)(int16_t)(param & 0xFFFF));
+                imm_set(a, (int)part * 2 + 1, (float)(int16_t)(param >> 16));
+                return 1;
+            }
+        }
+    }
+    if (method == 0x1698) { imm_set(5, 0, f); return 1; }  /* SET_FOG_COORD */
+    if (method == 0x169C) { imm_set(1, 0, f); return 1; }  /* SET_WEIGHT1F */
+    if (method >= 0x16A0 && method < 0x16A8) { imm_set(1, (int)((method - 0x16A0) / 4), f); return 1; }
+    if (method >= 0x16B0 && method < 0x16BC) { imm_set(1, (int)((method - 0x16B0) / 4), f); return 1; }
+    if (method >= 0x16C0 && method < 0x16D0) { imm_set(1, (int)((method - 0x16C0) / 4), f); return 1; }
+    if (method >= 0x1880 && method < 0x1900) {            /* SET_VERTEX_DATA2F_M */
+        a = (method - 0x1880) / 8; part = ((method - 0x1880) / 4) & 1;
+        imm_set(a, (int)part, f); imm_set(a, 2, 0.0f); imm_set(a, 3, 1.0f);
+        if (a == 0 && part == 1) imm_emit();
+        return 1;
+    }
+    if (method >= 0x1900 && method < 0x1940) {            /* SET_VERTEX_DATA2S */
+        a = (method - 0x1900) / 4;
+        imm_set(a, 0, (float)(int16_t)(param & 0xFFFF));
+        imm_set(a, 1, (float)(int16_t)(param >> 16));
+        imm_set(a, 2, 0.0f); imm_set(a, 3, 1.0f);
+        if (a == 0) imm_emit();
+        return 1;
+    }
+    if (method >= 0x1940 && method < 0x1980) {            /* SET_VERTEX_DATA4UB */
+        int c;
+        a = (method - 0x1940) / 4;
+        for (c = 0; c < 4; c++) imm_set(a, c, (float)((param >> (8 * c)) & 0xFF) / 255.0f);
+        if (a == 0) imm_emit();
+        return 1;
+    }
+    if (method >= 0x1980 && method < 0x1A00) {            /* SET_VERTEX_DATA4S_M */
+        a = (method - 0x1980) / 8; part = ((method - 0x1980) / 4) & 1;
+        imm_set(a, (int)part * 2, (float)(int16_t)(param & 0xFFFF));
+        imm_set(a, (int)part * 2 + 1, (float)(int16_t)(param >> 16));
+        if (a == 0 && part == 1) imm_emit();
+        return 1;
+    }
+    if (method >= 0x1A00 && method < 0x1B00) {            /* SET_VERTEX_DATA4F_M */
+        a = (method - 0x1A00) / 16; part = ((method - 0x1A00) / 4) & 3;
+        imm_set(a, (int)part, f);
+        if (a == 0 && part == 3) imm_emit();
+        return 1;
+    }
+    return 0;
+}
+
+static void do_draw(void);
+
+/* The batch Begin/End sent one vertex at a time, drawn as an inline array of
+ * floats: the attributes that differ between its vertices (and the position)
+ * as arrays, the rest as the constants they are. */
+static void imm_draw(void)
+{
+    static Attr saved[NUM_ATTRS];
+    uint32_t live = 1u, a, v, k = 0;
+    for (a = 1; a < NUM_ATTRS; a++)
+        for (v = 0; v < g_imm_n; v++)
+            if (memcmp(g_imm[v][a], S.const_attr[a], sizeof g_imm[0][0])) { live |= 1u << a; break; }
+    memcpy(saved, S.attr, sizeof saved);
+    for (a = 0; a < NUM_ATTRS; a++) {
+        S.attr[a].size = (live >> a) & 1u ? 4 : 0;
+        S.attr[a].type = 2;
+        S.attr[a].stride = 0;
+    }
+    for (v = 0; v < g_imm_n; v++)
+        for (a = 0; a < NUM_ATTRS; a++)
+            if ((live >> a) & 1u) {
+                if (k + 4 > MAX_INLINE) break;
+                memcpy(&S.inline_buf[k], g_imm[v][a], 16);
+                k += 4;
+            }
+    S.inline_count = k;
+    /* [IMM]: each kind of batch sent this way, once, the first time it is
+     * drawn (its primitive and size, which attributes vary from vertex to
+     * vertex, the stencil test, the blend), then every kind's count every
+     * 30 s -- what this path adds to the picture, at a glance. */
+    { enum { NK = 48 };
+      static struct { uint64_t key; unsigned long n; } kinds[NK];
+      static int nk; static double next;
+      uint64_t key = (uint64_t)S.prim | (uint64_t)(g_imm_n < 15 ? g_imm_n : 15) << 4
+                   | (uint64_t)live << 8 | (uint64_t)(S.stencil_en ? 1 : 0) << 24
+                   | (uint64_t)(S.stencil_func & 0xF) << 25 | (uint64_t)(S.blend_enable ? 1 : 0) << 29
+                   | (uint64_t)(S.blend_src & 0xFFF) << 30 | (uint64_t)(S.blend_dst & 0xFFF) << 42
+                   | (uint64_t)(S.xf_mode & 3) << 54 | (uint64_t)(S.tex[0].enabled ? 1 : 0) << 56;
+      int k;
+      for (k = 0; k < nk; k++) if (kinds[k].key == key) break;
+      if (k == nk && nk < NK) {
+          kinds[nk].key = key; kinds[nk].n = 0; nk++;
+          fprintf(stderr, "[IMM] kind %d, first at flip %u draw %u: %u vertices (prim %u), per-vertex "
+                  "attributes %04X, first (%.1f %.1f %.3f %.3f) diffuse (%.2f %.2f %.2f %.2f) | stencil %u "
+                  "func %X ref %X ops %X/%X/%X | blend %d %04X/%04X depth %d/%d func %X | xf %u tex0 %d%s\n",
+                  k, S.flips, S.since_present, g_imm_n, S.prim, live,
+                  g_imm[0][0][0], g_imm[0][0][1], g_imm[0][0][2], g_imm[0][0][3],
+                  g_imm[0][3][0], g_imm[0][3][1], g_imm[0][3][2], g_imm[0][3][3],
+                  S.stencil_en, S.stencil_func, S.stencil_ref,
+                  S.stencil_op[0], S.stencil_op[1], S.stencil_op[2],
+                  S.blend_enable, S.blend_src, S.blend_dst, S.depth_test, S.depth_mask,
+                  (unsigned)S.depth_func, S.xf_mode, S.tex[0].enabled,
+                  g_imm_dropped ? " (vertices dropped: batch too long)" : "");
+          fflush(stderr);
+      }
+      if (k < nk) kinds[k].n++;
+      if (mono_now() >= next) {
+          if (next > 0.0) {
+              fprintf(stderr, "[IMM] so far:");
+              for (k = 0; k < nk; k++) fprintf(stderr, " kind %d %lu;", k, kinds[k].n);
+              fprintf(stderr, "\n");
+          }
+          next = mono_now() + 30.0;
+      } }
+    g_imm_drawing = 1;
+    /* RECOMP_GL_STENCILVIS=1 (a probe): a batch drawn under a stencil test
+     * other than "always" -- this title's shadow passes -- is replaced by
+     * the stencil buffer's contents over the area it covers: 1 red, 2 green,
+     * 3 blue, 4 and more white, 0 left alone. */
+    { static int vis = -1;
+      if (vis < 0) { const char *e = getenv("RECOMP_GL_STENCILVIS"); vis = e ? atoi(e) : 0; }
+      if (vis && S.stencil_en && S.stencil_func != 0x207) {
+          static const float col[4][4] = { { 1, 0, 0, 1 }, { 0, 1, 0, 1 }, { 0, 0, 1, 1 }, { 1, 1, 1, 1 } };
+          uint32_t f = S.stencil_func, r = S.stencil_ref, fm = S.stencil_fmask, o2 = S.stencil_op[2];
+          int be = S.blend_enable, cv;
+          float keep[4];
+          memcpy(keep, S.const_attr[3], sizeof keep);
+          S.blend_enable = 0; S.stencil_fmask = 0xFF; S.stencil_op[2] = 0x1E00;
+          for (cv = 0; cv < 4; cv++) {
+              /* EQUAL k for 1..3, LEQUAL 4 (4 <= stencil) for the rest. The
+               * colour as the diffuse constant, unless the batch sends one. */
+              S.stencil_func = cv < 3 ? 0x202 : 0x203;
+              S.stencil_ref = (uint32_t)cv + 1;
+              memcpy(S.const_attr[3], col[cv], sizeof col[cv]);
+              if ((live >> 3) & 1u)
+                  for (v = 0; v < g_imm_n; v++)
+                      memcpy(&S.inline_buf[(v * (uint32_t)__builtin_popcount(live)
+                                            + (uint32_t)__builtin_popcount(live & 7u)) * 4],
+                             col[cv], 16);
+              do_draw();
+          }
+          memcpy(S.const_attr[3], keep, sizeof keep);
+          S.stencil_func = f; S.stencil_ref = r; S.stencil_fmask = fm; S.stencil_op[2] = o2;
+          S.blend_enable = be;
+          g_imm_drawing = 0;
+          memcpy(S.attr, saved, sizeof saved);
+          S.inline_count = 0;
+          return;
+      } }
+    do_draw();
+    g_imm_drawing = 0;
+    memcpy(S.attr, saved, sizeof saved);
+    S.inline_count = 0;
+}
+
+/* RECOMP_GL_METHTRACE=<from>-<to>: in the frames RECOMP_GL_DRAW_LOG follows,
+ * every method between those draws of the frame (the vertex program and
+ * constant uploads and the vertex data itself left out). */
+static void methtrace_note(uint32_t method, uint32_t param)
+{
+    static int init; static long lo = -1, hi = -1;
+    float f;
+    if (!init) { const char *v = getenv("RECOMP_GL_METHTRACE"); init = 1;
+                 if (v) { lo = atol(v); { const char *d = strchr(v, '-'); hi = d ? atol(d + 1) : lo; } } }
+    if (lo < 0 || g_draw_log_flip < 0) return;
+    if ((long)S.flips < g_draw_log_flip || (long)S.flips >= g_draw_log_flip + 2) return;
+    if ((long)S.since_present < lo || (long)S.since_present > hi) return;
+    if ((method >= 0x0B00 && method < 0x0C00) || method == 0x1800 || method == 0x1808
+        || method == 0x1818) return;
+    memcpy(&f, &param, 4);
+    fprintf(stderr, "[MT] f%u d%u %04X = %08X (%g)\n", S.flips, S.since_present, method, param, f);
+}
+
 void nv2a_gl_method(uint32_t method, uint32_t param)
 {
     if (!nv2a_gl_enabled() || g_failed) return;
     methval_note(method, param);
+    methtrace_note(method, param);
 
     if (!S.const_attr_init) {
         int i;
@@ -9681,6 +10992,22 @@ void nv2a_gl_method(uint32_t method, uint32_t param)
         else       S.ff_texmat_enable &= ~(1u << i);
         return;
     }
+    if (method >= M_SET_TEXGEN_S && method < M_SET_TEXGEN_S + 0x40) {
+        S.texgen[(method - M_SET_TEXGEN_S) >> 4][((method - M_SET_TEXGEN_S) >> 2) & 3] = param;
+        return;
+    }
+    if (method >= M_SET_TEXGEN_PLANE_S && method < M_SET_TEXGEN_PLANE_S + 0x100) {
+        uint32_t k = (method - M_SET_TEXGEN_PLANE_S) >> 2;   /* stage*16 + comp*4 + element */
+        memcpy(&S.texgen_plane[k >> 2][k & 3], &param, 4);
+        return;
+    }
+    if (method == M_SET_POINT_PARAMS_ENABLE) { S.point_params_enable = param; return; }
+    if (method == M_SET_POINT_SMOOTH_ENABLE) { S.point_smooth_enable = param; return; }
+    if (method == M_SET_POINT_SIZE)          { S.point_size = param; return; }
+    if (method >= M_SET_POINT_PARAMS && method < M_SET_POINT_PARAMS + 32) {
+        memcpy(&S.point_params[(method - M_SET_POINT_PARAMS) >> 2], &param, 4);
+        return;
+    }
     /* RECOMP_GL_INLINELOG=1: the named per-vertex constant methods
      * (NV097_SET_NORMAL3F 0x1530, _NORMAL3S 0x1540, _DIFFUSE_COLOR* 0x1550..,
      * _SPECULAR_COLOR* ...) -- which of them the title sends, with values. */
@@ -9694,21 +11021,9 @@ void nv2a_gl_method(uint32_t method, uint32_t param)
         if (on && n < 200) { float fv; memcpy(&fv, &param, 4); n++;
             fprintf(stderr, "[INLINE] m %04X = %08X (%g) at draw %u flip %u\n", method, param, fv, S.draws, S.flips); }
     }
-    if (method >= M_SET_VERTEX_DATA4F && method < M_SET_VERTEX_DATA4F + NUM_ATTRS * 16) {
-        uint32_t i = (method - M_SET_VERTEX_DATA4F) / 16;
-        memcpy(&S.const_attr[i][((method - M_SET_VERTEX_DATA4F) / 4) & 3], &param, 4);
-        memcpy(&S.const_set[i][((method - M_SET_VERTEX_DATA4F) / 4) & 3], &param, 4);
-        return;
-    }
-    if (method >= M_SET_VERTEX_DATA4UB && method < M_SET_VERTEX_DATA4UB + NUM_ATTRS * 4) {
-        uint32_t i = (method - M_SET_VERTEX_DATA4UB) / 4;
-        S.const_attr[i][0] = ((param >>  0) & 0xFF) / 255.0f;
-        S.const_attr[i][1] = ((param >>  8) & 0xFF) / 255.0f;
-        S.const_attr[i][2] = ((param >> 16) & 0xFF) / 255.0f;
-        S.const_attr[i][3] = ((param >> 24) & 0xFF) / 255.0f;
-        memcpy(S.const_set[i], S.const_attr[i], sizeof S.const_set[i]);
-        return;
-    }
+    /* Every per-vertex attribute method: the attribute's current value, and
+     * inside Begin/End the position's last component sends a vertex. */
+    if (imm_method(method, param)) return;
     if (method >= M_SET_VERTEX_ARRAY_OFFSET && method < M_SET_VERTEX_ARRAY_OFFSET + 0x40) {
         uint32_t ai = (method - M_SET_VERTEX_ARRAY_OFFSET) / 4;
         if (S.attr[ai].offset != param) S.arrays_since_geom = 1;
@@ -10108,12 +11423,17 @@ void nv2a_gl_method(uint32_t method, uint32_t param)
             S.draw_count = 0;
             S.consts_since_geom = 0;
             S.arrays_since_geom = 0;
+            g_imm_n = 0;
+            g_imm_dropped = 0;
         } else {
             ensure_ready();
-            do_draw();
+            /* No array or inline vertices, but some sent one at a time. */
+            if (g_imm_n && !S.idx_count && !S.inline_count) imm_draw();
+            else do_draw();
             S.prim = 0;
             S.idx_count = 0;
             S.inline_count = 0;
+            g_imm_n = 0;
         }
         break;
     case M_ARRAY_ELEMENT16:
@@ -10411,6 +11731,136 @@ const Nv2aGfx *nv2a_gfx_metal(void) { return NULL; }
  * backend that changed halfway through a frame would leave its surfaces and
  * programs behind in the other one.
  */
+/* ---- the shader seed ------------------------------------------------------
+ *
+ * The shader cache (below) keeps each program as the text it was built from,
+ * in this backend's language and for this translator only. So on a first
+ * start -- a new player, a new device, or a release whose translator changed
+ * -- every shader is built the moment the game first needs it, the game waits
+ * for each, and the first minute of every area stutters: a phone takes tens
+ * of milliseconds over a shader a Mac builds in one.
+ *
+ * So what each program was translated from is kept as well (the "states" of
+ * nv2a_shader_cache.h: its combiner state, and its vertex program's microcode
+ * or fixed-function description, with the blend recipes it was drawn with),
+ * which is the same on every platform and for every translator. The engine
+ * carries a list of them made by playing through the game (port/shader_seed.dat,
+ * handed over by nv2a_set_shader_seed), and each machine keeps its own. At
+ * start, every state that this backend's cache does not have yet is translated
+ * and added to it -- once per list and translator, as states-<tag>.done says --
+ * and the backend builds them ahead, as it does the programs of earlier runs:
+ * Metal on two threads in the background from the start, OpenGL a few
+ * milliseconds at a time on frames with little in them. Nothing waits for
+ * them; a program still missing when the game asks is built then, as before.
+ * JSRF_SHADER_SEED=<file> adds a list from a file (tests); RECOMP_SHADER_SEED=0
+ * leaves the engine's own out (this machine's are still used). */
+static const void *g_seed_data;
+static size_t      g_seed_len;
+void nv2a_set_shader_seed(const void *data, size_t len);
+void nv2a_set_shader_seed(const void *data, size_t len) { g_seed_data = data; g_seed_len = len; }
+
+static uint32_t seed_fnv(uint32_t h, const void *p, size_t n)
+{
+    const unsigned char *b = (const unsigned char *)p;
+    while (n--) { h ^= *b++; h *= 16777619u; }
+    return h;
+}
+
+static void seed_import(const char *dir, const char *tag, int msl)
+{
+    char mark[1200], want[64], have[96] = "";
+    FILE *mf;
+    unsigned char *extra = NULL;
+    size_t extra_len = 0;
+    uint32_t fp = 2166136261u;
+    int n, nlocal, done_local = -1, i, before = 0, after = 0, tried = 0, failed = 0;
+    double t0 = mono_now();
+    char *v, *f;
+
+    nv2a_sc_states_open(dir);
+    nlocal = nv2a_sc_states_local();
+    { const char *e = getenv("JSRF_SHADER_SEED");
+      FILE *sf = (e && *e) ? fopen(e, "rb") : NULL;
+      if (sf) {
+          long end = (!fseek(sf, 0, SEEK_END)) ? ftell(sf) : -1;
+          rewind(sf);
+          if (end > 0 && end < (64L << 20) && (extra = (unsigned char *)malloc((size_t)end)) != NULL &&
+              fread(extra, 1, (size_t)end, sf) == (size_t)end) extra_len = (size_t)end;
+          fclose(sf);
+      } }
+    { const char *e = getenv("RECOMP_SHADER_SEED");
+      if (e && *e && !atoi(e)) g_seed_len = 0; }
+    if (g_seed_data && g_seed_len) {
+        nv2a_sc_states_add_blob(g_seed_data, g_seed_len);
+        fp = seed_fnv(fp, g_seed_data, g_seed_len);
+    }
+    if (extra_len) {
+        nv2a_sc_states_add_blob(extra, extra_len);
+        fp = seed_fnv(fp, extra, extra_len);
+    }
+    free(extra);
+    n = nv2a_sc_states_count();
+    snprintf(want, sizeof want, "%08X:%lu", (unsigned)fp, (unsigned long)(g_seed_len + extra_len));
+    snprintf(mark, sizeof mark, "%s/states-%s.done", dir, tag);
+    if ((mf = fopen(mark, "r")) != NULL) {
+        if (fgets(have, sizeof have, mf)) {
+            char w[64]; int d;
+            if (sscanf(have, "%63s %d", w, &d) == 2 && !strcmp(w, want)) done_local = d;
+        }
+        fclose(mf);
+    }
+    /* The machine's own come first (0..nlocal), the carried list's after. With
+     * the same list translated already, only the machine's newer ones. */
+    if (done_local > nlocal) done_local = -1;
+    if (done_local == nlocal) {
+        fprintf(stderr, "  [SHADERS] states: %d (%d from this machine), translated for %s already\n",
+                n, nlocal, tag);
+        return;
+    }
+    if (!nv2a_sc_open(dir, tag)) return;
+    v = (char *)malloc(96 * 1024);
+    f = (char *)malloc(96 * 1024);
+    nv2a_sc_stats(&before, NULL, NULL);
+    for (i = (done_local >= 0 ? done_local : 0); v && f && i < (done_local >= 0 ? nlocal : n); i++) {
+        uint32_t id, vlen, plen, rc[64];
+        const void *vd, *pd;
+        int kind, ok = 0, k, nr;
+        Nv2aPshState ps;
+        if (!nv2a_sc_state_get(i, &id, &kind, &vd, &vlen, &pd, &plen)) continue;
+        tried++;
+        if (plen != sizeof ps) { failed++; continue; }        /* another engine's layout */
+        memcpy(&ps, pd, sizeof ps);
+        if (kind == 1 && vlen && vlen % 16 == 0 && vlen <= NV2A_VSH_MAX_INSNS * 16u) {
+            Nv2aVshProgram vp;
+            if (nv2a_vsh_decode((const uint32_t *)vd, (int)(vlen / 16), &vp) > 0 && (vp.outputs_written & 1u))
+                ok = msl ? nv2a_vsh_emit_msl(&vp, v, 96 * 1024) : nv2a_vsh_emit_glsl(&vp, v, 96 * 1024);
+        } else if (kind == 2 && vlen == sizeof(Nv2aVshFixed)) {
+            Nv2aVshFixed ff;
+            memcpy(&ff, vd, sizeof ff);
+            ok = msl ? nv2a_vsh_emit_ff_msl(&ff, v, 96 * 1024) : nv2a_vsh_emit_ff_glsl(&ff, v, 96 * 1024);
+        }
+        if (ok) ok = msl ? nv2a_psh_emit_msl(&ps, f, 96 * 1024) : nv2a_psh_emit_glsl(&ps, f, 96 * 1024);
+        if (!ok) { failed++; continue; }
+        {
+            uint64_t key = nv2a_sc_key(v, f);
+            nv2a_sc_add(key, v, f);
+            nr = nv2a_sc_state_recipes(id, rc, 64);
+            for (k = 0; k < nr; k++) nv2a_sc_recipe_add(key, rc[k]);
+        }
+    }
+    free(v);
+    free(f);
+    nv2a_sc_stats(&after, NULL, NULL);
+    if ((mf = fopen(mark, "w")) != NULL) {
+        fprintf(mf, "%s %d\n", want, nlocal);
+        fclose(mf);
+    }
+    fprintf(stderr, "  [SHADERS] states: %d (%d from this machine, the rest carried in the engine); "
+            "%d translated for %s in %.0f ms: %d programs new to its cache%s\n",
+            n, nlocal, tried, tag, (mono_now() - t0) * 1000.0, after - before,
+            failed ? " (some could not be: another engine's)" : "");
+}
+
 /* The shader cache (nv2a_shader_cache.h), in <JSRF_SAVE_DIR>/shaders: every
  * launcher sets the save folder, and a run without one has no cache. Its files
  * are named for the backend and for the translator -- a hash of a reference
@@ -10439,7 +11889,42 @@ static void shader_cache_start(void)
     free(v);
     free(f);
     snprintf(tag, sizeof tag, "%s-%08X", G->name, (unsigned)(fp ^ (fp >> 32)));
+    seed_import(dir, tag, msl);
     G->cache_open(dir, tag);
+}
+
+/* Anti-aliasing from the start: RECOMP_GL_SMAA and RECOMP_GL_MSAA, else the
+ * settings -- the window's (smaa=, msaa=) or, on a Mac or an iPhone, the
+ * app's preferences. Before the shader cache opens: the Metal backend builds
+ * pipelines ahead from it, and a pipeline is made for one count of samples. */
+extern int nv_window_pref_smaa(void) __attribute__((weak));
+extern int nv_window_pref_msaa(void) __attribute__((weak));
+static void aa_start(void)
+{
+    const char *vs = getenv("RECOMP_GL_SMAA"), *vm = getenv("RECOMP_GL_MSAA");
+    int smaa = 0, msaa = 0;
+#if defined(NV2A_GL_USE_SDL)
+    smaa = sdl_cfg_get("smaa", 0) != 0;
+    msaa = sdl_cfg_get("msaa", 0);
+#else
+    if (nv_window_pref_smaa) smaa = nv_window_pref_smaa() != 0;
+    if (nv_window_pref_msaa) msaa = nv_window_pref_msaa();
+#endif
+    if (vs && *vs) smaa = atoi(vs) != 0;
+    if (vm && *vm) msaa = atoi(vm);
+    g_msaa_max = G->samples_max ? G->samples_max() : 1;
+#if !defined(NV2A_GLES)
+    g_msaa_live = g_is_gl && G->samples != NULL;
+#endif
+    if (G->samples) g_msaa_now = G->samples(msaa > 1 ? msaa : 1);
+    else if (msaa > 1) fprintf(stderr, "  [GL] MSAA: not on the %s backend\n", G->name);
+    g_msaa_want = g_msaa_now;
+    if (G->target_smaa) g_smaa_now = g_smaa_want = smaa;
+    else if (smaa) fprintf(stderr, "  [GL] SMAA: not on the %s backend\n", G->name);
+    fprintf(stderr, "  [GL] anti-aliasing: SMAA %s, MSAA %dx (from %s; up to %dx here%s)\n",
+            g_smaa_now ? "on" : "off", g_msaa_now,
+            (vs && *vs) || (vm && *vm) ? "the environment" : "the settings", g_msaa_max,
+            g_msaa_live ? ", changed while running" : ", changed at the next start");
 }
 
 static int gfx_init(uint32_t w, uint32_t h)
@@ -10466,6 +11951,8 @@ static int gfx_init(uint32_t w, uint32_t h)
             G = m;
             g_is_gl = 0;
             fprintf(stderr, "  [GL] backend: %s\n", G->name);
+            zrev_start();
+            aa_start();
             shader_cache_start();
             return 1;
         }
@@ -10482,7 +11969,12 @@ static int gfx_init(uint32_t w, uint32_t h)
     }
     if (!gl_init(w, h)) return 0;     /* the context, then the device */
     fprintf(stderr, "  [GL] backend: %s\n", G->name);
+    zrev_start();
+    aa_start();
     shader_cache_start();
+#if defined(NV2A_GL_USE_SDL)
+    sdl_menu_update();                /* the menu's anti-aliasing, now known */
+#endif
     return 1;
 }
 

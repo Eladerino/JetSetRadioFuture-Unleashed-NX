@@ -36,7 +36,9 @@ Playing
    game's disc, a zip), it says what they are.
 
    ./jsrf-unleashed --install     adds JSRF Unleashed to your applications menu
-   ./jsrf-unleashed --scale N     internal resolution, 1 to 4 (default 2); remembered
+   ./jsrf-unleashed --scale N     internal resolution, 1 to 6 (default 2; 6 is for a
+                                  4K screen); remembered
+   ./jsrf-unleashed --portable    keep everything in this folder (see below)
    ./jsrf-unleashed --fullscreen  starts full screen
    ./jsrf-unleashed --choose      asks where the game is again
    ./jsrf-unleashed --version     which version this is
@@ -60,9 +62,18 @@ Keyboard (by key position, so W A S D on QWERTY is Z Q S D on AZERTY):
   F11 or Alt+Return   full screen
   F10                 widescreen 16:9 (a wider view, not a stretch; the HUD
                       keeps its shape, the title screen stays 4:3); remembered
-  F9                  resolution: the game is drawn at 1x to 4x the Xbox's
-                      640x480 (2x by default), up to 2560x1920; remembered.
-                      The game restarts to apply it, so save first.
+  F9                  resolution: the game is drawn at 1x to 6x the Xbox's
+                      640x480 (2x by default), up to 3840x2880 -- 6x is for a
+                      4K screen; remembered. The game restarts to apply it,
+                      so save first.
+  F8                  anti-aliasing: SMAA (a quick pass over each finished
+                      frame) and MSAA 2x, 4x or 8x (every edge drawn with
+                      that many samples a pixel), either or both; remembered
+  F7                  the camera on the right stick, on (the default) or off:
+                      the right stick (or the arrow keys) turns the camera
+                      around you and tilts it, and it eases back behind you
+                      when let go; L trigger puts it straight behind at once.
+                      Off, the camera is the original game's. Remembered
 
 
 Where things are kept
@@ -72,6 +83,13 @@ Where things are kept
   Settings  ~/.config/jsrf-unleashed/settings
   Cache     ~/.local/share/jsrf-unleashed/save
   Logs      ~/.local/state/jsrf-unleashed/last-run.log (and logs/)
+
+Portable: with a file named portable.txt in this folder, the settings, the
+cache, the logs and unpacked disc images are kept here instead, so the whole
+folder can move -- to another machine, onto a USB drive. Run
+./jsrf-unleashed --portable once to make the file (your settings come along);
+delete it to go back. A game folder (or a disc image) put in this folder is
+found on its own, and remembered relative to it.
 
 Found a bug? Open an issue on GitHub with last-run.log and what you were doing.
 

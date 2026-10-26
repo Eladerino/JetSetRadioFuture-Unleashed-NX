@@ -15,6 +15,7 @@
 
 #include "nv2a_backend.h"
 #include "nv2a_shader_cache.h"
+#include "nv2a_smaa.h"
 
 #define GL_GLEXT_PROTOTYPES 1
 #if defined(NV2A_GLES)
@@ -22,6 +23,13 @@
 #  undef GL_GLEXT_PROTOTYPES
 #  include <GLES3/gl32.h>
 #  include <GLES2/gl2ext.h>
+#  include <SDL2/SDL.h>     /* SDL_GL_GetProcAddress, for EXT_clip_control: ES is always SDL's */
+#  ifndef GL_LOWER_LEFT_EXT
+#    define GL_LOWER_LEFT_EXT  0x8CA1
+#  endif
+#  ifndef GL_ZERO_TO_ONE_EXT
+#    define GL_ZERO_TO_ONE_EXT 0x935F
+#  endif
    /* The NDK's gl2ext.h predates EXT_depth_clamp (Mesa's has it). */
 #  ifndef GL_DEPTH_CLAMP_EXT
 #    define GL_DEPTH_CLAMP_EXT 0x864F
@@ -83,6 +91,12 @@ static int gles_has_depth_clamp(void)
 #define MAX_TARGETS 64
 static struct {
     GLuint   fbo, tex, rb;
+    /* Multisampled (samples()): the framebuffer drawn into, with its colour
+     * and depth/stencil. fbo, tex and rb then hold the picture resolved from
+     * it, which is behind it while `drawn` is set. 0 when not multisampled. */
+    GLuint   msfbo, mscol, msds;
+    int      drawn;
+    int      flat;                  /* never multisampled: SMAA's own target */
     uint32_t pw, ph;
     int      used;
 } g_rt[MAX_TARGETS];
@@ -91,8 +105,16 @@ static GLuint   g_vao, g_vbo;
 static GLuint   g_copy_tex;         /* target_snapshot()'s copy */
 static uint32_t g_copy_w, g_copy_h;
 static int      g_copies;
+static int      g_samples = 1;      /* every target's, samples() */
+static int      g_resolves;
 
 static int rt_ok(uint32_t h) { return h && h <= MAX_TARGETS && g_rt[h - 1].used; }
+
+/* The framebuffer target h is drawn into. */
+static GLuint draw_fbo(uint32_t h)
+{
+    return g_rt[h - 1].msfbo ? g_rt[h - 1].msfbo : g_rt[h - 1].fbo;
+}
 
 static void scratch_bind(GLuint tex)
 {
@@ -100,7 +122,138 @@ static void scratch_bind(GLuint tex)
     glBindTexture(GL_TEXTURE_2D, tex);
 }
 
-static uint32_t glx_target_new(uint32_t pw, uint32_t ph)
+/*
+ * Multisampling, as spriteice wrote it for the OpenGL backend (e406839 in
+ * the fork): each target is drawn into a multisampled framebuffer of its own,
+ * and its texture holds the picture resolved from it -- by a blit, made only
+ * when something reads the picture and only if it was drawn into since.
+ */
+
+/* Copy target slot i's buffers in `mask`, whole, from one of its
+ * framebuffers to the other. The scissor is the one fragment operation that
+ * applies to a blit, and a draw may have set it and be about to use it. */
+static void blit(int i, GLuint from, GLuint to, GLbitfield mask)
+{
+    GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, from);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, to);
+    glBlitFramebuffer(0, 0, (GLint)g_rt[i].pw, (GLint)g_rt[i].ph,
+                      0, 0, (GLint)g_rt[i].pw, (GLint)g_rt[i].ph, mask, GL_NEAREST);
+    if (sc) glEnable(GL_SCISSOR_TEST);
+}
+
+/* Bring target h's texture up to what has been drawn into it. GL samples,
+ * copies, reads and scales only a single-sampled picture, so every path that
+ * does one of those resolves first; nothing drawn since costs nothing. */
+static void resolve(uint32_t h)
+{
+    if (!g_rt[h - 1].msfbo || !g_rt[h - 1].drawn) return;
+    blit((int)h - 1, g_rt[h - 1].msfbo, g_rt[h - 1].fbo, GL_COLOR_BUFFER_BIT);
+    if (rt_ok(g_cur_rt))
+        glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
+    g_rt[h - 1].drawn = 0;
+    g_resolves++;
+}
+
+/*
+ * Reversed depth (nv2a_vsh.c, depth_defines; the comparisons and clears are
+ * the front half's). Two things of the device's: a clip volume with z from 0
+ * to w, as the console's -- through OpenGL's own -1..1 the far end's
+ * precision would be lost again on the way to the buffer -- which takes
+ * glClipControl (OpenGL 4.5 or ARB_clip_control; OpenGL ES with
+ * EXT_clip_control); and a 32-bit floating-point depth buffer. A Mac's OpenGL
+ * (4.1) has no glClipControl and stays as it was.
+ */
+static GLenum g_depth_fmt = GL_DEPTH24_STENCIL8;
+
+#if !defined(NV2A_GLES) && !defined(NV2A_GL_USE_CGL) && !defined(__APPLE__) && !defined(_WIN32)
+/* The context's version and extensions, without a loader. */
+static int glx_version_at_least(int maj, int mnr)
+{
+    const char *v = (const char *)glGetString(GL_VERSION);
+    int a = 0, b = 0;
+    if (!v || sscanf(v, "%d.%d", &a, &b) != 2) return 0;
+    return a > maj || (a == maj && b >= mnr);
+}
+static int glx_has_ext(const char *name)
+{
+    GLint n = 0, i;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (i = 0; i < n; i++) {
+        const char *e = (const char *)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (e && !strcmp(e, name)) return 1;
+    }
+    return 0;
+}
+#endif
+
+static int glx_zrev(int want)
+{
+    int ok = 0;
+    if (!want) return 0;
+    while (glGetError() != GL_NO_ERROR) ;
+#if defined(NV2A_GLES)
+    if (gles_has_ext("GL_EXT_clip_control")) {
+        typedef void (*ClipControlFn)(GLenum, GLenum);
+        ClipControlFn cc = (ClipControlFn)SDL_GL_GetProcAddress("glClipControlEXT");
+        if (cc) { cc(GL_LOWER_LEFT_EXT, GL_ZERO_TO_ONE_EXT); ok = 1; }
+    }
+#elif defined(NV2A_GL_USE_CGL) || defined(__APPLE__)
+    ok = 0;
+#elif defined(_WIN32)
+    if (epoxy_gl_version() >= 45 || epoxy_has_gl_extension("GL_ARB_clip_control")) {
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        ok = 1;
+    }
+#else
+    if (glx_version_at_least(4, 5) || glx_has_ext("GL_ARB_clip_control")) {
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        ok = 1;
+    }
+#endif
+    if (ok && glGetError() != GL_NO_ERROR) ok = 0;
+    if (ok) g_depth_fmt = GL_DEPTH32F_STENCIL8;
+    fprintf(stderr, "  [GL] glClipControl: %s\n", ok ? "yes -- depth reversed, 32-bit float"
+                                                     : "no -- depth kept as the console keeps it");
+    return ok;
+}
+
+static void ms_free(int i)
+{
+    if (g_rt[i].msfbo) glDeleteFramebuffers(1, &g_rt[i].msfbo);
+    if (g_rt[i].mscol) glDeleteRenderbuffers(1, &g_rt[i].mscol);
+    if (g_rt[i].msds)  glDeleteRenderbuffers(1, &g_rt[i].msds);
+    g_rt[i].msfbo = g_rt[i].mscol = g_rt[i].msds = 0;
+}
+
+/* Target slot i's multisampled buffers, n samples a pixel, bound; 0 and
+ * none made if the device will not have that many at its size. */
+static int ms_new(int i, int n)
+{
+    GLsizei pw = (GLsizei)g_rt[i].pw, ph = (GLsizei)g_rt[i].ph;
+    glGenFramebuffers(1, &g_rt[i].msfbo);
+    glGenRenderbuffers(1, &g_rt[i].mscol);
+    glGenRenderbuffers(1, &g_rt[i].msds);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_rt[i].mscol);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, pw, ph);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_rt[i].msds);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, g_depth_fmt, pw, ph);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_rt[i].msfbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, g_rt[i].mscol);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, g_rt[i].msds);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+        return 1;
+    ms_free(i);
+    /* The refusal is said by the caller; the error it left would be pinned
+     * on the next draw by the front half's error check. */
+    while (glGetError() != GL_NO_ERROR) ;
+    return 0;
+}
+
+static uint32_t target_new(uint32_t pw, uint32_t ph, int flat)
 {
     int i;
     for (i = 0; i < MAX_TARGETS; i++) if (!g_rt[i].used) break;
@@ -120,7 +273,7 @@ static uint32_t glx_target_new(uint32_t pw, uint32_t ph)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindRenderbuffer(GL_RENDERBUFFER, g_rt[i].rb);
     /* With a stencil: the title keeps its shadow counts there. */
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+    glRenderbufferStorage(GL_RENDERBUFFER, g_depth_fmt,
                           (GLsizei)pw, (GLsizei)ph);
     glBindFramebuffer(GL_FRAMEBUFFER, g_rt[i].fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -133,14 +286,24 @@ static uint32_t glx_target_new(uint32_t pw, uint32_t ph)
         glDeleteTextures(1, &g_rt[i].tex);
         glDeleteRenderbuffers(1, &g_rt[i].rb);
         if (rt_ok(g_cur_rt))
-            glBindFramebuffer(GL_FRAMEBUFFER, g_rt[g_cur_rt - 1].fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
         return 0;
     }
-    g_rt[i].pw = pw; g_rt[i].ph = ph; g_rt[i].used = 1;
+    g_rt[i].pw = pw; g_rt[i].ph = ph; g_rt[i].used = 1; g_rt[i].flat = flat;
+    /* Multisampled like the rest, or -- the device refusing that many at
+     * this size -- drawn single-sampled, which is still the right picture. */
+    if (g_samples > 1 && !flat && !ms_new(i, g_samples))
+        fprintf(stderr, "  [GL] %d samples refused at %ux%u: that target is not multisampled\n",
+                g_samples, pw, ph);
     /* Creating it bound it; the target being drawn into stays the target. */
     if (rt_ok(g_cur_rt))
-        glBindFramebuffer(GL_FRAMEBUFFER, g_rt[g_cur_rt - 1].fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
     return (uint32_t)i + 1;
+}
+
+static uint32_t glx_target_new(uint32_t pw, uint32_t ph)
+{
+    return target_new(pw, ph, 0);
 }
 
 static void glx_target_free(uint32_t h)
@@ -149,6 +312,7 @@ static void glx_target_free(uint32_t h)
     glDeleteFramebuffers(1, &g_rt[h - 1].fbo);
     glDeleteTextures(1, &g_rt[h - 1].tex);
     glDeleteRenderbuffers(1, &g_rt[h - 1].rb);
+    ms_free((int)h - 1);
     memset(&g_rt[h - 1], 0, sizeof g_rt[0]);
     if (g_cur_rt == h) g_cur_rt = 0;
 }
@@ -156,14 +320,16 @@ static void glx_target_free(uint32_t h)
 static void glx_target_bind(uint32_t h)
 {
     if (!rt_ok(h)) return;
-    glBindFramebuffer(GL_FRAMEBUFFER, g_rt[h - 1].fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(h));
     glViewport(0, 0, (GLsizei)g_rt[h - 1].pw, (GLsizei)g_rt[h - 1].ph);
     g_cur_rt = h;
 }
 
 static uint32_t glx_target_texture(uint32_t h)
 {
-    return rt_ok(h) ? g_rt[h - 1].tex : 0;
+    if (!rt_ok(h)) return 0;
+    resolve(h);
+    return g_rt[h - 1].tex;
 }
 
 /* Sampling the surface being drawn into: GL forbids reading a texture that is
@@ -173,6 +339,12 @@ static uint32_t glx_target_snapshot(uint32_t h)
 {
     uint32_t pw, ph;
     if (!rt_ok(h)) return 0;
+    /* Multisampled, it is drawn into buffers of its own that the texture is
+     * not attached to: resolved, the texture is the copy. */
+    if (g_rt[h - 1].msfbo) {
+        resolve(h);
+        return g_rt[h - 1].tex;
+    }
     pw = g_rt[h - 1].pw; ph = g_rt[h - 1].ph;
     if (!g_copy_tex) glGenTextures(1, &g_copy_tex);
     scratch_bind(g_copy_tex);
@@ -188,7 +360,7 @@ static uint32_t glx_target_snapshot(uint32_t h)
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_rt[h - 1].fbo);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, (GLsizei)pw, (GLsizei)ph);
     if (rt_ok(g_cur_rt))
-        glBindFramebuffer(GL_FRAMEBUFFER, g_rt[g_cur_rt - 1].fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
     g_copies++;
     return g_copy_tex;
 }
@@ -207,6 +379,7 @@ static int glx_target_read(uint32_t h, uint32_t x, uint32_t y, uint32_t w,
                            uint32_t ht, int bgra, void *out)
 {
     if (!rt_ok(h) || !out) return 0;
+    resolve(h);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_rt[h - 1].fbo);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
 #if defined(NV2A_GLES)
@@ -218,7 +391,7 @@ static int glx_target_read(uint32_t h, uint32_t x, uint32_t y, uint32_t w,
                  bgra ? GL_UNSIGNED_INT_8_8_8_8_REV : GL_UNSIGNED_BYTE, out);
 #endif
     if (rt_ok(g_cur_rt))
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_rt[g_cur_rt - 1].fbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, draw_fbo(g_cur_rt));
     return 1;
 }
 
@@ -230,11 +403,13 @@ static int glx_target_read_depth(uint32_t h, uint32_t pw, uint32_t ph, float *ou
     return 0;
 #endif
     if (!rt_ok(h) || !out) return 0;
+    if (g_rt[h - 1].msfbo)
+        blit((int)h - 1, g_rt[h - 1].msfbo, g_rt[h - 1].fbo, GL_DEPTH_BUFFER_BIT);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_rt[h - 1].fbo);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, (GLsizei)pw, (GLsizei)ph, GL_DEPTH_COMPONENT, GL_FLOAT, out);
     if (rt_ok(g_cur_rt))
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_rt[g_cur_rt - 1].fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
     return 1;
 }
 
@@ -254,8 +429,23 @@ static uint32_t glx_tex_new(uint32_t w, uint32_t h, const void *rgba,
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     mg = s->mag_linear ? GL_LINEAR : GL_NEAREST;
-    if (s->mip) {
+    if (s->mip && s->levels > 1 && rgba) {
+        /* The title's own chain, level after level as rgba holds it. */
+        const uint8_t *p = (const uint8_t *)rgba + (size_t)w * h * 4;
+        uint32_t l, wl = w, hl = h;
+        for (l = 1; l < s->levels; l++) {
+            wl = wl > 1 ? wl / 2 : 1;
+            hl = hl > 1 ? hl / 2 : 1;
+            glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)wl, (GLsizei)hl, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, p);
+            p += (size_t)wl * hl * 4;
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)s->levels - 1);
+    } else if (s->mip) {
         glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    if (s->mip) {
         mn = s->mip == 1 ? (s->min_linear ? GL_LINEAR_MIPMAP_NEAREST : GL_NEAREST_MIPMAP_NEAREST)
                          : (s->min_linear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR);
         if (s->aniso > 1) {
@@ -388,7 +578,7 @@ static GLuint compile(GLenum stage, const char *src, const char *what)
 }
 
 /* Compile and link: a GL program object, or 0 having said why. */
-static GLuint glx_build(const char *vsrc, const char *fsrc, const char *what)
+static GLuint glx_build_once(const char *vsrc, const char *fsrc, const char *what)
 {
     GLuint vs, fs, prog;
     GLint ok = 0;
@@ -411,6 +601,29 @@ static GLuint glx_build(const char *vsrc, const char *fsrc, const char *what)
         fprintf(stderr, "  [GL] %s: link failed:\n%.*s\n", what, (int)n, log);
         glDeleteProgram(prog);
         return 0;
+    }
+    return prog;
+}
+
+/* ...and, should a driver refuse the invariant position the vertex programs
+ * declare (nv2a_vsh.c, vsh_invariant -- standard since GLSL 1.30 and GLSL ES
+ * 3.00, but a driver may still balk), the same program without it: a picture
+ * with a little z-fighting rather than none at all. */
+static GLuint glx_build(const char *vsrc, const char *fsrc, const char *what)
+{
+    static const char inv[] = "invariant gl_Position;\n";
+    const char *at;
+    GLuint prog = glx_build_once(vsrc, fsrc, what);
+    if (!prog && (at = strstr(vsrc, inv)) != NULL) {
+        size_t n = strlen(vsrc), k = (size_t)(at - vsrc);
+        char *alt = (char *)malloc(n + 1);
+        if (alt) {
+            memcpy(alt, vsrc, k);
+            memcpy(alt + k, at + sizeof inv - 1, n - k - (sizeof inv - 1) + 1);
+            fprintf(stderr, "  [GL] %s: building it again without the invariant position\n", what);
+            prog = glx_build_once(alt, fsrc, what);
+            free(alt);
+        }
     }
     return prog;
 }
@@ -1163,12 +1376,14 @@ static GLenum gl_prim_of(int p)
 static void glx_draw(int prim, uint32_t count)
 {
     glDrawArrays(gl_prim_of(prim), 0, (GLsizei)count);
+    if (g_cur_rt) g_rt[g_cur_rt - 1].drawn = 1;
 }
 
 static void glx_draw_indexed(int prim, uint32_t count, int idx32)
 {
     glDrawElements(gl_prim_of(prim), (GLsizei)count,
                    idx32 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, (const void *)0);
+    if (g_cur_rt) g_rt[g_cur_rt - 1].drawn = 1;
 }
 
 /* ---- clears -------------------------------------------------------------- */
@@ -1223,6 +1438,7 @@ static void glx_clear(unsigned mask, const float rgba[4], float depth,
     }
     glClear(bits);
     glDisable(GL_SCISSOR_TEST);
+    if (g_cur_rt) g_rt[g_cur_rt - 1].drawn = 1;
 }
 
 /* ---- the rest ------------------------------------------------------------ */
@@ -1246,6 +1462,9 @@ static void glx_report(void)
 {
     if (g_copies)
         fprintf(stderr, "  [GL] %d copies of a surface sampled while drawn into\n", g_copies);
+    if (g_resolves)
+        fprintf(stderr, "  [GL] %d multisampled pictures resolved (%d samples a pixel at the end)\n",
+                g_resolves, g_samples);
     if (nv2a_sc_is_open()) {
         int progs = 0, bins = 0, added = 0;
         nv2a_sc_stats(&progs, &bins, &added);
@@ -1259,10 +1478,251 @@ static void glx_report(void)
 }
 
 /* For nv2a_gl.c's GL-only paths (the SDL window's blit, the occlusion-query
- * probe): the framebuffer object behind a target. */
+ * probe): the framebuffer object behind a target, holding its picture --
+ * resolved, when it is multisampled, which cannot be scaled into a window. */
 unsigned nv2a_gfx_gl_fbo(uint32_t rt)
 {
-    return rt_ok(rt) ? g_rt[rt - 1].fbo : 0;
+    if (!rt_ok(rt)) return 0;
+    resolve(rt);
+    return g_rt[rt - 1].fbo;
+}
+
+/* ---- multisampling ------------------------------------------------------- */
+
+static int glx_samples_max(void)
+{
+    GLint n = 1;
+    glGetIntegerv(GL_MAX_SAMPLES, &n);
+    return n > 1 ? (int)n : 1;
+}
+
+/*
+ * Every target drawn with n samples a pixel from now on (1: none), between
+ * frames. Each target's picture, depth and stencil is resolved into its own
+ * framebuffer, its multisampled buffers are made again at the new count, and
+ * what they held is copied back into every sample: through the single-sampled
+ * framebuffer, because GL will not blit between two counts. A count the
+ * device refuses for any target gives way to half of it, down to none.
+ *
+ * OpenGL ES will not blit into a multisampled framebuffer at all, so there
+ * the count is only taken while there are no targets (at start).
+ */
+static int glx_samples(int n)
+{
+    const GLbitfield all = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+    int i, max = glx_samples_max();
+    if (n > max) n = max;
+    if (n < 1) n = 1;
+    if (n == g_samples) return n;
+#if defined(NV2A_GLES)
+    for (i = 0; i < MAX_TARGETS; i++)
+        if (g_rt[i].used) return g_samples;
+#endif
+    for (i = 0; i < MAX_TARGETS; i++)
+        if (g_rt[i].msfbo) {
+            blit(i, g_rt[i].msfbo, g_rt[i].fbo, all);
+            ms_free(i);
+        }
+    for (; n > 1; n /= 2) {
+        for (i = 0; i < MAX_TARGETS; i++)
+            if (g_rt[i].used && !g_rt[i].flat && !ms_new(i, n)) break;
+        if (i == MAX_TARGETS) break;
+        fprintf(stderr, "  [GL] %d samples refused at %ux%u\n", n, g_rt[i].pw, g_rt[i].ph);
+        for (i = 0; i < MAX_TARGETS; i++) ms_free(i);
+    }
+    for (i = 0; i < MAX_TARGETS; i++) {
+        if (g_rt[i].msfbo) blit(i, g_rt[i].fbo, g_rt[i].msfbo, all);
+        g_rt[i].drawn = 0;
+    }
+    if (rt_ok(g_cur_rt))
+        glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
+    g_samples = n;
+    return n;
+}
+
+/* ---- SMAA (nv2a_smaa.h) ----------------------------------------------------
+ *
+ * Three passes over the frame being shown, each one triangle over a target of
+ * the frame's size: its edges into an RG8 image, the blending weights into an
+ * RGBA8 one, and the frame blended by them into a target of this backend's
+ * own, which the window then shows. The title's surfaces are untouched, and
+ * so is everything it can observe; a multisampled frame is resolved first.
+ * The pass leaves the backend as the next draw expects it, as target_fxaa did
+ * in spriteice's fork: the program in use and the target being drawn into
+ * bound again (with its viewport), and the state the front half gives every
+ * draw set again in full (state_invalidate). Units 4 to 6 hold its textures;
+ * the title's combiner stages sample 0 to 3 and nothing samples those.
+ */
+#define SMAA_UNIT 4
+static struct {
+    GLuint   prog[3];
+    GLint    rt_loc[3];
+    GLuint   vao;
+    GLuint   area, search;              /* the look-up textures */
+    GLuint   edges, edges_fbo;          /* pass 1's image */
+    GLuint   weights, weights_fbo;      /* pass 2's */
+    uint32_t out;                       /* the target pass 3 draws into */
+    uint32_t w, h;
+    int      bad;                       /* it would not build: frames as they are */
+} g_sm;
+
+static const char *const smaa_pass_name[3] = { "SMAA edges", "SMAA weights", "SMAA blend" };
+
+static void smaa_sampler(GLuint prog, const char *name, int unit)
+{
+    GLint loc = glGetUniformLocation(prog, name);
+    if (loc >= 0) glUniform1i(loc, unit);
+}
+
+/* A texture for SMAA, w x h, bound to the scratch unit. */
+static GLuint smaa_tex(GLint ifmt, GLenum fmt, uint32_t w, uint32_t h, const void *px, GLint filter)
+{
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    scratch_bind(t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, ifmt, (GLsizei)w, (GLsizei)h, 0, fmt, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return t;
+}
+
+/* The programs and the look-up textures, once. */
+static int smaa_build(void)
+{
+    double t0 = glx_now_ms();
+    int p;
+    for (p = 0; p < 3; p++) {
+        char *vs = nv2a_smaa_glsl_source(p, 0), *fs = nv2a_smaa_glsl_source(p, 1);
+        g_sm.prog[p] = (vs && fs) ? glx_build(vs, fs, smaa_pass_name[p]) : 0;
+        free(vs);
+        free(fs);
+        if (!g_sm.prog[p]) return 0;
+        glUseProgram(g_sm.prog[p]);
+        g_sm.rt_loc[p] = glGetUniformLocation(g_sm.prog[p], "smaaRt");
+        smaa_sampler(g_sm.prog[p], "colorTex", SMAA_UNIT);
+        smaa_sampler(g_sm.prog[p], "edgesTex", SMAA_UNIT);
+        smaa_sampler(g_sm.prog[p], "areaTex", SMAA_UNIT + 1);
+        smaa_sampler(g_sm.prog[p], "searchTex", SMAA_UNIT + 2);
+        smaa_sampler(g_sm.prog[p], "blendTex", SMAA_UNIT + 1);
+    }
+    glGenVertexArrays(1, &g_sm.vao);
+    g_sm.area = smaa_tex(GL_RG8, GL_RG, NV2A_SMAA_AREA_W, NV2A_SMAA_AREA_H,
+                         nv2a_smaa_area(), GL_LINEAR);
+    g_sm.search = smaa_tex(GL_R8, GL_RED, NV2A_SMAA_SEARCH_W, NV2A_SMAA_SEARCH_H,
+                           nv2a_smaa_search(), GL_NEAREST);
+    fprintf(stderr, "  [GL] SMAA: built in %.0f ms\n", glx_now_ms() - t0);
+    return 1;
+}
+
+static void smaa_unsize(void)
+{
+    if (g_sm.edges_fbo)   glDeleteFramebuffers(1, &g_sm.edges_fbo);
+    if (g_sm.weights_fbo) glDeleteFramebuffers(1, &g_sm.weights_fbo);
+    if (g_sm.edges)       glDeleteTextures(1, &g_sm.edges);
+    if (g_sm.weights)     glDeleteTextures(1, &g_sm.weights);
+    glx_target_free(g_sm.out);
+    g_sm.edges_fbo = g_sm.weights_fbo = g_sm.edges = g_sm.weights = 0;
+    g_sm.out = 0;
+    g_sm.w = g_sm.h = 0;
+}
+
+/* The two images and the target, at the frame's size. */
+static int smaa_size(uint32_t pw, uint32_t ph)
+{
+    int ok;
+    smaa_unsize();
+    g_sm.edges = smaa_tex(GL_RG8, GL_RG, pw, ph, NULL, GL_LINEAR);
+    g_sm.weights = smaa_tex(GL_RGBA8, GL_RGBA, pw, ph, NULL, GL_LINEAR);
+    glGenFramebuffers(1, &g_sm.edges_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_sm.edges_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_sm.edges, 0);
+    ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glGenFramebuffers(1, &g_sm.weights_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_sm.weights_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_sm.weights, 0);
+    ok = ok && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    /* Flat: one triangle over the whole of it gains nothing from samples. */
+    g_sm.out = ok ? target_new(pw, ph, 1) : 0;
+    if (rt_ok(g_cur_rt)) glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo(g_cur_rt));
+    if (!g_sm.out) { smaa_unsize(); return 0; }
+    g_sm.w = pw; g_sm.h = ph;
+    fprintf(stderr, "  [GL] SMAA: the frame shown at %ux%u\n", pw, ph);
+    return 1;
+}
+
+static void smaa_bind(int unit, GLuint tex)
+{
+    glActiveTexture((GLenum)(GL_TEXTURE0 + unit));
+    glBindTexture(GL_TEXTURE_2D, tex);
+}
+
+static uint32_t glx_target_smaa(uint32_t h)
+{
+    uint32_t pw, ph;
+    float rt[4];
+    if (!rt_ok(h) || g_sm.bad) return h;
+    pw = g_rt[h - 1].pw; ph = g_rt[h - 1].ph;
+    if (!g_sm.prog[2] && !smaa_build()) {
+        g_sm.bad = 1;
+        fprintf(stderr, "  [GL] SMAA: no programs; frames are shown without it\n");
+        glUseProgram(prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].prog : 0);
+        return h;
+    }
+    if ((g_sm.w != pw || g_sm.h != ph || !rt_ok(g_sm.out)) && !smaa_size(pw, ph)) {
+        g_sm.bad = 1;
+        fprintf(stderr, "  [GL] SMAA: no images at %ux%u; frames are shown without it\n", pw, ph);
+        return h;
+    }
+    resolve(h);                     /* multisampled: its picture, up to date */
+    rt[0] = 1.0f / (float)pw; rt[1] = 1.0f / (float)ph; rt[2] = (float)pw; rt[3] = (float)ph;
+
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBindVertexArray(g_sm.vao);
+    glViewport(0, 0, (GLsizei)pw, (GLsizei)ph);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+
+    /* 1: the edges. A pixel without one is discarded: cleared first. */
+    glBindFramebuffer(GL_FRAMEBUFFER, g_sm.edges_fbo);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(g_sm.prog[0]);
+    glUniform4fv(g_sm.rt_loc[0], 1, rt);
+    smaa_bind(SMAA_UNIT, g_rt[h - 1].tex);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    /* 2: the weights, only where there are edges; the rest stays 0. */
+    glBindFramebuffer(GL_FRAMEBUFFER, g_sm.weights_fbo);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(g_sm.prog[1]);
+    glUniform4fv(g_sm.rt_loc[1], 1, rt);
+    smaa_bind(SMAA_UNIT, g_sm.edges);
+    smaa_bind(SMAA_UNIT + 1, g_sm.area);
+    smaa_bind(SMAA_UNIT + 2, g_sm.search);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    /* 3: the frame, blended by them, into the target that is shown. */
+    glBindFramebuffer(GL_FRAMEBUFFER, g_rt[g_sm.out - 1].fbo);
+    glUseProgram(g_sm.prog[2]);
+    glUniform4fv(g_sm.rt_loc[2], 1, rt);
+    smaa_bind(SMAA_UNIT, g_rt[h - 1].tex);
+    smaa_bind(SMAA_UNIT + 1, g_sm.weights);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    /* Back as the title's next draw expects it: its program and target, and
+     * the state it gives every draw set again in full. (Every draw binds its
+     * own vertex array: vertices(), vbuf_bind().) */
+    glActiveTexture(GL_TEXTURE0 + SCRATCH_UNIT);
+    glUseProgram(prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].prog : 0);
+    glx_state_invalidate();
+    if (rt_ok(g_cur_rt)) glx_target_bind(g_cur_rt);
+    return g_sm.out;
 }
 
 static const Nv2aGfx g_gl = {
@@ -1279,6 +1739,10 @@ static const Nv2aGfx g_gl = {
     glx_uniform_f_part,
     NULL,                       /* pipeline_ms: the link covers it */
     glx_cache_open, glx_cache_idle,
+    glx_target_smaa,
+    glx_samples_max, glx_samples,
+    glx_zrev,
+    NULL,                       /* gpu_ms */
 };
 
 const Nv2aGfx *nv2a_gfx_gl(void) { return &g_gl; }

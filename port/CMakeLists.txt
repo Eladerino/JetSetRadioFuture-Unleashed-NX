@@ -170,6 +170,35 @@ else()
         ${JSRF_GEN_SOURCES}
     )
 endif()
+# The shader seed (src/nv2a_gl/nv2a_gl.c, seed_import): the states of the
+# shaders the game draws with, collected by playing it, carried in the engine
+# as bytes made from port/shader_seed.dat at configure time -- none without it.
+# Only rewritten when it changes, so a reconfigure does not rebuild it.
+set(JSRF_SEED_DAT "${CMAKE_CURRENT_SOURCE_DIR}/shader_seed.dat")
+set(JSRF_SEED_C "${CMAKE_CURRENT_BINARY_DIR}/shader_seed.c")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${JSRF_SEED_DAT}")
+if(EXISTS "${JSRF_SEED_DAT}")
+    file(READ "${JSRF_SEED_DAT}" _jsrf_seed_hex HEX)
+    string(LENGTH "${_jsrf_seed_hex}" _jsrf_seed_n)
+    math(EXPR _jsrf_seed_len "${_jsrf_seed_n} / 2")
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _jsrf_seed_bytes "${_jsrf_seed_hex}")
+    # 24 bytes a line (CMake's expressions have no {n}: the pattern spelt out)
+    string(REPEAT "0x[0-9a-f][0-9a-f]," 24 _jsrf_seed_line)
+    string(REGEX REPLACE "(${_jsrf_seed_line})" "\\1\n" _jsrf_seed_bytes "${_jsrf_seed_bytes}")
+    message(STATUS "Shader seed: ${_jsrf_seed_len} bytes")
+else()
+    set(_jsrf_seed_len 0)
+    set(_jsrf_seed_bytes "0")
+    message(STATUS "Shader seed: none (no port/shader_seed.dat)")
+endif()
+file(WRITE "${JSRF_SEED_C}.new"
+    "/* Made by port/CMakeLists.txt from port/shader_seed.dat. */\n"
+    "#include <stddef.h>\n"
+    "const unsigned char jsrf_shader_seed[] = {\n${_jsrf_seed_bytes}\n};\n"
+    "const size_t jsrf_shader_seed_len = ${_jsrf_seed_len};\n")
+configure_file("${JSRF_SEED_C}.new" "${JSRF_SEED_C}" COPYONLY)
+target_sources(jsrf_recomp PRIVATE "${JSRF_SEED_C}")
+
 if(IOS)
     # The iPhone / iPad app around the engine (ios/jsrf_ios.m: the window,
     # the controls, the game in Documents; the disc-image unpacker, ios/xiso.c,

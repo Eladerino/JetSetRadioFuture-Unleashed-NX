@@ -29,6 +29,8 @@ public class JsrfActivity extends SDLActivity
     static native void nativeTouch(int buttons, int analog, int x, int y, boolean stick, boolean shown);
     static native boolean nativeWidescreen();
     static native void nativeSetWidescreen(boolean on);
+    static native boolean nativeRstickCamera();
+    static native void nativeSetRstickCamera(boolean on);
     static native String nativeVersion();
     static native void nativeLog(String line);
 
@@ -166,11 +168,13 @@ public class JsrfActivity extends SDLActivity
     public void onSettings() {
         final boolean wide = nativeWidescreen();
         final boolean touch = touchPref();
+        final boolean rcam = nativeRstickCamera();
         final int scale = Settings.get(this, "scale", 2);
         String[] items = {
             "Widescreen: " + (wide ? "on" : "off"),
             "On-screen controls: " + (touch ? "shown" : "hidden"),
             "Resolution: " + scale + "x",
+            "Camera on the right stick: " + (rcam ? "on" : "off"),
             "Controls",
         };
         mPad.reset();
@@ -186,6 +190,9 @@ public class JsrfActivity extends SDLActivity
                     break;
                 case 2:
                     pickScale(scale);
+                    break;
+                case 3:
+                    nativeSetRstickCamera(!rcam);
                     break;
                 default:
                     showControls();
@@ -218,6 +225,9 @@ public class JsrfActivity extends SDLActivity
                 + "On screen: put your left thumb anywhere on the left half to steer; A B X Y are "
                 + "the pad's, R and L its triggers, the hollow and filled circles White and Black; "
                 + "Start and Back are at the top.\n\n"
+                + "With the camera on the right stick (the settings), a controller's right stick "
+                + "turns the camera around you and it eases back behind you when let go; "
+                + "L trigger puts it straight behind at once.\n\n"
                 + "A keyboard: WASD (by position) moves, arrows the camera, Space jump, E spray, "
                 + "Enter Start, Esc Back.\n\n"
                 + "A new resolution is used the next time the game starts.")

@@ -2666,6 +2666,7 @@ void sub_001C3C22(void)
     g_eax = 0; g_esp += 4 + 8;
 }
 /* XInputGetState(h, state) */
+static void rcam_note_pad(XBOX_INPUT_STATE *s);   /* the camera on the right stick, below */
 void sub_001C3E14(void)
 {
     uint32_t h = GARG(1), st = GARG(2); uint8_t *m = (uint8_t *)g_xbox_mem_offset;
@@ -2673,6 +2674,7 @@ void sub_001C3E14(void)
     static uint16_t last_btn; static uint8_t last_a;
     if ((h & 0xFFFF0000u) != XPP_HANDLE_BASE || !st) { g_eax = 0x57; g_esp += 12; return; }
     if (!pad_read(h & 3, &s)) { g_eax = 0x48F; g_esp += 12; return; }   /* ERROR_DEVICE_NOT_CONNECTED */
+    if ((h & 3) == 0) rcam_note_pad(&s);
     *(uint32_t *)(m + st) = s.dwPacketNumber;
     *(uint16_t *)(m + st + 4) = s.Gamepad.wButtons;
     memcpy(m + st + 6, s.Gamepad.bAnalogButtons, 8);
@@ -4187,6 +4189,246 @@ void sub_00042EE0(void)
 }
 
 
+/* ---- the camera on the right stick -------------------------------------------
+ *
+ * Not in the original game. Its camera follows the skater by itself, the L
+ * trigger puts it back behind, and the right stick only does one thing: with
+ * the skater standing still it switches to a first-person look (camera mode
+ * 14). With this, the right stick turns the camera around the skater and
+ * tilts it up and down, moving or not; let go, and after a moment it drifts
+ * back behind; the L trigger still puts it back at once. While it does, the
+ * game is not shown the right stick, so the first-person look is not there.
+ *
+ * The camera (object 0x4C, below) works out where it wants to be in its own
+ * fields -- the eye at +0x20C, the point it looks at at +0x218, eased from
+ * one frame to the next by its update, sub_000A5070 -- and sub_000A28B0
+ * publishes them: the eye to +0x44 and the point to +0x5C, which the view is
+ * drawn from, the heading from one to the other (+0x228, 0x10000 to a turn:
+ * atan2 of x over z) and the distance (+0x230). So the turn is made to what
+ * is published, right after it is: the eye, about the point looked at, and
+ * the heading with it -- the skater's controls go by the heading, so "up" on
+ * the left stick goes where the camera now looks (with the heading left
+ * alone, a quarter turn of the view sent the skater off to the side of the
+ * screen). The camera's own fields are never touched, and what was published
+ * is put back before the camera's next update and publication, so that the
+ * game's camera moves exactly as it always did and only the view is turned.
+ * If something else moved the eye in between (an event placing the camera),
+ * that is left as it is and the turn dropped.
+ *
+ * Not in a conversation (mode 12) or the first-person look (14). On unless
+ * the player turns it off, nv_window_pref_rstick_camera: the Mac's Controls
+ * menu, the iPhone's and the Android app's settings, and on Windows and Linux
+ * F7 (and Controls in the Windows window's menu bar); RECOMP_RSTICK_CAMERA=1
+ * or 0 overrides.
+ * Tests: JSRF_RCAM_LOG=1 logs it ten times a second; JSRF_RCAM_FIXED=<degrees>
+ * holds a fixed turn; JSRF_RCAM_DUMPCAM=<s> prints the camera object once.
+ */
+__attribute__((weak)) int nv_window_pref_rstick_camera(void);
+__attribute__((weak)) int nv_window_pref_rstick_camera(void) { return 0; }   /* no switch: off */
+
+#define RCAM_DEAD   0.24f      /* of full deflection: a resting stick drifts */
+#define RCAM_YAW    2.6f       /* radians a second at full deflection, about 150 degrees */
+#define RCAM_PITCH  1.4f
+#define RCAM_PMAX   0.6f       /* the tilt either way, about 35 degrees */
+/* The eye's elevation above the point looked at (the skater's head), kept
+ * within: from a little below it, looking up, to well above. */
+#define RCAM_EL_MIN -0.30f
+#define RCAM_EL_MAX 1.2f
+#define RCAM_HOLD   0.6f       /* seconds after the stick is let go before it drifts back */
+#define RCAM_TAU    0.3f       /* and how quickly: e-fold time, seconds */
+
+static struct {
+    float    rx, ry;           /* the right stick, -1..1, dead zone taken out */
+    int      lt;               /* the L trigger held */
+    float    yaw, pitch;       /* the turn, radians: to the right, and up */
+    float    idle;             /* seconds since the stick was let go */
+    double   last;             /* when the turn was last worked out */
+    double   active_until;     /* the stick is the camera's (not the game's) until then */
+    uint32_t cam;              /* the camera it was applied to */
+    float    game_eye[3];      /* the eye as the game published it */
+    float    our_eye[3];       /* and as this left it */
+    int32_t  game_hd, our_hd;  /* the heading, likewise */
+    int      applied;
+} s_rcam;
+
+static void rcam_note_pad(XBOX_INPUT_STATE *s)
+{
+    float x = (float)s->Gamepad.sThumbRX / 32767.0f, y = (float)s->Gamepad.sThumbRY / 32767.0f;
+    float mag = sqrtf(x * x + y * y);
+    if (mag < RCAM_DEAD) {
+        x = y = 0.0f;
+    } else {
+        float k = ((mag > 1.0f ? 1.0f : mag) - RCAM_DEAD) / (1.0f - RCAM_DEAD) / mag;
+        x *= k; y *= k;
+    }
+    s_rcam.rx = x;
+    s_rcam.ry = y;
+    s_rcam.lt = s->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] > 64;
+    /* While the camera is turning with it, the game does not see the stick
+     * (its first-person look). Elsewhere -- menus, conversations, events --
+     * it gets it as always. */
+    if (jsrf_now() < s_rcam.active_until) {
+        s->Gamepad.sThumbRX = 0;
+        s->Gamepad.sThumbRY = 0;
+    }
+}
+
+static int rcam_enabled(void)
+{
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("RECOMP_RSTICK_CAMERA");
+        env = (e && *e) ? (atoi(e) != 0) : -1;
+    }
+    if (env >= 0) return env;
+    return nv_window_pref_rstick_camera() > 0;
+}
+
+static int rcam_log_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("JSRF_RCAM_LOG") ? 1 : 0;
+    return on;
+}
+
+/* Before the camera's update and its publication: what it published, back --
+ * unless something else moved the eye meanwhile. */
+static void rcam_restore(uint8_t *m, uint32_t cam)
+{
+    float *e;
+    int32_t *hd;
+    if (!s_rcam.applied) return;
+    s_rcam.applied = 0;
+    if (cam != s_rcam.cam || cam < 0x10000u || cam + 0x240u >= (64u << 20)) return;
+    e = (float *)(m + cam + 0x44);
+    hd = (int32_t *)(m + cam + 0x228);
+    if (memcmp(e, s_rcam.our_eye, sizeof s_rcam.our_eye) != 0) {
+        if (rcam_log_on())
+            fprintf(stderr, "[RCAM] t=%.2f the eye was moved by something else: turn dropped\n", jsrf_now());
+        s_rcam.yaw = s_rcam.pitch = 0.0f;
+        return;
+    }
+    memcpy(e, s_rcam.game_eye, sizeof s_rcam.game_eye);
+    if (*hd == s_rcam.our_hd) *hd = s_rcam.game_hd;
+}
+
+/* Right after the publication: the turn worked out from the stick, and made. */
+static void rcam_apply(uint8_t *m, uint32_t cam)
+{
+    double now = jsrf_now();
+    float dt = s_rcam.last > 0.0 ? (float)(now - s_rcam.last) : 0.0f;
+    const uint32_t *c;
+    float *e, *t, v[3], h, len, el, el2, ca, sa, lo, hi;
+    int32_t *hd;
+    static double fixed = -1.0e9;
+    static double next_log, dump_at = -2.0;
+    uint32_t mode;
+    int ok, i;
+    s_rcam.last = now;
+    if (dt > 0.1f) dt = 0.1f;          /* a hitch, or the first frame */
+    if (cam < 0x10000u || cam + 0x240u >= (64u << 20)) return;
+    c = (const uint32_t *)(m + cam);
+    if (dump_at == -2.0) {
+        const char *d = getenv("JSRF_RCAM_DUMPCAM");
+        dump_at = d ? atof(d) : -1.0;
+    }
+    if (dump_at >= 0.0 && now >= dump_at) {
+        dump_at = -1.0;
+        fprintf(stderr, "[RCAM] camera %08X at t=%.2f, as floats:", cam, now);
+        for (i = 0; i < 0x240 / 4; i++) {
+            if (i % 8 == 0) fprintf(stderr, "\n  +%03X", i * 4);
+            fprintf(stderr, " %10.3f", ((const float *)c)[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+    if (fixed == -1.0e9) {
+        const char *f = getenv("JSRF_RCAM_FIXED");
+        fixed = f ? atof(f) * 3.14159265358979 / 180.0 : -1.0e8;
+    }
+    mode = c[0x208 / 4];
+    ok = rcam_enabled() && mode != 12 && mode != 14;
+    s_rcam.active_until = ok ? now + 0.25 : 0.0;
+    if (!ok) {
+        s_rcam.yaw = s_rcam.pitch = 0.0f;
+        s_rcam.idle = 0.0f;
+    } else if (fixed > -1.0e7) {
+        s_rcam.yaw = (float)fixed;
+        s_rcam.pitch = 0.0f;
+    } else if (s_rcam.lt) {
+        s_rcam.yaw = s_rcam.pitch = 0.0f;   /* the game puts its camera back behind as well */
+        s_rcam.idle = 0.0f;
+    } else if (s_rcam.rx != 0.0f || s_rcam.ry != 0.0f) {
+        /* Squared, for a fine turn near the middle of the stick. */
+        s_rcam.yaw   += s_rcam.rx * fabsf(s_rcam.rx) * RCAM_YAW * dt;
+        s_rcam.pitch += s_rcam.ry * fabsf(s_rcam.ry) * RCAM_PITCH * dt;
+        s_rcam.idle = 0.0f;
+    } else {
+        s_rcam.idle += dt;
+        if (s_rcam.idle > RCAM_HOLD) {
+            float k = expf(-dt / RCAM_TAU);
+            s_rcam.yaw *= k;
+            s_rcam.pitch *= k;
+        }
+    }
+    while (s_rcam.yaw >  3.14159265f) s_rcam.yaw -= 6.28318531f;
+    while (s_rcam.yaw < -3.14159265f) s_rcam.yaw += 6.28318531f;
+    if (s_rcam.pitch >  RCAM_PMAX) s_rcam.pitch =  RCAM_PMAX;
+    if (s_rcam.pitch < -RCAM_PMAX) s_rcam.pitch = -RCAM_PMAX;
+    if (fabsf(s_rcam.yaw) < 1e-4f && fabsf(s_rcam.pitch) < 1e-4f) s_rcam.yaw = s_rcam.pitch = 0.0f;
+
+    e = (float *)(m + cam + 0x44);
+    t = (float *)(m + cam + 0x5C);
+    hd = (int32_t *)(m + cam + 0x228);
+    if (ok && (s_rcam.yaw != 0.0f || s_rcam.pitch != 0.0f)) {
+        /* The eye about the point looked at: turned about the vertical so
+         * that the view turns right for a positive yaw (in this left-handed
+         * world the right of (x, z) is (z, -x)), then raised or lowered --
+         * looking up lowers it -- within limits that never take it past
+         * where the game itself put it. */
+        memcpy(s_rcam.game_eye, e, sizeof s_rcam.game_eye);
+        v[0] = e[0] - t[0]; v[1] = e[1] - t[1]; v[2] = e[2] - t[2];
+        ca = cosf(s_rcam.yaw); sa = sinf(s_rcam.yaw);
+        {
+            float x = v[0] * ca + v[2] * sa, z = v[2] * ca - v[0] * sa;
+            v[0] = x; v[2] = z;
+        }
+        h = sqrtf(v[0] * v[0] + v[2] * v[2]);
+        len = sqrtf(h * h + v[1] * v[1]);
+        if (s_rcam.pitch != 0.0f && h > 1e-3f && len > 1e-3f) {
+            el = atan2f(v[1], h);
+            lo = el < RCAM_EL_MIN ? el : RCAM_EL_MIN;
+            hi = el > RCAM_EL_MAX ? el : RCAM_EL_MAX;
+            el2 = el - s_rcam.pitch;
+            if (el2 < lo) el2 = lo;
+            if (el2 > hi) el2 = hi;
+            v[1] = len * sinf(el2);
+            v[0] *= len * cosf(el2) / h;
+            v[2] *= len * cosf(el2) / h;
+        }
+        e[0] = t[0] + v[0]; e[1] = t[1] + v[1]; e[2] = t[2] + v[2];
+        memcpy(s_rcam.our_eye, e, sizeof s_rcam.our_eye);
+        /* The heading turned with it, in the game's range (-0x8000..0x8000,
+         * as sub_0004A7A0 gives it). */
+        s_rcam.game_hd = *hd;
+        *hd = (int32_t)(int16_t)(uint16_t)(s_rcam.game_hd + (int32_t)lrintf(s_rcam.yaw * (65536.0f / 6.28318531f)));
+        s_rcam.our_hd = *hd;
+        s_rcam.cam = cam;
+        s_rcam.applied = 1;
+    }
+    if (rcam_log_on() && now >= next_log) {
+        next_log = now + 0.1;
+        fprintf(stderr, "[RCAM] t=%.2f flip %u mode %u on %d | stick %.2f %.2f lt %d | yaw %.1f pitch %.1f | "
+                "eye (%.2f %.2f %.2f) game (%.2f %.2f %.2f) tgt (%.2f %.2f %.2f) | hd %d game %d | "
+                "player (%.2f %.2f %.2f)\n",
+                now, nv2a_gl_flips(), mode, ok, s_rcam.rx, s_rcam.ry, s_rcam.lt,
+                s_rcam.yaw * 57.29578f, s_rcam.pitch * 57.29578f, e[0], e[1], e[2],
+                s_rcam.applied ? s_rcam.game_eye[0] : e[0], s_rcam.applied ? s_rcam.game_eye[1] : e[1],
+                s_rcam.applied ? s_rcam.game_eye[2] : e[2], t[0], t[1], t[2],
+                (int)*hd, s_rcam.applied ? (int)s_rcam.game_hd : (int)*hd,
+                s_player_pos[0], s_player_pos[1], s_player_pos[2]);
+    }
+}
+
 /* ---- the camera -------------------------------------------------------------
  * Object 0x4C (class 0x1CD518) is the camera; sub_000A5070 its per-frame
  * update. It picks a mode from its target character's state (+0xE58, with
@@ -4205,6 +4447,7 @@ void sub_000A5070(void)
     const uint32_t lim = 64u << 20;
     uint32_t cam = g_ecx;
     if (on < 0) on = getenv("JSRF_CAM_LOG") != NULL;
+    rcam_restore((uint8_t *)(uintptr_t)m, cam);     /* the game's own eye, for its update */
     sub_000A5070_gen();
     if (cam >= 0x10000u && cam + 0x240u < lim)
         s_cam_mode_now = ((const uint32_t *)(m + cam))[0x208 / 4];
@@ -4272,7 +4515,17 @@ void sub_000A5070(void)
 static unsigned long jsrf_camcnt[18];
 static const uint32_t jsrf_camva[18] = { 0x000A28B0u, 0x000A2960u, 0x000A3A70u, 0x000A3BD0u, 0x000A3D10u, 0x000A59B0u, 0x000A58B0u, 0x000A58C0u, 0x000A58E0u, 0x000A3E50u, 0x000A4100u, 0x000A5A00u, 0x000A5A70u, 0x000A5AC0u, 0x000A5AF0u, 0x000A4890u, 0x000A4D80u, 0x000A4C30u };
 extern void sub_000A28B0_gen(void);
-void sub_000A28B0(void) { jsrf_camcnt[0]++; sub_000A28B0_gen(); }
+/* The camera's publication (see the camera on the right stick, above): what
+ * was turned put back first, the turn made again after. */
+void sub_000A28B0(void)
+{
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    uint32_t cam = g_ecx;
+    jsrf_camcnt[0]++;
+    rcam_restore(m, cam);
+    sub_000A28B0_gen();
+    rcam_apply(m, cam);
+}
 extern void sub_000A2960_gen(void);
 void sub_000A2960(void) { jsrf_camcnt[1]++; sub_000A2960_gen(); }
 extern void sub_000A3A70_gen(void);
