@@ -2138,6 +2138,20 @@ static int kernel_run_dpc_locked(uint32_t dpc_va, uint32_t arg1, uint32_t arg2);
  * console switches no threads until it returns, so neither does the guest
  * lock's time slice (xbox_guest_lock_yield_now). */
 static RECOMP_TLS int t_in_callback;
+/* Paired with t_in_callback wherever it changes: the thread-local says
+ * whether THIS thread is in a routine, the counter lets generated code
+ * (RECOMP_BACK_EDGE) see whether any thread is, without a call. */
+extern int32_t g_xbox_guest_callback_depth;
+static void guest_callback_enter(void)
+{
+    t_in_callback++;
+    __atomic_add_fetch(&g_xbox_guest_callback_depth, 1, __ATOMIC_RELAXED);
+}
+static void guest_callback_exit(void)
+{
+    t_in_callback--;
+    __atomic_sub_fetch(&g_xbox_guest_callback_depth, 1, __ATOMIC_RELAXED);
+}
 static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
 {
     int r;
@@ -2178,9 +2192,9 @@ static int kernel_run_dpc_locked(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = dpc_va;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
-    t_in_callback++;
+    guest_callback_enter();
     fn();
-    t_in_callback--;
+    guest_callback_exit();
     return 1;
 }
 
@@ -2220,9 +2234,9 @@ static void bridge_KeSynchronizeExecution(void)
      * the dummy return address and the argument, so g_esp needs no fixup. */
     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
-    t_in_callback++;
+    guest_callback_enter();
     fn();
-    t_in_callback--;
+    guest_callback_exit();
     /* g_eax is whatever the routine returned, which is this call's result. */
 }
 
@@ -2332,9 +2346,9 @@ static int kernel_raise_interrupt_locked(uint32_t vector)
     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = kint;
     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
-    t_in_callback++;
+    guest_callback_enter();
     fn();
-    t_in_callback--;
+    guest_callback_exit();
     return (int)(g_eax & 1u);
 }
 
@@ -6282,6 +6296,12 @@ static void lock_holder_where(void)
  * under the toolkit's name): while it is zero a back edge costs a load and a
  * branch. */
 int32_t g_xbox_guest_cpu_preempt;
+/* How many interrupt, DPC and synchronize routines are running, on any
+ * thread. RECOMP_BACK_EDGE reads it to reach xbox_GuestCpuPreempt on every
+ * back edge inside a callback (its vblank completion ends the DPC's spin)
+ * while tick-gating the rest; kept beside the thread-local it mirrors by
+ * guest_callback_enter/exit, and only ever tested against zero. */
+int32_t g_xbox_guest_callback_depth;
 /* The holder's latest loop back edge and its IRQL there, for the [LOCK]
  * report. */
 static volatile uint32_t g_lock_owner_edge;
@@ -6896,8 +6916,11 @@ static int kernel_raise_interrupt_here(uint32_t vector)
  * blocking kernel call -- forever, in a loop that makes none. JSRF does that
  * after a save is picked: the main thread held the lock for over twenty
  * seconds with no kernel call, and the timer thread, which needs it to
- * deliver the vblank and APU interrupts, stopped with it. Counted like the
- * entry hook, so a hot loop pays a call and an increment while someone waits.
+ * deliver the vblank and APU interrupts, stopped with it. The 1-in-256 tick
+ * is counted at the call site (RECOMP_BACK_EDGE), so a hot loop pays two
+ * loads and an increment while someone waits and this call only on the
+ * tick; inside a callback the call site lets every back edge through,
+ * because the in-callback path below is the point of the exercise.
  *
  * At DISPATCH_LEVEL, or inside an interrupt or DPC, the console switches no
  * threads, and DirectSound counts on that. But DISPATCH_LEVEL does not mask a
@@ -6916,7 +6939,6 @@ static int kernel_raise_interrupt_here(uint32_t vector)
  * From spriteice's fork (46ffe5b, dad7b40, 5b333cf). */
 void xbox_GuestCpuPreempt(uint32_t va)
 {
-    extern unsigned g_recomp_tick;
     extern unsigned char xbox_KeCurrentIrql(void);
     extern int mcpx_apu_irq_pending_global(void) __attribute__((weak));
     if (!t_guest_holds) return;
@@ -6945,8 +6967,9 @@ void xbox_GuestCpuPreempt(uint32_t va)
         }
         return;
     }
-    if ((++g_recomp_tick & 0xFFu) != 0u) return;
-    /* The watchdog's "latest loop back edge" is sampled here, with the
+    /* Reached on the call site's tick, or on every back edge from inside
+     * a callback (handled above). The watchdog's "latest loop back edge"
+     * is sampled here, with the
      * IRQL it is printed beside, rather than stored on every call. This
      * function runs on guest loop back edges throughout the run and the
      * store is to a volatile the watchdog thread reads; a holder spinning

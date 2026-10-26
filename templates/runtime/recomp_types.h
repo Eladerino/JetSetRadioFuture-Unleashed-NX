@@ -1577,7 +1577,18 @@ extern volatile uint64_t g_icall_guard_misses;
  * back edge, as the console's timer tick preempted it wherever it was; a
  * kernel call checks the quantum too, but a frame of lifted code can go
  * without one. With the lock off the flag is never set: one relaxed atomic
- * load and a branch not taken per back edge. */
+ * load and a branch not taken per back edge.
+ *
+ * While somebody is queueing, the 1-in-256 tick is taken here rather than
+ * inside the callee, on the same counter RECOMP_TRACE_ENTER uses: a back
+ * edge that is not due then costs two loads, an increment and a branch
+ * instead of a call into another translation unit, and the calls that do
+ * happen land at the same cadence as when the callee counted for itself.
+ * Inside an interrupt, DPC or synchronize routine the callee is reached on
+ * every back edge instead, because completing the vblank acknowledgement
+ * there is what ends the DPC's lock-held spin; the callback depth is kept
+ * as a counter the kernel bridge maintains alongside its thread-local, so
+ * this macro can see it without a call. */
 #if defined(_MSC_VER)
 #include <intrin.h>
 #define RECOMP_LOAD_RELAXED32(p) \
@@ -1586,10 +1597,14 @@ extern volatile uint64_t g_icall_guard_misses;
 #define RECOMP_LOAD_RELAXED32(p) __atomic_load_n((p), __ATOMIC_RELAXED)
 #endif
 extern int32_t g_xbox_guest_cpu_preempt;
+extern int32_t g_xbox_guest_callback_depth;
 void xbox_GuestCpuPreempt(uint32_t va);
 #define RECOMP_BACK_EDGE(va) \
-    do { if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) \
-             xbox_GuestCpuPreempt(va); } while (0)
+    do { if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) { \
+             if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_callback_depth) > 0 \
+                 || RECOMP_UNLIKELY((++g_recomp_tick & 0xFFu) == 0u)) \
+                 xbox_GuestCpuPreempt(va); \
+         } } while (0)
 
 /**
  * RECOMP_ICALL - Indirect call through the dispatch table.
