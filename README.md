@@ -21,36 +21,63 @@ you own.
 
 ## Nintendo Switch (this fork)
 
-This fork adds a Nintendo Switch target: a homebrew `.nro` for a console
-running Atmosphère. It is a work in progress and has not booted the game yet.
-Everything else in this README describes the upstream project,
-[JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed),
-and its downloads; there is no Switch download.
+This fork adds a Nintendo Switch target to the upstream project,
+[JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed):
+a homebrew `.nro` for a console running Atmosphère. Everything else in
+this README describes the upstream project and its downloads; there is
+no Switch download.
+
+**It boots and plays.** Logos, title, saving and loading, character
+select and gameplay all work on real hardware. The areas tested most
+(the hideout, Dogenzaka Hill, Shibuya Terminal) run at 40-60 fps on an
+overclocked console (CPU 1963 / GPU 1152 / memory 2133 MHz), and light
+scenes reach the game's 60 fps cap; stock clocks will be slower. It has
+not been played from start to finish, so later areas should be expected
+to have bugs. The port's status and open issues are kept in the
+[Switch port notes](docs/switch-handoff-2026-10-25.md), and how it is
+tested in the [testing notes](docs/switch-testing-notes.md).
 
 - **You build it yourself, from your own disc.** The recompiler turns the
-  `default.xbe` on your disc into C on your machine, and that code, the game
-  files and the built `.nro` stay there. None of them are in this repository
-  and none should be added to it.
-- **Launch it through title takeover** (hold R while starting any installed
-  game, then pick it in the homebrew menu). Applet mode, through the Album,
-  does not give homebrew the memory or the system calls the guest memory is
-  built on, and the game says so on screen and exits.
-- **[`tools/switch/build.sh`](tools/switch/build.sh)** does the whole build on
-  Linux or WSL2: installs devkitPro if it is missing (`switch-dev`,
-  `switch-sdl2`, `switch-mesa`), recompiles from a disc image or extracted
-  folder, checks the result is the standalone US build (9333 of 9342
-  functions), builds the engine and lays out the folder for
-  `sdmc:/switch/jsrf-unleashed/`.
-- **[`tools/switch-spike`](tools/switch-spike/README.md)** is a small test
-  program, no game files involved, that runs the Switch guest-memory layer
-  ([`src/platform/switch_mem.c`](src/platform/switch_mem.c)) at full scale on
-  the console. `tools/switch-spike/host/run.sh` runs the same checks on Linux
-  against a stand-in for the Switch system calls.
+  `default.xbe` on your disc into C on your machine, and that code, the
+  game files and the built `.nro` stay there. None of them are in this
+  repository and none should be added to it.
+- **Launch it through title takeover** (hold R while starting any
+  installed game, then pick it in the homebrew menu). Applet mode,
+  through the Album, does not give homebrew the memory or the system
+  calls the guest memory is built on, and the game says so on screen and
+  exits.
+- **[`tools/switch/build.sh`](tools/switch/build.sh)** does the whole
+  build on Linux or WSL2: installs devkitPro if it is missing,
+  recompiles from a disc image or an extracted folder, checks the
+  result is the standalone US build (9333 of 9342 functions), builds
+  the engine and lays out a folder to copy to
+  `sdmc:/switch/jsrf-unleashed/`. `SKIP_RECOMP=1` reuses the generated
+  code for engine-only rebuilds.
+- **Settings live in `options.txt`** beside the `.nro`: plain text,
+  written once by the first build and never overwritten afterwards.
+  It covers widescreen (16:9 in gameplay; logos and the title screen
+  stay 4:3), internal resolution (1x to 4x), anisotropic filtering, the
+  60 fps cap, the shader cache, and `fast_gpu`, the asynchronous GPU
+  path, which is on by default on Switch; `fast_gpu=0` falls back to
+  the serial path.
+- **Each run writes `Logs/last-run.log`** in the game folder (the
+  previous run is kept as `previous-run.log`). After a run,
+  [`tools/switch/prof.sh`](tools/switch/prof.sh) on the build machine
+  turns the log's profile into a per-function breakdown, resolved
+  against the `.elf` of the build that produced it.
+- **[`tools/switch-spike`](tools/switch-spike/README.md)** is a small
+  test program, no game files involved, that runs the Switch
+  guest-memory layer
+  ([`src/platform/switch_mem.c`](src/platform/switch_mem.c)) at full
+  scale on the console. `tools/switch-spike/host/run.sh` runs the same
+  checks on Linux against a stand-in for the Switch system calls.
 
-The Switch-specific code is `port/switch/` (the libnx glue: launch check, SD
-card layout, logging, crash report) and `src/platform/switch_mem.c`, plus
-`__SWITCH__` branches in the platform layer. Each run writes
-`sdmc:/switch/jsrf-unleashed/Logs/last-run.log`.
+The Switch-specific code is `port/switch/` (the libnx glue: launch
+check, SD card layout, options, logging, crash report) and
+`src/platform/switch_mem.c`, plus `__SWITCH__` branches in the shared
+code. Where the Switch build differs from the desktop defaults, the
+difference is a runtime option with the desktop behaviour one setting
+away.
 
 ---
 
