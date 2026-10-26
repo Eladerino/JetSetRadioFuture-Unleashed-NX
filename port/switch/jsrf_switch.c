@@ -39,6 +39,65 @@
 #include "xiso.h"
 #include "../xbe_check.h"
 
+/* Thread pointer in TPIDR_EL0 (JSRF_TP_EL0, set by CMakeLists.txt when the
+ * compiler takes -mtp=tpidr_el0).
+ *
+ * libnx builds everything with -mtp=soft: every __thread access calls
+ * __aarch64_read_tp, which loads the newlib thread pointer from slot 0x1F8
+ * of the Horizon TLS block (tpidrro_el0). The guest's x86 registers are
+ * __thread, and the profile put 8-11% of the game thread in that call.
+ * Compiled with -mtp=tpidr_el0 the access is one mrs instead. TPIDR_EL0 is
+ * the EL0-writable thread register, which the kernel saves and restores
+ * per thread and nothing in libnx uses; this copies the same pointer into
+ * it, so the offsets are unchanged. Every thread has to do that before it
+ * runs this code: the main thread in userAppInit (before constructors),
+ * every other one through the threadCreate wrapper (-Wl,--wrap) that all
+ * of libnx's thread creation goes through, pthreads and SDL included. A
+ * thread that missed it would fault near address 0, not run on silently. */
+#ifdef JSRF_TP_EL0
+static inline void tp_publish(void)
+{
+    uint64_t tp = *(uint64_t *)((uint8_t *)armGetTls() + 0x1F8);
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"(tp));
+}
+
+void userAppInit(void)
+{
+    tp_publish();
+}
+
+Result __real_threadCreate(Thread *t, ThreadFunc entry, void *arg,
+                           void *stack_mem, size_t stack_sz, int prio,
+                           int cpuid);
+
+typedef struct { ThreadFunc entry; void *arg; } TpStart;
+
+static void tp_thread_entry(void *p)
+{
+    TpStart s = *(TpStart *)p;
+    free(p);
+    tp_publish();
+    s.entry(s.arg);
+}
+
+Result __wrap_threadCreate(Thread *t, ThreadFunc entry, void *arg,
+                           void *stack_mem, size_t stack_sz, int prio,
+                           int cpuid)
+{
+    TpStart *s = malloc(sizeof *s);
+    Result rc;
+    if (!s)
+        return MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
+    s->entry = entry;
+    s->arg = arg;
+    rc = __real_threadCreate(t, tp_thread_entry, s, stack_mem, stack_sz,
+                             prio, cpuid);
+    if (R_FAILED(rc))
+        free(s);
+    return rc;
+}
+#endif
+
 #ifndef JSRF_VERSION
 #define JSRF_VERSION "dev"
 #endif
@@ -938,6 +997,11 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     fprintf(stderr, "[SWITCH] module base %p\n", (void *)module_base());
     fprintf(stderr, "[SWITCH] options:%s\n", s_env_files ? s_env_seen
             : " none (no options.txt beside the .nro)");
+#ifdef JSRF_TP_EL0
+    fprintf(stderr, "[SWITCH] thread pointer: TPIDR_EL0\n");
+#else
+    fprintf(stderr, "[SWITCH] thread pointer: soft (libnx call)\n");
+#endif
 
     prepare_game_folder(game);
     if (chdir(game) != 0)
