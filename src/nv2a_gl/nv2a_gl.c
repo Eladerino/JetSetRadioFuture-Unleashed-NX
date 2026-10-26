@@ -4974,7 +4974,7 @@ static void do_draw_body(void)
          * frame back over it in quads that each cover part of the screen;
          * squeezed toward the centre, each one put the whole wide picture
          * into a 4:3 box and the feedback smeared it frame after frame
-         * (Switch screenshots, 2026-10-26). Unsqueezed they cover the
+         * (observed on Switch hardware). Unsqueezed they cover the
          * screen the way the scene does. RECOMP_WIDE_FX_FULL=0: old way. */
         if (g_wide_squeeze) {
             static int fx_full = -1;
@@ -6334,9 +6334,9 @@ static void do_draw_body(void)
                  * without needing to know the camera: world geometry agrees
                  * with itself and sets the reference, and anything that
                  * disagrees is being drawn at the wrong size. That matters
-                 * here because the player's reading of the x-ray was "far away or
-                 * not where expected", and too small is what too far away
-                 * looks like.
+                 * here because the symptom under investigation was "far
+                 * away or not where expected", and too small is what too
+                 * far away looks like.
                  *
                  * (An object matrix carrying its own scale shifts this, so a
                  * few percent means nothing. A factor of two or three does.) */
@@ -6351,7 +6351,7 @@ static void do_draw_body(void)
 
               /* [BONES] -- every matrix this batch actually reads.
                *
-               * The player's screenshots settle what the numbers could not. The
+               * Screenshots settle what the numbers could not. The
                * dog renders correctly. A GG renders too -- but perhaps a
                * third of the size it should be, lying flat on the pavement
                * with its limbs splayed. Two speaking characters are absent
@@ -6577,7 +6577,7 @@ static void do_draw_body(void)
                * 150 to 800 units away. Either that is where they belong, or
                * they are being placed far behind where the camera expects
                * them. The world geometry settles it: the pavement directly
-               * under the camera in the player's screenshots is a few units away,
+               * under the camera in screenshots is a few units away,
                * so if world draws reach small distances and no skinned draw
                * ever does, the characters are in the wrong place. Printed for
                * a wide sample of both, one burst every five seconds. */
@@ -6596,7 +6596,7 @@ static void do_draw_body(void)
                * vertices on any given bone are scattered over the whole mesh
                * instead, and the character comes out as a splayed tangle with
                * roughly the right overall size -- which is precisely what
-               * the player's fourth screenshot shows, and which every measurement
+               * the screenshots showed, and which every measurement
                * of bounding boxes and bone matrices so far would call healthy.
                *
                * So measure it: group the sampled vertices by the address
@@ -9352,7 +9352,7 @@ static void present(int is_frame)
  * plausible position, a few metres out, which is exactly what "the people
  * and the buses are floating" looks like. Static world geometry is immune
  * because it shares one transform for the whole block, so the buildings and
- * the roads have been right all along, which is the split the player described.
+ * the roads have been right all along, which is the split seen in testing.
  *
  * So: before new geometry joins a batch whose state has moved since the last
  * vertex arrived, draw what is already there. The check is at the geometry

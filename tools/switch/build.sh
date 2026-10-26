@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # build.sh -- build the JSRF Unleashed Switch fork end to end.
 #
-# Runs on Brandon's LOQ inside WSL2 (Ubuntu). His disc dump and the
-# generated C never leave this machine: the generated code is derived
-# from SEGA's binary, and the fork's design keeps it local, exactly
-# like upstream. Only logs are meant to be shared back.
+# Runs on the build machine inside WSL2 (Ubuntu). The disc dump and
+# the generated C never leave that machine: the generated code is
+# derived from SEGA's binary, and the fork's design keeps it local,
+# exactly like upstream. Only logs are meant to be shared back.
 #
 # Usage:
 #   tools/switch/build.sh /path/to/game.iso

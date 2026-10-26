@@ -2336,9 +2336,10 @@ void sub_001910E0(void)
     /* JSRF_SPIN_LOG=1 (options.txt, with fast_gpu=1): once a second while
      * the make-space caller keeps asking, say what it is actually told --
      * the real distance before any clamp, the DMA pointers it is supposedly
-     * waiting on, and the software-method state. The 25 Oct fast_gpu run
-     * spun inside sub_00191440 for 60+ s with DMA_PUT == DMA_GET and the
-     * ack thread idle, so one of these values is not what the spin thinks
+     * waiting on, and the software-method state. One fast_gpu freeze
+     * was seen spinning inside sub_00191440 for 60+ s with
+     * DMA_PUT == DMA_GET and the ack thread idle, so one of these
+     * values is not what the spin thinks
      * it is. If these lines STOP while the game is frozen, the loop has
      * stopped calling here at all, which is its own answer: the exit it
      * waits on is not the distance. */
@@ -2367,22 +2368,22 @@ void sub_001910E0(void)
     if (spin && !force && from == 0x001914C6u) {
         static unsigned long n;
         /* The branch choice for a wrapped ring is always the sleeping
-         * branch, whatever the distance (25 Oct, runs 4-7; this is the
-         * permanent form, no longer gated on JSRF_SPIN_LOG -- that
-         * option now only controls the poll above). The spin loop at
-         * 0x001914F0 is a plain unsigned compare of the GPU's position
-         * against a target in the same numbering; across a wrap (GET
-         * numerically ahead of PUT) that compare can never succeed,
-         * because GET is republished as the new, smaller PUT and the
-         * title submits nothing more while it waits. Run 4/5 were the
-         * large-distance case (the clamp below forced the spin).
-         * Run 6 fixed the walk (the ack thread's jump search) and the
-         * sleep woke; it then froze at character select in the same
-         * spin with no clamp involved -- D3D's own small-distance
-         * answer takes the spin branch too, and a small distance
-         * across a wrap hangs the same way. So: wrapped -> answer
-         * sleep-range (leave a large answer alone, raise a small
-         * one); linear -> clamp a large answer to spin, as before. */
+         * branch, whatever the distance (this is the permanent form,
+         * not gated on JSRF_SPIN_LOG -- that option now only controls
+         * the poll above). The spin loop at 0x001914F0 is a plain
+         * unsigned compare of the GPU's position against a target in
+         * the same numbering; across a wrap (GET numerically ahead of
+         * PUT) that compare can never succeed, because GET is
+         * republished as the new, smaller PUT and the title submits
+         * nothing more while it waits. The large-distance case came
+         * first: the clamp below forced the spin, and the hang
+         * followed. With the walk fixed (the ack thread's jump
+         * search), the same hang appeared at small distances with no
+         * clamp involved: D3D's own small-distance answer takes the
+         * spin branch too, and a small distance across a wrap hangs
+         * the same way. So: wrapped -> answer sleep-range (leave a
+         * large answer alone, raise a small one); linear -> clamp a
+         * large answer to spin, as before. */
         {
             uint8_t *m = (uint8_t *)g_xbox_mem_offset;
             uint32_t put = *(volatile uint32_t *)(m + 0xFD800040u);

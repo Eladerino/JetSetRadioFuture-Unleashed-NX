@@ -753,8 +753,9 @@ static void framebuffer_probe_tick(void)
 /* Clear an interrupt status register that a software method may be raising
  * at the same moment on the timer thread (kernel_pgraph_tick: "in flight"
  * first, then the bit). While one is in flight its bit stays. Read-then-store
- * lost a raise landing in between (the 2026-10-26 make-space freeze), so this
- * is a compare-exchange -- a raise after the read makes it fail and look
+ * lost a raise landing in between (the make-space freeze it caused took a
+ * long soak to reproduce), so this is a compare-exchange -- a raise after
+ * the read makes it fail and look
  * again -- and a bit cleared just as one went in flight is put back. Other
  * bits are still cleared: holding PGRAPH_INTR untouched instead let the
  * title's own write-1 acknowledgements pile up in it, and its handler
@@ -912,11 +913,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                          * The jump sits at the ring's end, and the search
                          * has to reach it: the old 128 KB window missed it
                          * whenever the previous pass had ended earlier in
-                         * the ring than that (25 Oct, run 5: last PUT
-                         * 0x4D3A0 with the ring running past 0x80000, so
-                         * the jump was never found, the head segment was
-                         * never walked, and the software method the title
-                         * was sleeping on was never even counted). Search
+                         * the ring than that (measured on hardware: a
+                         * pass ending at PUT 0x4D3A0 with the ring
+                         * running past 0x80000 left the jump unfound,
+                         * the head segment unwalked, and the software
+                         * method the title was sleeping on uncounted). Search
                          * a full megabyte of tail; the walk stops at the
                          * jump, so the bound is a cap, not a cost. */
                         uint32_t from = XBOX_CONTIG_BASE | (s_pb_last_put & 0x0FFFFFFFu);

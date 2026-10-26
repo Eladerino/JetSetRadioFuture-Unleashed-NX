@@ -453,8 +453,8 @@ static const char *const k_env[][2] = {
     { "RECOMP_GL_CURTAIN", "skip" }, { "RECOMP_MUTE", "0" },
     { "RECOMP_WINDOW", "1" },
     { "RECOMP_FULLSCREEN", "1" },
-    /* fast_gpu: on since it ran title, select and hideout cleanly
-     * (2026-10-26); fast_gpu=0 in options.txt turns it off. */
+    /* fast_gpu: on by default; it runs title, character select and
+     * gameplay cleanly. fast_gpu=0 in options.txt turns it off. */
     { "RECOMP_NV2A_FLUSH_ACK", "1" },
 };
 
