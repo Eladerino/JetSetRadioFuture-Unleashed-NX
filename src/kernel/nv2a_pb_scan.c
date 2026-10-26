@@ -362,6 +362,13 @@ static uint32_t pb_walk_sub(uint32_t target_va)
     j = nv2a_pb_scan(target_va, target_va + 0x400000u);
     while (j && hops++ < 64) {
         uint32_t t = 0x80000000u | (j & 0x0FFFFFFFu);
+        /* The entry guard's test, one hop later: a jump target past the
+         * end of RAM means the walk lost its place in the subroutine and
+         * is reading data as commands. Following one faulted the Switch
+         * build during a stage load (a hop to 0x8F800000, Oct 25 run 8),
+         * the same failure the guard above was written for, one level
+         * down. */
+        if ((t & 0x0FFFFFFFu) >= 64u * 1024u * 1024u) break;
         j = nv2a_pb_scan(t, t + 0x400000u);
     }
     return s_tot_words - before;

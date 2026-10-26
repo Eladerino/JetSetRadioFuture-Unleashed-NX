@@ -68,3 +68,16 @@ All of it was the pushbuffer ring wrap, in two places:
 - Perf polish is a separate thread now (title slowness at start,
   occasional skips in gameplay). Correctness comes first; the numbers
   above are the baseline to beat, measured with profiler overhead on.
+
+## Update, run 8 (the ungated build): confirmation half-passed, new crash found and fixed
+
+The ungated build was confirmed for the make-space fix itself: three wrap
+events all took the sleeping branch and method 5 delivered 45 for 45, no
+freeze. The run then crashed at character select, a different fault than
+the run 6 freeze: the pushbuffer walk followed a subroutine jump hop to
+guest 0x8F800000, far past the end of RAM, and pb_word dereferenced it.
+pb_walk_sub validated CALL targets against the RAM size but not the jump
+hops it follows afterwards; the hops now get the same test. This also
+means run 6's freeze is still unexplained, and separately there is an
+intermittent red/blue channel-split visual bug in the hideout, not yet
+captured in a screenshot.
