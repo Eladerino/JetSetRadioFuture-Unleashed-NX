@@ -230,8 +230,14 @@ void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
     if (to > from) {
         snap_add(from, to - from > 0x400000u ? from + 0x400000u : to);
     } else {
-        uint32_t back = (put & 0x0FFFFFFFu) < 0x40000u ? (put & 0x0FFFFFFFu) : 0x40000u;
-        snap_add(from, from + 0x20000u);
+        /* The same reach as the ack loop's walk of a wrap: up to 1 MB of
+         * tail to find the jump, and the head after it. They were 128 KB
+         * and 256 KB, so a longer tail was read live -- after GET had
+         * told the title it could reuse it. With fast_gpu that was JSRF's
+         * character select drawing from rewritten words (an attribute
+         * stride of 4521728, a walk off the end of RAM). */
+        uint32_t back = (put & 0x0FFFFFFFu) < 0x100000u ? (put & 0x0FFFFFFFu) : 0x100000u;
+        snap_add(from, from + 0x100000u);
         snap_add(to - back, to);
     }
 }
