@@ -6945,8 +6945,14 @@ void xbox_GuestCpuPreempt(uint32_t va)
         }
         return;
     }
-    g_lock_owner_edge = va;
     if ((++g_recomp_tick & 0xFFu) != 0u) return;
+    /* The watchdog's "latest loop back edge" is sampled here, with the
+     * IRQL it is printed beside, rather than stored on every call. This
+     * function runs on guest loop back edges throughout the run and the
+     * store is to a volatile the watchdog thread reads; a holder spinning
+     * long enough to be reported passes this gate thousands of times, so
+     * the sample names the same loop the latest call would have. */
+    g_lock_owner_edge = va;
     g_lock_owner_irql = xbox_KeCurrentIrql();
     if (mcpx_apu_irq_pending_global && xbox_GetConnectedInterrupt(APU_VECTOR)
         && mcpx_apu_irq_pending_global())
