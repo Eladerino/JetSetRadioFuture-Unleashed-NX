@@ -277,6 +277,13 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
     { extern void nv2a_pb_time_begin(void); nv2a_pb_time_begin(); }
     if (end_va - start_va > 0x400000u)        /* a sane single-frame bound */
         end_va = start_va + 0x400000u;
+    /* Never past the end of RAM's contiguous view: a walk that has lost its
+     * place reads its way off the end (Switch, fast_gpu: a fault reading
+     * guest 0x84000000 after JSRF's character select). */
+    if (start_va >= 0x80000000u && start_va < 0x84000000u && end_va > 0x84000000u)
+        end_va = 0x84000000u;
+    if (start_va >= 0x84000000u && start_va < 0xF0000000u)
+        end_va = start_va;                /* nothing there to walk */
 
     while (va < end_va && words < 0x100000u) {
         uint32_t w = pb_word(mem, va);
