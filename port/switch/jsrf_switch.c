@@ -391,6 +391,9 @@ static const char *const k_env[][2] = {
     { "RECOMP_GL_CURTAIN", "skip" }, { "RECOMP_MUTE", "0" },
     { "RECOMP_WINDOW", "1" },
     { "RECOMP_FULLSCREEN", "1" },
+    /* fast_gpu: on since it ran title, select and hideout cleanly
+     * (2026-10-26); fast_gpu=0 in options.txt turns it off. */
+    { "RECOMP_NV2A_FLUSH_ACK", "1" },
 };
 
 /* Set when the binary is loaded, before the runtime's own constructors
@@ -724,7 +727,7 @@ static u32 s_prof_total[MAX_PROF_THREADS], s_prof_lost[MAX_PROF_THREADS];
 /* The same samples again, keyed on the call chain: pc, lr and two saved
  * returns up the frame-pointer chain. A thread waiting in an svc shows
  * up above only as the svc; this says whose wait it is. */
-#define PROF_DEPTH 4
+#define PROF_DEPTH 6
 #define STACK_SLOTS 2048
 typedef struct { u64 a[PROF_DEPTH]; u32 n; } StackSlot;
 static StackSlot s_stk[MAX_PROF_THREADS][STACK_SLOTS];
