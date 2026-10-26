@@ -750,6 +750,29 @@ static void framebuffer_probe_tick(void)
  * is not -- and the acknowledgement de-asserts PMC_INTR_0's PCRTC bit, which
  * is what the handler's own spin loop is waiting for.
  */
+/* Clear an interrupt status register that a software method may be raising
+ * at the same moment on the timer thread (kernel_pgraph_tick: "in flight"
+ * first, then the bit). While one is in flight its bit stays. Read-then-store
+ * lost a raise landing in between (the 2026-10-26 make-space freeze), so this
+ * is a compare-exchange -- a raise after the read makes it fail and look
+ * again -- and a bit cleared just as one went in flight is put back. Other
+ * bits are still cleared: holding PGRAPH_INTR untouched instead let the
+ * title's own write-1 acknowledgements pile up in it, and its handler
+ * recursed on them into a stack overflow. */
+static void intr_clear_keeping_swm(volatile uint32_t *r, uint32_t swm_bit)
+{
+    extern int xbox_nv2a_swm_in_flight(void);
+    uint32_t v = __atomic_load_n(r, __ATOMIC_ACQUIRE), keep;
+    do {
+        keep = xbox_nv2a_swm_in_flight() ? swm_bit : 0u;
+        if (!(v & ~keep))
+            return;
+    } while (!__atomic_compare_exchange_n(r, &v, v & keep, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    if ((v & swm_bit) && !keep && xbox_nv2a_swm_in_flight())
+        __atomic_or_fetch(r, swm_bit, __ATOMIC_ACQ_REL);
+}
+
 static void vblank_intr_tick(volatile uint32_t *regs)
 {
     volatile uint32_t *pcrtc = (volatile uint32_t *)((char *)regs + 0x600100);
@@ -765,21 +788,12 @@ static void vblank_intr_tick(volatile uint32_t *regs)
      * Several threads run this (the ack thread, frame pacing, and a DPC's
      * back edges), beside the timer thread that raises both interrupts, so
      * neither register is read and then stored whole: a vblank raised in
-     * between survives the compare-exchange, and PGRAPH's bit is never
-     * cleared here for a title whose own handler acknowledges it. Clearing
-     * that bit from a stale "nothing in flight" lost a software method
-     * outright: its DPC never ran, the next one was never raised, and the
-     * make-space sleep at 0x0019151B never woke (Switch, 2026-10-26). */
+     * between survives the compare-exchange, and PMC_INTR_0 goes through
+     * intr_clear_keeping_swm. */
     if (v && !__atomic_compare_exchange_n(pcrtc, &v, 0u, 0,
                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;                       /* raised again meanwhile */
-    if (*pmc) {
-        extern int xbox_nv2a_swm_in_flight(void);
-        extern int nv2a_title_acks_pgraph(void);
-        uint32_t keep = (nv2a_title_acks_pgraph() || xbox_nv2a_swm_in_flight())
-                      ? (1u << 12) : 0u;
-        __atomic_and_fetch(pmc, keep, __ATOMIC_ACQ_REL);
-    }
+    intr_clear_keeping_swm(pmc, 1u << 12);
 }
 
 /* The same, for code that keeps this thread away from its loop.
@@ -807,15 +821,12 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
             volatile uint32_t *r =
                 (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
-            extern int xbox_nv2a_swm_in_flight(void);
             /* A software method the title has not acknowledged yet keeps its
              * PGRAPH status: the handler is about to read it. */
-            extern int nv2a_title_acks_pgraph(void);
-            /* ...and a title that acknowledges PGRAPH itself keeps it
-             * always: checking "in flight" first raced the raise. */
-            if (NV2A_ACK[i].offset == 0x400100u
-                && (nv2a_title_acks_pgraph() || xbox_nv2a_swm_in_flight()))
+            if (NV2A_ACK[i].offset == 0x400100u) {
+                intr_clear_keeping_swm(r, 1u << 20);
                 continue;
+            }
             if (*r & NV2A_ACK[i].busy_mask) {
                 *r &= ~NV2A_ACK[i].busy_mask;
             }

@@ -2484,7 +2484,7 @@ static int swm_wanted(uint32_t param)
     return mode == 2 || (mode == 1 && param == 5);
 }
 
-int xbox_nv2a_swm_in_flight(void) { return g_swm_in_flight; }
+int xbox_nv2a_swm_in_flight(void) { return __atomic_load_n(&g_swm_in_flight, __ATOMIC_SEQ_CST); }
 
 void xbox_nv2a_software_method(uint32_t subch, uint32_t param)
 {
@@ -2519,8 +2519,10 @@ static void kernel_pgraph_tick(void)
         long long now = (long long)GetTickCount64();
         if (now - g_swm_raised_ms < 250) return;
         g_swm_raised_ms = now;
-        BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR) |= NV2A_PGRAPH_INTR_ERROR;
-        BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)  |= NV2A_PMC_INTR_PGRAPH;
+        __atomic_or_fetch(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR),
+                          NV2A_PGRAPH_INTR_ERROR, __ATOMIC_SEQ_CST);
+        __atomic_or_fetch(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
+                          NV2A_PMC_INTR_PGRAPH, __ATOMIC_SEQ_CST);
         kernel_raise_interrupt(NV2A_VECTOR);
         { static unsigned said;
           if (said++ < 8) {
@@ -2537,9 +2539,13 @@ static void kernel_pgraph_tick(void)
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_DATA) = g_swm_q[t % SWM_QUEUE].param;
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_NSOURCE) = 1u;   /* a notification */
     g_swm_raised_ms = (long long)GetTickCount64();
-    g_swm_in_flight = 1;
-    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR) |= NV2A_PGRAPH_INTR_ERROR;
-    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)  |= NV2A_PMC_INTR_PGRAPH;
+    /* In flight first, then the bits, each visible in that order to the
+     * threads that clear these registers (intr_clear_keeping_swm). */
+    __atomic_store_n(&g_swm_in_flight, 1, __ATOMIC_SEQ_CST);
+    __atomic_or_fetch(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR),
+                      NV2A_PGRAPH_INTR_ERROR, __ATOMIC_SEQ_CST);
+    __atomic_or_fetch(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
+                      NV2A_PMC_INTR_PGRAPH, __ATOMIC_SEQ_CST);
     claimed = kernel_raise_interrupt(NV2A_VECTOR);
     g_swm_raised++;
     if (g_swm_raised <= 3 || claimed <= 0) {
