@@ -111,6 +111,15 @@ if(SWITCH)
         endif()
     endif()
 endif()
+# Fast guest memory in the generated code (templates/runtime/recomp_types.h,
+# RECOMP_FAST_MEM): on by default on the Switch, JSRF_SLOW_MEM=ON for the
+# old code generation, to compare.
+if(SWITCH)
+    option(JSRF_SLOW_MEM "Switch: generated code without the fast guest memory path" OFF)
+    if(JSRF_SLOW_MEM)
+        add_compile_definitions(RECOMP_NO_FAST_MEM=1)
+    endif()
+endif()
 
 # What the compiler is told, in the build output: the generated code is most
 # of the frame, and its optimisation flags come from the toolchain file.

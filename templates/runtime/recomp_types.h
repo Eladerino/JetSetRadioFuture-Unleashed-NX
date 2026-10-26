@@ -101,7 +101,17 @@ void recomp_debug_service(uint32_t service, uint32_t arg_va);
  *
  * Set once during memory initialization, then read-only.
  */
+/* Fast guest memory: see "Fast guest memory" below. */
+#if defined(__SWITCH__) && defined(__aarch64__) && defined(__GNUC__) \
+    && !defined(__clang__) && defined(__BITINT_MAXWIDTH__) \
+    && __BITINT_MAXWIDTH__ >= 64 && !defined(RECOMP_NO_FAST_MEM)
+#define RECOMP_FAST_MEM 1
+#endif
+#ifdef RECOMP_FAST_MEM
+extern ptrdiff_t g_xbox_mem_offset __attribute__((visibility("hidden")));
+#else
 extern ptrdiff_t g_xbox_mem_offset;
+#endif
 
 /* Bounds of the title's executable sections, filled in by
  * xbox_MemoryLayoutInit from the XBE's own section table. Zero means "not
@@ -709,6 +719,93 @@ void recomp_mmio_write(uint32_t addr, uint32_t val, unsigned size);
 #endif
 #define RECOMP_IS_MMIO(a) RECOMP_MMIO_UNLIKELY(((uint32_t)(a) - RECOMP_MMIO_LO) < (RECOMP_MMIO_HI - RECOMP_MMIO_LO))
 
+/* ---- Fast guest memory (AArch64 with GCC's _BitInt; on by default on the
+ * Switch, RECOMP_NO_FAST_MEM to turn off) ----------------------------------
+ *
+ * The guest registers are thread-local uint32_t variables, and a guest store
+ * was a store through a volatile uint32_t pointer. As far as the compiler
+ * knows, that pointer may point at g_eax, so after every guest store it
+ * reloaded every register it was holding, and after every access it reloaded
+ * g_xbox_mem_offset through the GOT: the device-register branch calls out,
+ * and a call may change anything. A lifted function ran as if every x86
+ * register lived in memory. Three changes, none to what the code does:
+ *
+ *  - stores go through unsigned _BitInt pointers, a type no register has, so
+ *    type-based aliasing knows a guest store leaves the registers alone.
+ *    Only the store is retyped: what a load gives back is still a plain
+ *    uint32_t, so no arithmetic in the generated code changes. Every guest
+ *    access stays volatile, which keeps them in program order among
+ *    themselves whatever their types;
+ *  - the device-register path calls a stub (kernel_mmio.c) that saves every
+ *    register the C calling convention would let the callee change, and the
+ *    inline asm that calls it tells the compiler only x0/x1/x16/x17/x30 and
+ *    the flags change. The asm is volatile, which GCC never moves across
+ *    another volatile access; device handlers touch only device state;
+ *  - the host address is computed before the device check, so consecutive
+ *    accesses share one load of g_xbox_mem_offset, which is declared hidden
+ *    (it is defined in the same executable) to skip the GOT.
+ *
+ * Measured on a lifted-style sample: guest registers stay in host registers
+ * across guest stores, and 15 loads became 5. */
+/* (RECOMP_FAST_MEM is decided beside g_xbox_mem_offset, above.) */
+
+#ifdef RECOMP_FAST_MEM
+typedef unsigned _BitInt(8)  recomp_st8_t;
+typedef unsigned _BitInt(16) recomp_st16_t;
+typedef unsigned _BitInt(32) recomp_st32_t;
+typedef unsigned _BitInt(64) recomp_st64_t;
+#define RECOMP_STUB_CLOBBERS "x16", "x17", "x30", "cc"
+static inline uint32_t recomp_mmio_read_fast(uint32_t a, unsigned size) {
+    register uint64_t x0 __asm__("x0") = a;
+    register uint64_t x1 __asm__("x1") = size;
+    __asm__ volatile("bl recomp_mmio_read_preserving"
+                     : "+r"(x0), "+r"(x1) : : RECOMP_STUB_CLOBBERS);
+    return (uint32_t)x0;
+}
+static inline void recomp_mmio_write_fast(uint32_t a, uint32_t v, unsigned size) {
+    register uint64_t x0 __asm__("x0") = a;
+    register uint64_t x1 __asm__("x1") = v;
+    register uint64_t x2 __asm__("x2") = size;
+    __asm__ volatile("bl recomp_mmio_write_preserving"
+                     : "+r"(x0), "+r"(x1) : "r"(x2) : RECOMP_STUB_CLOBBERS);
+}
+#define RECOMP_HOST(T, a) ((T *)((uintptr_t)(uint32_t)(a) + g_xbox_mem_offset))
+
+static inline volatile uint8_t *recomp_p8(uint32_t a) {
+    static RECOMP_TLS uint8_t scr;
+    volatile uint8_t *p = RECOMP_HOST(volatile uint8_t, a);
+    if (RECOMP_IS_MMIO(a)) { scr = (uint8_t)recomp_mmio_read_fast(a, 1); return &scr; }
+    return p;
+}
+static inline volatile uint16_t *recomp_p16(uint32_t a) {
+    static RECOMP_TLS uint16_t scr;
+    volatile uint16_t *p = RECOMP_HOST(volatile uint16_t, a);
+    if (RECOMP_IS_MMIO(a)) { scr = (uint16_t)recomp_mmio_read_fast(a, 2); return &scr; }
+    return p;
+}
+static inline volatile uint32_t *recomp_p32(uint32_t a) {
+    static RECOMP_TLS uint32_t scr;
+    volatile uint32_t *p = RECOMP_HOST(volatile uint32_t, a);
+    if (RECOMP_IS_MMIO(a)) { scr = recomp_mmio_read_fast(a, 4); return &scr; }
+    return p;
+}
+static inline volatile uint64_t *recomp_p64(uint32_t a) {
+    static RECOMP_TLS uint64_t scr;
+    volatile uint64_t *p = RECOMP_HOST(volatile uint64_t, a);
+    if (RECOMP_IS_MMIO(a)) {
+        scr = (uint64_t)recomp_mmio_read_fast(a, 4)
+            | ((uint64_t)recomp_mmio_read_fast(a + 4, 4) << 32);
+        return &scr;
+    }
+    return p;
+}
+/* A store through what recomp_p32 returned, as `MEM32(a) = v` is, but typed
+ * so it cannot be taken for a register write. */
+#define RECOMP_STORE32(a, v) \
+    (*(volatile recomp_st32_t *)recomp_p32((uint32_t)(a)) = (uint32_t)(v))
+#else
+#define RECOMP_STORE32(a, v) (MEM32(a) = (uint32_t)(v))
+
 static inline volatile uint8_t *recomp_p8(uint32_t a) {
     static RECOMP_TLS uint8_t scr;
     if (RECOMP_IS_MMIO(a)) { scr = (uint8_t)recomp_mmio_read(a, 1); return &scr; }
@@ -732,6 +829,7 @@ static inline volatile uint64_t *recomp_p64(uint32_t a) {
     }
     return (volatile uint64_t *)XBOX_PTR(a);
 }
+#endif /* RECOMP_FAST_MEM */
 /* ---- store watch -----------------------------------------------------
  *
  * Which recompiled function writes a given piece of guest memory.
@@ -776,6 +874,34 @@ static inline void *recomp_memcpy_watched(void *d, const void *s, size_t n) {
 #define RECOMP_WATCH(a, n) ((void)0)
 #endif
 
+#ifdef RECOMP_FAST_MEM
+static inline void recomp_w8(uint32_t a, uint8_t v) {
+    volatile recomp_st8_t *p = RECOMP_HOST(volatile recomp_st8_t, a);
+    RECOMP_WATCH(a, 1);
+    if (RECOMP_IS_MMIO(a)) recomp_mmio_write_fast(a, v, 1); else *p = v;
+}
+static inline void recomp_w16(uint32_t a, uint16_t v) {
+    volatile recomp_st16_t *p = RECOMP_HOST(volatile recomp_st16_t, a);
+    RECOMP_WATCH(a, 2);
+    if (RECOMP_IS_MMIO(a)) recomp_mmio_write_fast(a, v, 2); else *p = v;
+}
+static inline void recomp_w32(uint32_t a, uint32_t v) {
+    volatile recomp_st32_t *p = RECOMP_HOST(volatile recomp_st32_t, a);
+    RECOMP_WATCH(a, 4);
+    if (RECOMP_IS_MMIO(a)) recomp_mmio_write_fast(a, v, 4); else *p = v;
+}
+static inline void recomp_wf(uint32_t a, float v) {
+    uint32_t b; memcpy(&b, &v, 4);
+    recomp_w32(a, b);
+}
+static inline void recomp_wd(uint32_t a, double v) {
+    volatile recomp_st64_t *p = RECOMP_HOST(volatile recomp_st64_t, a);
+    uint64_t b; memcpy(&b, &v, 8);
+    RECOMP_WATCH(a, 8);
+    if (RECOMP_IS_MMIO(a)) { recomp_mmio_write_fast(a, (uint32_t)b, 4); recomp_mmio_write_fast(a + 4, (uint32_t)(b >> 32), 4); }
+    else *p = b;
+}
+#else
 static inline void recomp_w8(uint32_t a, uint8_t v) {
     RECOMP_WATCH(a, 1);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write(a, v, 1); else *(volatile uint8_t *)XBOX_PTR(a) = v;
@@ -798,6 +924,7 @@ static inline void recomp_wd(uint32_t a, double v) {
     if (RECOMP_IS_MMIO(a)) { uint64_t b; memcpy(&b, &v, 8); recomp_mmio_write(a, (uint32_t)b, 4); recomp_mmio_write(a + 4, (uint32_t)(b >> 32), 4); }
     else *(volatile double *)XBOX_PTR(a) = v;
 }
+#endif /* RECOMP_FAST_MEM */
 
 /** Read N bytes at a flat Xbox memory address (assignable for RAM only). */
 #define MEM8(addr)   (*recomp_p8((uint32_t)(addr)))
@@ -888,8 +1015,8 @@ static inline RecompXmm XMM_MEM(uint32_t addr) {
 
 static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
     RECOMP_WATCH(addr, 16);
-    MEM32(addr)      = v.u[0]; MEM32(addr + 4)  = v.u[1];
-    MEM32(addr + 8)  = v.u[2]; MEM32(addr + 12) = v.u[3];
+    RECOMP_STORE32(addr, v.u[0]);     RECOMP_STORE32(addr + 4, v.u[1]);
+    RECOMP_STORE32(addr + 8, v.u[2]); RECOMP_STORE32(addr + 12, v.u[3]);
 }
 
 /* movlps/movhps move 8 bytes into or out of one half, leaving the
@@ -908,8 +1035,8 @@ static inline void recomp_xmm_load_half(RecompXmm *dst, uint32_t addr,
 static inline void recomp_xmm_store_half(uint32_t addr, RecompXmm src,
                                          int high) {
     RECOMP_WATCH(addr, 8);
-    MEM32(addr)     = src.u[high * 2];
-    MEM32(addr + 4) = src.u[high * 2 + 1];
+    RECOMP_STORE32(addr, src.u[high * 2]);
+    RECOMP_STORE32(addr + 4, src.u[high * 2 + 1]);
 }
 
 /** movlhps: dst high = src low. */
@@ -1206,7 +1333,7 @@ static inline uint16_t ROR16(uint16_t val, int n) {
 #define PUSH32(sp, val) do { \
     uint32_t _pv = (uint32_t)(val); \
     (sp) -= 4; \
-    MEM32(sp) = _pv; \
+    RECOMP_STORE32(sp, _pv); \
 } while(0)
 
 /**

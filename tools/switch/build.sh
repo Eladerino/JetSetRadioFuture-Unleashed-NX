@@ -140,6 +140,14 @@ fi
 # ---------------------------------------------------------------- recompilation
 if [ "${SKIP_RECOMP:-0}" = "1" ] && [ -d port/recomp/gen ]; then
 say "reusing port/recomp/gen (SKIP_RECOMP=1)"
+# The generated code compiles against its own copy of the runtime header,
+# which the recompiler refreshes from templates/runtime on every run. A
+# reused gen/ would keep an old copy, so refresh it here the same way: the
+# generated .c files are unchanged, only how they are compiled.
+if ! cmp -s templates/runtime/recomp_types.h port/recomp/gen/recomp_types.h; then
+    cp templates/runtime/recomp_types.h port/recomp/gen/recomp_types.h
+    say "refreshed port/recomp/gen/recomp_types.h from templates/runtime (all generated code recompiles)"
+fi
 else
 say "recompiling (a few minutes; the count at the end is the verdict)"
 # The pipeline reads game_files/ relative to the fork root in upstream's

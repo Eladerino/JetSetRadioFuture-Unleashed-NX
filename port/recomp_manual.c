@@ -274,6 +274,11 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
                     "functions + the DirectSound stop-pending wait; %u hole "
                     "functions (always on)\n",
                     manual_on ? "ON" : "OFF", g_recomp_seeded_count, g_recomp_holes_count);
+#ifdef RECOMP_FAST_MEM
+            fprintf(stderr, "[MANUAL] generated code: fast guest memory\n");
+#else
+            fprintf(stderr, "[MANUAL] generated code: plain guest memory\n");
+#endif
             fflush(stderr);
         }
         if (manual_on) {
