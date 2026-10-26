@@ -1,83 +1,107 @@
-# Switch testing notes — fast_gpu / make-space (25 Oct 2026, Sudo's handoff session)
+# Switch port: testing notes
 
-Short version: the fast_gpu loading freeze is fixed and verified on hardware.
-This note is the state of play so the next session does not have to re-derive
-it from logs. (Full run-by-run analysis lives outside the repo, with Brandon.)
+How Switch testing works, what the fast-path machinery does, and the
+current state of the port's known issues. Performance figures are
+measured on real hardware (Atmosphère emuMMC, title takeover,
+overclock CPU 1963 / GPU 1152 / mem 2133 MHz) unless stated otherwise.
 
-## What was wrong
+## Workflow
 
-All of it was the pushbuffer ring wrap, in two places:
+- Build on the build machine under WSL2: `git pull`, then
+  `SKIP_RECOMP=1 tools/switch/build.sh <path to game image>`. The disc
+  image, the generated C (port/recomp/gen) and the .nro/.elf stay on
+  that machine; only logs are shared from a test run.
+- All test settings live in options.txt beside the .nro. build.sh
+  writes it only when missing, so edits persist between builds.
+- Run tools/switch/prof.sh over a run's log BEFORE rebuilding: it
+  resolves the sampler's addresses against the .elf that matches the
+  run. Crash reports print nro+ offsets; resolve them the same way.
+- A useful test report is the run's log, its prof.txt / prof-pcs.txt,
+  and a note of the route taken (title, save load, character select,
+  which stage) and anything seen on screen.
 
-1. **The make-space branch choice** (`port/recomp_manual.c`, `sub_001910E0`).
-   D3D's spin loop (gen `sub_00191440`, x86 0x001914F0) is a plain unsigned
-   compare with no wrap handling. Across a wrap (DMA_GET numerically ahead
-   of DMA_PUT) it can never succeed: GET gets republished as the new smaller
-   PUT and the waiting title submits nothing more. The flush-ack clamp from
-   e9a50ef forced that spin for large distances; D3D's own answer takes it
-   for small ones. Fix: across a wrap, always answer sleep-range; linear,
-   clamp as before.
-2. **The walk's jump search** (`src/kernel/xbox_memory_layout.c`, ack
-   thread). On a wrap it searched for the ring's jump in a fixed 128 KB
-   window, but the jump sits at the ring's end. With the previous walk
-   ending at PUT 0x4D3A0 in a ring past 0x80000, the jump was never found,
-   the head segment holding make-space's NOP(5) was never walked, and
-   software method 5 was never even counted — so the sleeping branch had
-   nothing to wake it. Fix: search bound is now 1 MB; the walk stops at the
-   jump, so the bound is a cap, not a cost.
+## The fast GPU path (fast_gpu)
 
-## Testing change (important)
+fast_gpu (RECOMP_NV2A_FLUSH_ACK) is on by default on Switch;
+fast_gpu=0 in options.txt turns it off. It lets the title run ahead
+of the GPU thread instead of serialising on every flush. Four pieces
+of it are load-bearing:
 
-- The wrap rule is **no longer gated on `JSRF_SPIN_LOG`**. A normal
-  fast_gpu test needs only `fast_gpu=1` in options.txt. Take the
-  `JSRF_SPIN_LOG=1` line **out** — it now only enables a throttled
-  once-a-second [SPIN] poll, which costs performance and pollutes every
-  measurement.
-- `fast_gpu` is still **off by default**. Turning it on by default is a
-  separate decision, after a longer soak.
+- **Make-space branch choice** (port/recomp_manual.c, the
+  sub_001910E0 override). D3D's spin loop is a plain unsigned compare
+  with no handling for a wrapped pushbuffer ring: across a wrap
+  (DMA_GET numerically ahead of DMA_PUT) the compare can never
+  succeed, because GET is republished as the new, smaller PUT and the
+  waiting title submits nothing more. Rule: across a wrap, always
+  take the sleeping branch (raise a small answer into sleep range,
+  leave a large one); on a linear ring, clamp as before. The
+  sleeping branch wakes on software method 5.
+- **The acknowledgement walk** (src/kernel/xbox_memory_layout.c).
+  On a wrap the walk must find the ring's jump, which sits at the
+  ring's end; the search bound is 1 MB of tail, and the snapshot
+  windows the walk reads from are the same 1 MB, so the tail is
+  never read live after GET has been released. The walk stops at
+  the jump, so the bound is a cap, not a cost.
+- **Subroutine validation** (src/kernel/nv2a_pb_scan.c). CALL
+  targets and the jump hops followed out of a subroutine are both
+  validated against the 64 MB RAM size; a target past the end of
+  RAM ends the walk instead of being dereferenced.
+- **Software-method delivery.** A raised method can be lost if the
+  PGRAPH status word is cleared read-then-store while the timer
+  thread raises another; the clears are compare-exchange, raised
+  bits are re-raised if delivery stalls, and the vblank DPC
+  finishes its acknowledgement from inside its own spin. A lost
+  method 5 was the cause of the long make-space freezes.
 
-## Verified on hardware (emuMMC, title takeover, CPU 1963 / GPU 1152 / mem 2133)
+Two renderer guards belong to the same story:
 
-- Run 6 (walk fix in): first fast_gpu run past the save-load screen.
-  Method 5 counted 200 / delivered 200. Presents reached frame 16,189
-  (the freeze point had been 7,398 in three straight runs). It later froze
-  once at character select, in the spin, cause unproven (see below).
-- Run 7 (wrap rule at any distance): **no freezes in ~273 s** — title,
-  save load, hideout, Dogenzaka, a boost finish. Method 5 counted 1,141 /
-  delivered 1,141, dropped 0, across 1,717 make-space calls. Frame rates
-  in line with the fast_gpu=0 baseline (heavy segment ~26 fps at ~580
-  draws, lighter segments 32–53), and that is with the sampling profiler
-  and logging on.
+- **Draw validation** (src/nv2a_gl/nv2a_gl.c, do_draw_body). A draw
+  whose index range runs outside guest memory is dropped and
+  counted in the log ("draw N dropped: attribute ... outside guest
+  memory"). Before this guard, such a draw took the vertex cache's
+  content hash off the end of guest memory and faulted.
+- **Vertex cache hashing.** The cache's content hash (also the
+  texture cache's verify hash) folds with the aarch64 CRC32
+  instructions where available; RECOMP_GL_CRC32HASH=0 restores the
+  software hash. Values are compared only within a run.
 
-## Still open
+## Measured state
 
-- **Run 6's character-select freeze is unexplained.** The leading guess
-  was a small-distance wrap; run 7 had zero small-distance wrap calls in
-  1,717 (0 occurrences — the trap is rare if real) and no freeze. The
-  sleep-range raise covers it if it ever occurs, and the [SPIN] poll
-  (with JSRF_SPIN_LOG=1) would show the exact call. Do not treat it as
-  understood.
-- **One confirmation run of the ungated build is still owed**: same test
-  with the JSRF_SPIN_LOG line removed from options.txt, proving the
-  permanent path behaves like the gated one did.
-- **Boost visuals in widescreen** (older parked item): Brandon reports a
-  darker 4:3-shaped region inside the widescreen frame during a boost,
-  with the boost distortion looking exaggerated. Suspect: the fullscreen
-  effect quad renders/samples at native 640x480 while the main render is
-  stretched. Cheap test not yet run: one boost with `widescreen=0`, plus
-  a screenshot and `JSRF_BOOST_DUMP` frames.
-- Perf polish is a separate thread now (title slowness at start,
-  occasional skips in gameplay). Correctness comes first; the numbers
-  above are the baseline to beat, measured with profiler overhead on.
+- Title average rose from 26.5 fps (serial path) to 32.7 fps with
+  the fast path and snapshot walk; light scenes reach the 60 cap.
+- Bulk index runs on the GPU thread took the run average from
+  44.4 to 51.2 fps. Skipping the per-open case walk on SD removed
+  a similar amount of title-side file time.
+- Gameplay is typically 40-60 fps; heavy districts (Shibuya
+  terminal, 300-680 draws) run at a median of about 40 fps on the
+  current build, where the game thread is the limit. The lifted
+  code keeps guest registers in host registers (RECOMP_FAST_MEM;
+  JSRF_SLOW_MEM=ON reverts), which is where the last gain came
+  from: the same district measured 28-40 fps before it. The log
+  line "[MANUAL] generated code: fast guest memory" confirms the
+  fast path is live in a build.
+- A 470-second soak on the current delivery machinery completed
+  with no freeze and no crash, 2,190 software methods delivered.
 
-## Update, run 8 (the ungated build): confirmation half-passed, new crash found and fixed
+## Open items
 
-The ungated build was confirmed for the make-space fix itself: three wrap
-events all took the sleeping branch and method 5 delivered 45 for 45, no
-freeze. The run then crashed at character select, a different fault than
-the run 6 freeze: the pushbuffer walk followed a subroutine jump hop to
-guest 0x8F800000, far past the end of RAM, and pb_word dereferenced it.
-pb_walk_sub validated CALL targets against the RAM size but not the jump
-hops it follows afterwards; the hops now get the same test. This also
-means run 6's freeze is still unexplained, and separately there is an
-intermittent red/blue channel-split visual bug in the hideout, not yet
-captured in a screenshot.
+- **Red/blue channel split.** Seen twice in the hideout area on
+  pre-guard builds: red and blue copies of the scene offset to
+  either side, intermittent. It has not recurred since draw
+  validation landed, and no dropped draws were logged in the runs
+  since. If it recurs, check the same log for dropped-draw lines
+  at that moment before treating it as a separate bug; a
+  screenshot that shows whether the HUD splits too is the other
+  useful evidence.
+- **Boost blur in widescreen.** Screen-space blur quads that
+  sample a rendered surface are no longer squeezed
+  (RECOMP_WIDE_FX_FULL=0 restores the old behaviour). Awaiting
+  visual confirmation on hardware that the boost effect is
+  correct; the practical test area is Dogenzaka (the hideout
+  has no paint cans to build boost charge).
+- **Vertex hashing cost.** Even with CRC32 the content hash is a
+  visible share of the GPU thread; whether more is worth taking
+  there is a profiling question, answered by prof.sh over a
+  heavy-scene run.
+- fast_gpu's default-on status is recent. A longer soak across
+  more stages is still the deciding evidence for keeping it.

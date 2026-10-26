@@ -486,9 +486,7 @@ Thank you, all of you.
 
 ## Credits
 
-Built with [Claude Code](https://claude.ai) (Anthropic) — proving that AI-assisted systems programming can tackle problems previously considered impractical.
-
-Human contributors are credited in [CONTRIBUTORS.md](CONTRIBUTORS.md); the
+Contributors are credited in [CONTRIBUTORS.md](CONTRIBUTORS.md); the
 third-party code we build on is credited in [NOTICE](NOTICE).
 
 ## Changelog
