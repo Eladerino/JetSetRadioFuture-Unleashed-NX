@@ -627,6 +627,14 @@ static void resolve_case(char *path, const char *base)
     struct stat st;
     size_t blen;
     char *p;
+#ifdef __SWITCH__
+    /* The SD card's FAT/exFAT is case-insensitive already, and each lstat
+     * here is an IPC round trip to the file system service on the game
+     * thread: in streaming-heavy stretches the Switch profile had 14% of
+     * the game thread in fsdev_stat/open under NtCreateFile. */
+    (void)st; (void)blen; (void)p;
+    return;
+#endif
     if (!base || !*base || lstat(path, &st) == 0) return;
     if (errno != ENOENT && errno != ENOTDIR) return;
     blen = strlen(base);
@@ -791,7 +799,19 @@ translate:
             /* Ensure the save directory tree exists. */
             char dir_path[MAX_PATH];
             snprintf(dir_path, sizeof(dir_path), "%s%s", base_dir, sub_dir);
+#ifdef __SWITCH__
+            /* Once per directory: mkdir_p is a file-system IPC per
+             * component, and this ran on every save-side path. */
+            { static char made[8][MAX_PATH]; static int nmade;
+              int k;
+              for (k = 0; k < nmade; k++) if (!strcmp(made[k], dir_path)) break;
+              if (k == nmade) {
+                  mkdir_p(dir_path);
+                  if (nmade < 8) snprintf(made[nmade++], MAX_PATH, "%s", dir_path);
+              } }
+#else
             mkdir_p(dir_path);
+#endif
         } else {
             snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
         }

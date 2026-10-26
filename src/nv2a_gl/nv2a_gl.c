@@ -9414,10 +9414,11 @@ void nv2a_gl_indices(uint32_t method, const uint32_t *w, uint32_t n)
         nv2a_gl_method(method, w[0]);
         w++; n--;
     }
+    /* methval_note watches other methods only, and no state can move
+     * between words of one run: the split check once is the same as per word. */
+    if (n) split_batch_if_state_moved();
     for (i = 0; i < n; i++) {
         uint32_t param = w[i];
-        methval_note(method, param);
-        split_batch_if_state_moved();
         if (method == M_ARRAY_ELEMENT16) {
             if (S.idx_count + 2 <= MAX_INDICES) {
                 S.idx[S.idx_count++] = param & 0xFFFF;
