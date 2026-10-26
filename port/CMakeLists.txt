@@ -112,6 +112,10 @@ if(SWITCH)
     endif()
 endif()
 
+# What the compiler is told, in the build output: the generated code is most
+# of the frame, and its optimisation flags come from the toolchain file.
+message(STATUS "C flags: ${CMAKE_C_FLAGS} | ${CMAKE_BUILD_TYPE}: ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}")
+
 # The runtime: everything in this repository outside port/ and launcher/.
 add_subdirectory("${JSRF_REPO}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 

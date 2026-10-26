@@ -391,6 +391,8 @@ static void log_flusher(void *arg)
     }
 }
 
+static char s_logs_dir[1024];   /* <base>/Logs, for the profiler's file */
+
 static void open_log(const char *data)
 {
     static Thread flusher;
@@ -398,6 +400,7 @@ static void open_log(const char *data)
     const char *d = getenv("JSRF_LOG_DIRECT");
     snprintf(logs, sizeof logs, "%s/Logs", data);
     mkdir_p(logs);
+    snprintf(s_logs_dir, sizeof s_logs_dir, "%s", logs);
     snprintf(last, sizeof last, "%s/last-run.log", logs);
     snprintf(prev, sizeof prev, "%s/previous-run.log", logs);
     remove(prev);
@@ -851,8 +854,66 @@ static void stack_dump(int t, u64 base, u32 total)
     memset(s_stk[t], 0, sizeof s_stk[t]);
 }
 
+/* The whole run's samples too, never reset, so the profile can be summed
+ * by function rather than read ten seconds and two dozen addresses at a
+ * time: the recompiled game's time is spread over thousands of addresses,
+ * and the top two dozen of each report showed a quarter of it. Written
+ * every minute to Logs/prof-pcs.txt (offset and count per line, per
+ * thread); prof.sh reads it from beside the log and names the functions. */
+#define RUN_THREADS 16
+#define RUN_SLOTS 32768
+static ProfSlot *s_run[RUN_THREADS];
+static u32 s_run_total[RUN_THREADS], s_run_lost[RUN_THREADS];
+
+static void run_add(int t, u64 pc)
+{
+    ProfSlot *tab;
+    u32 i, k;
+    if (t >= RUN_THREADS) return;
+    if (!(tab = s_run[t]) && !(tab = s_run[t] = calloc(RUN_SLOTS, sizeof *tab))) return;
+    s_run_total[t]++;
+    i = (u32)((pc >> 2) * 2654435761u) & (RUN_SLOTS - 1);
+    for (k = 0; k < 64; k++, i = (i + 1) & (RUN_SLOTS - 1)) {
+        if (tab[i].pc == pc) { tab[i].n++; return; }
+        if (!tab[i].pc) { tab[i].pc = pc; tab[i].n = 1; return; }
+    }
+    s_run_lost[t]++;
+}
+
+static void run_dump(u64 base)
+{
+    char path[1100], tmp[1110];
+    FILE *f;
+    int t, nt = s_nthreads < RUN_THREADS ? s_nthreads : RUN_THREADS;
+    if (!s_logs_dir[0]) return;
+    snprintf(path, sizeof path, "%s/prof-pcs.txt", s_logs_dir);
+    snprintf(tmp, sizeof tmp, "%s.new", path);
+    if (!(f = fopen(tmp, "w"))) return;
+    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+    fprintf(f, "# JSRF Switch whole-run samples: thread lines, then offset count\n");
+    for (t = 0; t < nt; t++) {
+        const ProfSlot *tab = s_run[t];
+        u32 i, outside = 0;
+        if (!tab || s_run_total[t] < 50) continue;
+        fprintf(f, "T %s %u %u %u\n", s_threads[t].what, s_threads[t].id,
+                s_run_total[t], s_run_lost[t]);
+        for (i = 0; i < RUN_SLOTS; i++) {
+            if (!tab[i].n) continue;
+            if (tab[i].pc >= base && tab[i].pc < base + 0x10000000ull)
+                fprintf(f, "%llx %u\n", (unsigned long long)(tab[i].pc - base), tab[i].n);
+            else
+                outside += tab[i].n;
+        }
+        if (outside) fprintf(f, "outside %u\n", outside);
+    }
+    fclose(f);
+    remove(path);
+    rename(tmp, path);
+}
+
 static void prof_add(int t, u64 pc)
 {
+    run_add(t, pc);
     u32 i = (u32)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1), k;
     for (k = 0; k < 32; k++, i = (i + 1) & (PROF_SLOTS - 1)) {
         if (s_prof[t][i].pc == pc) { s_prof[t][i].n++; return; }
@@ -918,7 +979,9 @@ static void prof_sampler(void *arg)
             svcSetThreadActivity(h, ThreadActivity_Runnable);
         }
         if (armTicksToNs(armGetSystemTick() - last) >= 10000000000ull) {
+            static int reports;
             prof_dump(base);
+            if (++reports % 6 == 0) run_dump(base);
             last = armGetSystemTick();
         }
     }
