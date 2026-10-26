@@ -4583,6 +4583,38 @@ static void do_draw_body(void)
                                                   * layout GL will accept */
     }
 
+    /* Every array the draw reads, over the index range it reads, inside
+     * guest memory: RAM, the contiguous window or the tiled alias. An index
+     * far past the end of its array took the vertex cache's hash (and the
+     * per-vertex fetch after it) off the end of guest memory into the
+     * host's: on the Switch, a fault in vc_hash after JSRF's character
+     * select, with a span of gigabytes. The hardware would have fetched
+     * garbage for such a draw; here it is dropped, and counted. */
+    if (!inl && nlive) {
+        const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+        uint32_t lo = S.idx[0], hi = S.idx[0];
+        for (k = 1; k < n; k++) {
+            if (S.idx[k] < lo) lo = S.idx[k];
+            if (S.idx[k] > hi) hi = S.idx[k];
+        }
+        for (i = 0; i < nlive; i++) {
+            uint64_t va  = (uint64_t)(live[i].base - mem) + (uint64_t)lo * live[i].stride;
+            uint64_t end = (uint64_t)(live[i].base - mem) + (uint64_t)hi * live[i].stride
+                         + vtx_bytes(&live[i]);
+            if ((end <= 0x04000000u)
+                || (va >= XBOX_CONTIG_BASE && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
+                || (va >= 0xF0000000u && end <= 0xF4000000u))
+                continue;
+            { static unsigned long dropped;
+              if (dropped++ < 8 || (dropped & (dropped - 1)) == 0)
+                  fprintf(stderr, "  [GL] draw %u dropped: attribute %u reads 0x%08llX..0x%08llX"
+                          " (indices %u..%u, stride %u), outside guest memory (#%lu)\n",
+                          S.draws, live[i].idx, (unsigned long long)va,
+                          (unsigned long long)end, lo, hi, live[i].stride, dropped); }
+            return;
+        }
+    }
+
     /* RECOMP_GL_STICKYLOG: the draws that read an inherited attribute value
      * different from the one the title last set -- everything the sticky
      * attributes change. A line each for the first few, then a count per
