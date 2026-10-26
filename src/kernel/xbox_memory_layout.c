@@ -879,10 +879,21 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                          * skipped outright, and with it whatever the title
                          * had written there -- at worst the fence it was
                          * about to wait on. Walk the tail up to the jump,
-                         * then from the jump's target to the new PUT. */
+                         * then from the jump's target to the new PUT.
+                         *
+                         * The jump sits at the ring's end, and the search
+                         * has to reach it: the old 128 KB window missed it
+                         * whenever the previous pass had ended earlier in
+                         * the ring than that (25 Oct, run 5: last PUT
+                         * 0x4D3A0 with the ring running past 0x80000, so
+                         * the jump was never found, the head segment was
+                         * never walked, and the software method the title
+                         * was sleeping on was never even counted). Search
+                         * a full megabyte of tail; the walk stops at the
+                         * jump, so the bound is a cap, not a cost. */
                         uint32_t from = XBOX_CONTIG_BASE | (s_pb_last_put & 0x0FFFFFFFu);
                         uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
-                        uint32_t j = nv2a_pb_scan(from, from + 0x20000u);
+                        uint32_t j = nv2a_pb_scan(from, from + 0x100000u);
                         if (j) {
                             j = XBOX_CONTIG_BASE | (j & 0x0FFFFFFFu);
                             if (j < to) nv2a_pb_scan(j, to);

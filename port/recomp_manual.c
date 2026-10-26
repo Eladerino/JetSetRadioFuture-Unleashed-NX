@@ -2352,7 +2352,7 @@ void sub_001910E0(void)
                 "  [SPIN] make-space poll: %lu calls (+%lu), real distance %u%s, "
                 "DMA_PUT=0x%08X DMA_GET=0x%08X, swm raised=%lu dropped=%lu in_flight=%d\n",
                 calls, calls - shown_calls, g_eax,
-                g_eax >= 0x8000u ? " (clamped to 0x7FFF)" : "",
+                g_eax >= 0x8000u ? " (32 KB or more)" : "",
                 put, get, raised, dropped, xbox_nv2a_swm_in_flight());
             shown_calls = calls;
             next = now + 1.0;
