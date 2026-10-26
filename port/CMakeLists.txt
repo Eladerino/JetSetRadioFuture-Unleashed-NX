@@ -87,6 +87,31 @@ if(ANDROID OR SWITCH)
     add_compile_options(-fsigned-char)
 endif()
 
+# Switch: thread-local variables through TPIDR_EL0 rather than libnx's soft
+# thread pointer. The guest registers are __thread, and the soft one is a
+# function call on every access (switch/jsrf_switch.c, JSRF_TP_EL0). Set
+# before the runtime's subdirectories so its libraries get it too (the first
+# build gave it to the generated code only, and xbox_GuestCpuPreempt's
+# thread-locals still went through the call). libnx, SDL and Mesa keep
+# -mtp=soft, and the same pointer serves both. JSRF_SOFT_TP=ON goes back.
+set(JSRF_TP_EL0 OFF)
+if(SWITCH)
+    option(JSRF_SOFT_TP "Switch: keep libnx's soft thread pointer" OFF)
+    if(NOT JSRF_SOFT_TP)
+        include(CheckCCompilerFlag)
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+        check_c_compiler_flag(-mtp=tpidr_el0 JSRF_HAVE_MTP_EL0)
+        unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+        if(JSRF_HAVE_MTP_EL0)
+            set(JSRF_TP_EL0 ON)
+            add_compile_options(-mtp=tpidr_el0)
+            add_compile_definitions(JSRF_TP_EL0=1)
+        else()
+            message(STATUS "Switch: compiler has no -mtp=tpidr_el0; soft thread pointer")
+        endif()
+    endif()
+endif()
+
 # The runtime: everything in this repository outside port/ and launcher/.
 add_subdirectory("${JSRF_REPO}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 
@@ -155,28 +180,13 @@ if(SWITCH)
     target_include_directories(jsrf_recomp PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/ios"
         "${JSRF_REPO}/src")
-    # Thread-local variables through TPIDR_EL0 rather than libnx's soft
-    # thread pointer: the guest registers are __thread, and the soft one is
-    # a function call on every access (switch/jsrf_switch.c, JSRF_TP_EL0).
-    # The engine is the only code built this way; libnx, SDL and Mesa keep
-    # -mtp=soft, and the same pointer serves both. JSRF_SOFT_TP=ON goes back.
-    option(JSRF_SOFT_TP "Switch: keep libnx's soft thread pointer" OFF)
-    if(NOT JSRF_SOFT_TP)
-        include(CheckCCompilerFlag)
-        set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-        check_c_compiler_flag(-mtp=tpidr_el0 JSRF_HAVE_MTP_EL0)
-        unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
-        if(JSRF_HAVE_MTP_EL0)
-            target_compile_options(jsrf_recomp PRIVATE -mtp=tpidr_el0)
-            target_compile_definitions(jsrf_recomp PRIVATE JSRF_TP_EL0=1)
-            target_link_options(jsrf_recomp PRIVATE -Wl,--wrap=threadCreate)
-        else()
-            message(STATUS "Switch: compiler has no -mtp=tpidr_el0; soft thread pointer")
-        endif()
-    endif()
 endif()
 target_compile_definitions(jsrf_recomp PRIVATE JSRF_VERSION="${JSRF_VERSION}")
 target_link_libraries(jsrf_recomp PRIVATE xboxrecomp)
+if(JSRF_TP_EL0)
+    # Every thread copies the pointer into TPIDR_EL0 as it starts.
+    target_link_options(jsrf_recomp PRIVATE -Wl,--wrap=threadCreate)
+endif()
 target_include_directories(jsrf_recomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${JSRF_GEN_ROOT}"

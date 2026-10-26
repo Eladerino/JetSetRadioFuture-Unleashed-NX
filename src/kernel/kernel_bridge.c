@@ -2506,16 +2506,37 @@ void xbox_nv2a_software_method_done(void)
     g_swm_in_flight = 0;
 }
 
+static long long g_swm_raised_ms;
 static void kernel_pgraph_tick(void)
 {
     uint32_t t = g_swm_tail;
     int claimed;
-    if (g_swm_in_flight || t == __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE)) return;
+    /* One unanswered for a quarter of a second: raise it again. Should a
+     * status bit go missing again, the title waits that long, not for
+     * good; while it is merely slow, raising again changes nothing (the
+     * bits are already set, a queued DPC is not queued twice). */
+    if (g_swm_in_flight) {
+        long long now = (long long)GetTickCount64();
+        if (now - g_swm_raised_ms < 250) return;
+        g_swm_raised_ms = now;
+        BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR) |= NV2A_PGRAPH_INTR_ERROR;
+        BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)  |= NV2A_PMC_INTR_PGRAPH;
+        kernel_raise_interrupt(NV2A_VECTOR);
+        { static unsigned said;
+          if (said++ < 8) {
+              fprintf(stderr, "  [NV2A] software method #%lu unanswered for 250 ms, raised again\n",
+                      g_swm_raised);
+              fflush(stderr);
+          } }
+        return;
+    }
+    if (t == __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE)) return;
     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) return;
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_ADDR) =
         0x100u | (g_swm_q[t % SWM_QUEUE].subch << 16);
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_DATA) = g_swm_q[t % SWM_QUEUE].param;
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_NSOURCE) = 1u;   /* a notification */
+    g_swm_raised_ms = (long long)GetTickCount64();
     g_swm_in_flight = 1;
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR) |= NV2A_PGRAPH_INTR_ERROR;
     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)  |= NV2A_PMC_INTR_PGRAPH;

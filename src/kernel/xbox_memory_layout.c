@@ -760,12 +760,25 @@ static void vblank_intr_tick(volatile uint32_t *regs)
         return;                       /* raised, not yet acknowledged */
 
     /* Acknowledged (or never raised): complete it. A PGRAPH software method
-     * still with the title keeps its bit (see kernel_pgraph_tick). */
-    if (v)
-        *pcrtc = 0;
+     * still with the title keeps its bit (see kernel_pgraph_tick).
+     *
+     * Several threads run this (the ack thread, frame pacing, and a DPC's
+     * back edges), beside the timer thread that raises both interrupts, so
+     * neither register is read and then stored whole: a vblank raised in
+     * between survives the compare-exchange, and PGRAPH's bit is never
+     * cleared here for a title whose own handler acknowledges it. Clearing
+     * that bit from a stale "nothing in flight" lost a software method
+     * outright: its DPC never ran, the next one was never raised, and the
+     * make-space sleep at 0x0019151B never woke (Switch, 2026-10-26). */
+    if (v && !__atomic_compare_exchange_n(pcrtc, &v, 0u, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;                       /* raised again meanwhile */
     if (*pmc) {
         extern int xbox_nv2a_swm_in_flight(void);
-        *pmc = xbox_nv2a_swm_in_flight() ? (*pmc & (1u << 12)) : 0;
+        extern int nv2a_title_acks_pgraph(void);
+        uint32_t keep = (nv2a_title_acks_pgraph() || xbox_nv2a_swm_in_flight())
+                      ? (1u << 12) : 0u;
+        __atomic_and_fetch(pmc, keep, __ATOMIC_ACQ_REL);
     }
 }
 
@@ -797,7 +810,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             extern int xbox_nv2a_swm_in_flight(void);
             /* A software method the title has not acknowledged yet keeps its
              * PGRAPH status: the handler is about to read it. */
-            if (NV2A_ACK[i].offset == 0x400100u && xbox_nv2a_swm_in_flight())
+            extern int nv2a_title_acks_pgraph(void);
+            /* ...and a title that acknowledges PGRAPH itself keeps it
+             * always: checking "in flight" first raced the raise. */
+            if (NV2A_ACK[i].offset == 0x400100u
+                && (nv2a_title_acks_pgraph() || xbox_nv2a_swm_in_flight()))
                 continue;
             if (*r & NV2A_ACK[i].busy_mask) {
                 *r &= ~NV2A_ACK[i].busy_mask;
