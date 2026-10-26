@@ -4911,6 +4911,26 @@ static void do_draw_body(void)
          * a fade, a frame -- left to fill the 16:9 screen. Anything smaller
          * is an overlay and keeps its shape. */
         if (hi - lo < 1.8f && yhi - ylo < 1.8f) g_wide_squeeze = 1;
+        /* ...unless it samples a picture the title drew: that is a pass over
+         * the scene, not an overlay. JSRF's boost blur lays copies of the
+         * frame back over it in quads that each cover part of the screen;
+         * squeezed toward the centre, each one put the whole wide picture
+         * into a 4:3 box and the feedback smeared it frame after frame
+         * (Switch screenshots, 2026-10-26). Unsqueezed they cover the
+         * screen the way the scene does. RECOMP_WIDE_FX_FULL=0: old way. */
+        if (g_wide_squeeze) {
+            static int fx_full = -1;
+            int st;
+            if (fx_full < 0) { const char *v = getenv("RECOMP_WIDE_FX_FULL");
+                               fx_full = v ? atoi(v) != 0 : 1; }
+            for (st = 0; fx_full && st < 4; st++)
+                if (S.tex[st].enabled
+                    && surface_find(S.tex[st].offset, S.tex[st].width,
+                                    S.tex[st].height, 1) >= 0) {
+                    g_wide_squeeze = 0;
+                    break;
+                }
+        }
         /* RECOMP_WIDE_NOSQUEEZE=1 (test only): measure, never squeeze. */
         { static int nosq = -1;
           if (nosq < 0) nosq = getenv("RECOMP_WIDE_NOSQUEEZE") ? 1 : 0;
