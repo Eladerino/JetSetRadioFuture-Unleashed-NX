@@ -8939,19 +8939,33 @@ static void do_draw_body(void)
     g_prof.n_draws++;
     S.since_present++;
     /* A GL error turns every later call into a no-op, so a single bad enum
-     * early on reads as "nothing draws" for the rest of the run. Check the
-     * first few draws and say which one broke. */
+     * early on reads as "nothing draws" for the rest of the run, so the
+     * first few draws are checked and the report says which one broke. A
+     * check is not free, though: on Mesa glGetError can stall the calling
+     * thread, and at several hundred draws a frame a check per draw costs
+     * real frame time. So after the first eight draws the check runs on
+     * the first draw of each frame instead, which still surfaces a lasting
+     * error within a frame of it happening. RECOMP_GL_ERRCHECK=draw
+     * restores checking every draw. Reports are capped at eight either
+     * way. */
 #ifdef NV2A_GL_HAVE_GL
     {
-        static int checked;
-        if (g_is_gl && checked < 8) {
-            GLenum e = glGetError();
-            if (e != GL_NO_ERROR) {
-                fprintf(stderr, "  [GL] glGetError 0x%04X after draw "
-                        "(prim=%u verts=%u fbo=%ux%u status=0x%04X)\n",
-                        e, S.prim, out_n, g_fbo_w, g_fbo_h,
-                        glCheckFramebufferStatus(GL_FRAMEBUFFER));
-                checked++;
+        static int mode = -1, early, reported;
+        if (mode < 0) { const char *v = getenv("RECOMP_GL_ERRCHECK");
+                        mode = (v && !strcmp(v, "draw")) ? 1 : 0; }
+        if (g_is_gl) {
+            int call = mode ? (reported < 8)
+                            : (early < 8 || S.since_present <= 1);
+            if (call) {
+                GLenum e = glGetError();
+                if (early < 8) early++;
+                if (e != GL_NO_ERROR && reported < 8) {
+                    reported++;
+                    fprintf(stderr, "  [GL] glGetError 0x%04X after draw "
+                            "(prim=%u verts=%u fbo=%ux%u status=0x%04X)\n",
+                            e, S.prim, out_n, g_fbo_w, g_fbo_h,
+                            glCheckFramebufferStatus(GL_FRAMEBUFFER));
+                }
             }
         }
     }
