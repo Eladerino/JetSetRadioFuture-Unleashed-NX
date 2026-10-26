@@ -2338,38 +2338,42 @@ void sub_001910E0(void)
      * stopped calling here at all, which is its own answer: the exit it
      * waits on is not the distance. */
     if (spin_log && spin && from == 0x001914C6u) {
-        static unsigned long calls, shown_calls;
-        static double next;
-        double now = jsrf_now();
+        /* Every call, not throttled: run 6's fatal make-space call fell
+         * between two throttled polls, so its distance and pointers were
+         * never logged. Make-space asks a handful of times a second at
+         * most, which the log can afford. */
+        static unsigned long calls;
+        uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+        uint32_t put = *(volatile uint32_t *)(m + 0xFD800040u);
+        uint32_t get = *(volatile uint32_t *)(m + 0xFD800044u);
+        unsigned long raised = 0, dropped = 0;
+        xbox_nv2a_swm_stats(&raised, &dropped);
         calls++;
-        if (now >= next) {
-            uint8_t *m = (uint8_t *)g_xbox_mem_offset;
-            uint32_t put = *(volatile uint32_t *)(m + 0xFD800040u);
-            uint32_t get = *(volatile uint32_t *)(m + 0xFD800044u);
-            unsigned long raised = 0, dropped = 0;
-            xbox_nv2a_swm_stats(&raised, &dropped);
-            fprintf(stderr,
-                "  [SPIN] make-space poll: %lu calls (+%lu), real distance %u%s, "
-                "DMA_PUT=0x%08X DMA_GET=0x%08X, swm raised=%lu dropped=%lu in_flight=%d\n",
-                calls, calls - shown_calls, g_eax,
-                g_eax >= 0x8000u ? " (32 KB or more)" : "",
-                put, get, raised, dropped, xbox_nv2a_swm_in_flight());
-            shown_calls = calls;
-            next = now + 1.0;
-        }
+        fprintf(stderr,
+            "  [SPIN] make-space call %lu: real distance %u%s, "
+            "DMA_PUT=0x%08X DMA_GET=0x%08X%s, swm raised=%lu dropped=%lu in_flight=%d\n",
+            calls, g_eax,
+            g_eax >= 0x8000u ? " (32 KB or more)" : "",
+            put, get, get > put ? " (wrap)" : "",
+            raised, dropped, xbox_nv2a_swm_in_flight());
     }
-    if (spin && !force && from == 0x001914C6u && g_eax >= 0x8000u) {
+    if (spin && !force && from == 0x001914C6u) {
         static unsigned long n;
-        /* JSRF_SPIN_LOG experiment (25 Oct, run 4): do not force the
-         * spinning branch when the pushbuffer ring has wrapped between
-         * GET and PUT (GET numerically ahead of PUT). The spin loop at
-         * 0x001914F0 is a plain unsigned compare of the GPU's position
-         * against a target in the same numbering; across a wrap that
+        /* JSRF_SPIN_LOG experiment (25 Oct, runs 4-6): the branch choice
+         * for a wrapped ring is always the sleeping branch, whatever the
+         * distance. The spin loop at 0x001914F0 is a plain unsigned
+         * compare of the GPU's position against a target in the same
+         * numbering; across a wrap (GET numerically ahead of PUT) that
          * compare can never succeed, because GET is republished as the
          * new, smaller PUT and the title submits nothing more while it
-         * waits. The sleeping branch is the one built for this case:
-         * it wakes on software method 5, whose NOP sits past the wrap
-         * jump the walk follows. */
+         * waits. Run 4/5 were the large-distance case (the clamp below
+         * forced the spin; run 6 fixed the walk and the sleep woke).
+         * Run 6 then froze at character select in the same spin loop
+         * with no clamp involved -- D3D's own small-distance answer
+         * takes the spin branch too, and a small distance across a
+         * wrap hangs the same way. So: wrapped -> answer sleep-range
+         * (leave a large answer alone, raise a small one); linear ->
+         * clamp a large answer to spin, as before. */
         if (spin_log) {
             uint8_t *m = (uint8_t *)g_xbox_mem_offset;
             uint32_t put = *(volatile uint32_t *)(m + 0xFD800040u);
@@ -2377,16 +2381,21 @@ void sub_001910E0(void)
             if (get > put) {
                 if (n++ < 3)
                     fprintf(stderr, "  [NV2A] make-space: GPU %u bytes behind across a wrap "
-                            "(GET 0x%08X > PUT 0x%08X), leaving the sleeping branch (#%lu)\n",
-                            g_eax, get, put, n);
+                            "(GET 0x%08X > PUT 0x%08X), %s the sleeping branch (#%lu)\n",
+                            g_eax, get, put,
+                            g_eax >= 0x8000u ? "leaving" : "answering sleep-range for",
+                            n);
+                if (g_eax < 0x8000u) g_eax = 0x8000u;
                 return;
             }
         }
-        if (n++ < 3)
-            fprintf(stderr, "  [NV2A] make-space: GPU %u bytes behind, spinning instead of sleeping (#%lu)\n",
-                    g_eax, n);
-        g_eax = 0x7FFFu;
-        return;
+        if (g_eax >= 0x8000u) {
+            if (n++ < 3)
+                fprintf(stderr, "  [NV2A] make-space: GPU %u bytes behind, spinning instead of sleeping (#%lu)\n",
+                        g_eax, n);
+            g_eax = 0x7FFFu;
+            return;
+        }
     }
     if (force && from == 0x001914C6u && g_eax < 0x8000u) {
         static unsigned long n;
