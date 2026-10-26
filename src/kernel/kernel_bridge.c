@@ -6892,7 +6892,32 @@ void xbox_GuestCpuPreempt(uint32_t va)
     extern unsigned g_recomp_tick;
     extern unsigned char xbox_KeCurrentIrql(void);
     extern int mcpx_apu_irq_pending_global(void) __attribute__((weak));
-    if (!t_guest_holds || t_in_callback) return;
+    if (!t_guest_holds) return;
+    if (t_in_callback) {
+        /* D3D's vblank DPC acknowledges PCRTC_INTR_0 and then spins, with
+         * the guest lock held, until PMC_INTR_0 says the PCRTC is quiet --
+         * which only the NV2A ack thread's loop (vblank_intr_tick) made
+         * true, once per pass. With fast_gpu on a pass is a whole frame of
+         * GL work, so the DPC held the lock for a millisecond or more each
+         * vblank and the game thread waited behind it (Switch profile,
+         * 2026-10-26: sub_00193D90 from DPC 0x00194480). Completing the
+         * acknowledgement here ends the spin at its next back edge.
+         * RECOMP_DPC_VBLANK=0/1; on by default on the Switch only. */
+        static int dpc_vblank = -1;
+        if (dpc_vblank < 0) {
+            const char *e = getenv("RECOMP_DPC_VBLANK");
+#ifdef __SWITCH__
+            dpc_vblank = e ? atoi(e) > 0 : 1;
+#else
+            dpc_vblank = e ? atoi(e) > 0 : 0;
+#endif
+        }
+        if (dpc_vblank) {
+            extern void xbox_nv2a_vblank_service(void);
+            xbox_nv2a_vblank_service();
+        }
+        return;
+    }
     g_lock_owner_edge = va;
     if ((++g_recomp_tick & 0xFFu) != 0u) return;
     g_lock_owner_irql = xbox_KeCurrentIrql();
