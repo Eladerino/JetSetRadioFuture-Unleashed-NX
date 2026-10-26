@@ -3943,10 +3943,68 @@ static struct {
 
 static uint64_t vc_rotl(uint64_t x, int r) { return (x << r) | (x >> (64 - r)); }
 
+#if defined(__aarch64__)
+#include <arm_acle.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#endif
+
+/* Whether the CRC32 instructions may run. On Linux the auxv says; on the
+ * Switch there is no auxv check to make, and the target is fixed hardware:
+ * the Tegra X1's Cortex-A57 implements CRC32. RECOMP_GL_CRC32HASH=0 is the
+ * way back on any target that ever proves otherwise. Resolved once: the
+ * vertex and texture caches compare values across calls, so the choice
+ * must not change mid-run. */
+static int vc_crc32_ok(void)
+{
+    static int ok = -1;
+    if (ok < 0) {
+        const char *v = getenv("RECOMP_GL_CRC32HASH");
+        ok = !v || atoi(v) != 0;
+#if defined(__linux__) && defined(HWCAP_CRC32)
+        if (ok) ok = (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+#endif
+    }
+    return ok;
+}
+
+/* The same contract as vc_hash below (seed in, 64-bit value out, chaining
+ * through the seed), folded by the CRC32 instructions at eight bytes an
+ * instruction and finished with the multiply/xorshift avalanche the old
+ * hash ended with, so bucket spread does not rest on CRC's linearity.
+ * Compiled for +crc per-function so the rest of the file does not need
+ * the whole build's -march raised for one hash. */
+__attribute__((target("arch=armv8-a+crc")))
+static uint64_t vc_hash_crc(const uint8_t *p, size_t n, uint64_t seed)
+{
+    uint32_t crc = __crc32d((uint32_t)seed, seed);
+    size_t len = n;
+    while (n >= 8) {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        crc = __crc32d(crc, w);
+        p += 8; n -= 8;
+    }
+    while (n) { crc = __crc32b(crc, *p++); n--; }
+    {
+        uint64_t h = (uint64_t)crc * 0xC2B2AE3D27D4EB4Full + (uint64_t)len;
+        h ^= h >> 33; h *= 0x165667B19E3779F9ull; h ^= h >> 29;
+        h *= 0xC2B2AE3D27D4EB4Full; h ^= h >> 32;
+        return h;
+    }
+}
+#endif /* __aarch64__ */
+
 /* A 64-bit hash of n bytes, four lanes wide (xxHash64's round): a few GB/s,
- * which is what makes checking the source of every kept draw affordable. */
+ * which is what makes checking the source of every kept draw affordable.
+ * On aarch64 the CRC32 instructions fold the bytes instead (see above);
+ * the values are only ever compared within one run, so the two hashes
+ * never have to agree with each other. */
 static uint64_t vc_hash(const void *data, size_t n, uint64_t seed)
 {
+#if defined(__aarch64__)
+    if (vc_crc32_ok()) return vc_hash_crc((const uint8_t *)data, n, seed);
+#endif
     const uint64_t P1 = 0x9E3779B185EBCA87ull, P2 = 0xC2B2AE3D27D4EB4Full,
                    P3 = 0x165667B19E3779F9ull;
     const uint8_t *p = (const uint8_t *)data;
