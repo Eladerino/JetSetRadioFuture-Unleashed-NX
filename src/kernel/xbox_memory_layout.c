@@ -1118,6 +1118,16 @@ static void xbox_Nv2aAckStart(void)
         nv2a_flush_ack_start(g_nv2a_memory);
 #endif
         { const char *e = getenv("RECOMP_ACK_KEEPER");
+#if defined(__SWITCH__)
+          /* The every-millisecond cadence costs about a quarter of the
+           * pushbuffer walk's throughput on the Switch: it ends vblank
+           * waits on every pass whether or not the GPU thread is away,
+           * and the handler work lands on the cores the walk runs on.
+           * Away-only completion keeps the stall protection the keeper
+           * exists for, so it is the default here; RECOMP_ACK_KEEPER=1
+           * still asks for the upstream cadence explicitly. */
+          if (!e) e = "2";
+#endif
           g_keeper_every = !(e && atoi(e) == 2);
           if (!e || atoi(e))
               g_nv2a_keeper_thread = CreateThread(NULL, 0, nv2a_keeper_thread, g_nv2a_memory, 0, NULL); }
