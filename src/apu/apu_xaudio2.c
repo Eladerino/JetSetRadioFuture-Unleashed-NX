@@ -163,7 +163,6 @@ int xa2_get_buffer_size(void)
 
 int xa2_ring_level(void)    { return -1; }
 int xa2_ms_since_pull(void) { return -1; }
-int xa2_ring_level_smooth(void) { return -1; }
 
 #else /* !_WIN32 -- POSIX stubs (no audio output yet) */
 
@@ -174,6 +173,5 @@ int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return
 int  xa2_get_buffer_size(void)                        { return 0; }
 int  xa2_ring_level(void)                             { return -1; }
 int  xa2_ms_since_pull(void)                          { return -1; }
-int  xa2_ring_level_smooth(void)                      { return -1; }
 
 #endif /* _WIN32 */
