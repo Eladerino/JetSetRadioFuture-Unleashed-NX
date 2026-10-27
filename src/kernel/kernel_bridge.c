@@ -7266,6 +7266,58 @@ void xbox_waitlog_report(void)
     fflush(stderr);
 }
 
+/* 1 if the guest's thread handle `tok` is the calling thread. */
+static int bridge_thread_is_self(uint32_t tok)
+{
+    HANDLE h;
+    if (tok == 0xFFFFFFFEu) return 1;
+    h = bridge_resolve_handle(tok);
+    if (!h) return 0;
+#if defined(_WIN32)
+    return GetThreadId(h) == GetCurrentThreadId();
+#else
+    { extern int w32_is_current_thread(HANDLE h) __attribute__((weak));
+      return w32_is_current_thread ? w32_is_current_thread(h) : 1; }
+#endif
+}
+
+/*
+ * NtResumeThread and NtSuspendThread (of another thread) from a thread at
+ * time-critical priority keep the guest lock.
+ *
+ * Both let it go otherwise: a resume, so that the thread it wakes runs first,
+ * as a woken thread of higher priority would on the console; a suspend, for
+ * the thread that parks itself. On the console neither lets anything run in
+ * between when the caller is time-critical -- nothing of lower or equal
+ * priority preempts it -- and CRI's sound library counts on that. Its lock
+ * (0x0013B0A0, and 0x0013B0E0 to leave it) raises the caller to
+ * time-critical, suspends its server thread, and keeps a nesting count and
+ * the caller's old priority in globals; leaving it resumes the server and
+ * restores that priority. With the guest lock let go in the middle, the
+ * server ran there, took the same lock, and left the caller at time-critical
+ * priority with the count at zero -- and the library's "leave it as often as
+ * held" loop (0x001437B0, "while my priority is time-critical, leave") then
+ * spun for ever with the guest lock held: every other thread stopped, the
+ * picture with them, a few seconds into a level ([STALL] in the log). Seen
+ * at Shibuya Terminal, once in three loads of a 0.5.9 test and once in the
+ * seventy runs of 0.5.8's tour. A thread suspending itself still parks
+ * without the lock, whatever its priority. RECOMP_TC_HANDOFF=1: as before.
+ */
+static int tc_keeps_lock(ULONG ordinal)
+{
+    static int off = -1;
+    if (off < 0) { const char *e = getenv("RECOMP_TC_HANDOFF"); off = e && atoi(e) ? 1 : 0; }
+    if (off) return 0;
+    if (xbox_thread_guest_priority(GetCurrentThread()) < THREAD_PRIORITY_TIME_CRITICAL) return 0;
+    if (ordinal == 231 && bridge_thread_is_self(STACK_ARG(0))) return 0;
+    { static int said;
+      if (!said++)
+          fprintf(stderr, "  [LOCK] a time-critical thread %s another without letting the guest "
+                          "lock go (RECOMP_TC_HANDOFF=1: as before)\n",
+                  ordinal == 224 ? "resumed" : "suspended"); }
+    return 1;
+}
+
 /* Kernel calls that can block: the lock is dropped across them so another
  * guest thread can make the progress this one is waiting for. */
 static int kernel_call_blocks(ULONG ordinal)
@@ -7674,6 +7726,8 @@ static void kernel_thunk_dispatch(void)
         } else {
             wl = 0;
         }
+        if (blocks && (ordinal == 224 || ordinal == 231) && tc_keeps_lock(ordinal))
+            blocks = 0;
         if (blocks) xbox_guest_lock_release();
         bridge();
         if (blocks) xbox_guest_lock_acquire();

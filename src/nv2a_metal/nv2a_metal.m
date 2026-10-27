@@ -191,6 +191,7 @@ static struct {
     __unsafe_unretained id<MTLRenderPipelineState> pso;
     __unsafe_unretained id<MTLDepthStencilState>   dss;
     int      cull, wind, clip;
+    float    bias_u, bias_f;    /* the depth bias set: polygon offset */
     uint32_t stencil_ref;
     MTLScissorRect sc;
     __unsafe_unretained id<MTLBuffer> vbuf, cbuf;
@@ -1338,6 +1339,16 @@ static int encode_state(void)
         [g_enc setDepthClipMode:clip ? MTLDepthClipModeClamp : MTLDepthClipModeClip];
         E.clip = clip;
     }
+    /* Polygon offset, as Metal's depth bias: glPolygonOffset's units and
+     * factor (the front half has turned them round for reversed depth). */
+    {
+        float bu = g_rs.poly_offset ? g_rs.poly_offset_units : 0.0f;
+        float bf = g_rs.poly_offset ? g_rs.poly_offset_factor : 0.0f;
+        if (!E.valid || E.bias_u != bu || E.bias_f != bf) {
+            [g_enc setDepthBias:bu slopeScale:bf clamp:0.0f];
+            E.bias_u = bu; E.bias_f = bf;
+        }
+    }
 
     /* The scissor, inside the target: Metal refuses one that is not. */
     if (g_rs.scissor_enable) {
@@ -1570,6 +1581,7 @@ static void mtl_clear(unsigned mask, const float rgba[4], float depth,
     [g_enc setStencilReferenceValue:stencil & 0xFFu];
     [g_enc setCullMode:MTLCullModeNone];
     [g_enc setDepthClipMode:MTLDepthClipModeClamp];
+    [g_enc setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];   /* a draw's polygon offset */
     [g_enc setScissorRect:(MTLScissorRect){ x0, y0, x1 - x0, y1 - y0 }];
     memset(&cin, 0, sizeof cin);
     memcpy(cin.color, rgba, sizeof cin.color);

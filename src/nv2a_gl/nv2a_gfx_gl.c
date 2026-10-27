@@ -248,7 +248,7 @@ static int ms_new(int i, int n)
         return 1;
     ms_free(i);
     /* The refusal is said by the caller; the error it left would be pinned
-     * on the next draw by the front half's error check. */
+     * on the frame by the front half's error check. */
     while (glGetError() != GL_NO_ERROR) ;
     return 0;
 }
@@ -962,6 +962,8 @@ static struct {
 } g_last;
 static int g_last_cm_reset;        /* a clear forced the colour mask on */
 static int g_last_stencil_reset;   /* a clear changed the stencil write mask */
+static int g_last_poff = -1;       /* the polygon offset last set: -1 unknown */
+static float g_last_poff_f, g_last_poff_u;
 static int g_last_clamp = -1;      /* GL_DEPTH_CLAMP as last set */
 
 static GLenum gl_blend(uint32_t f)
@@ -1013,6 +1015,7 @@ static void glx_state_invalidate(void)
     g_last_cm_reset = 1;
     g_last_stencil_reset = 1;
     g_last_clamp = -1;
+    g_last_poff = -1;
 }
 
 /* The per-draw state, still compared against what was last set rather than
@@ -1115,6 +1118,19 @@ static void glx_state(const Nv2aRenderState *rs)
           }
           last = *rs; valid = 1;
       } }
+    /* Polygon offset, for filled polygons (the front half has turned it round
+     * for reversed depth). */
+    if (rs->poly_offset != g_last_poff
+     || (rs->poly_offset && (rs->poly_offset_factor != g_last_poff_f
+                          || rs->poly_offset_units != g_last_poff_u))) {
+        if (rs->poly_offset) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(rs->poly_offset_factor, rs->poly_offset_units);
+        } else glDisable(GL_POLYGON_OFFSET_FILL);
+        g_last_poff = rs->poly_offset;
+        g_last_poff_f = rs->poly_offset_factor;
+        g_last_poff_u = rs->poly_offset_units;
+    }
 
     g_last.valid = 1;
 
@@ -1449,6 +1465,16 @@ static int glx_init(void)
     glGenBuffers(1, &g_vbo);
     glBindVertexArray(g_vao);
     glx_state_invalidate();
+    /* AMD's driver on Mesa (radeonsi): the programs without the invariant
+     * position, which has been found to do more harm than good there (not
+     * measured here: no such GPU). Before the first program, which is the
+     * last moment it can be decided. RECOMP_GL_INVARIANT=1 keeps it. */
+    { const char *r = (const char *)glGetString(GL_RENDERER);
+      if (r && strstr(r, "radeonsi") && !getenv("RECOMP_GL_INVARIANT")) {
+          nv2a_vsh_glsl_invariant = 0;
+          fprintf(stderr, "  [GL] %s: the vertex programs without the invariant position "
+                          "(RECOMP_GL_INVARIANT=1 keeps it)\n", r);
+      } }
     return 1;
 }
 

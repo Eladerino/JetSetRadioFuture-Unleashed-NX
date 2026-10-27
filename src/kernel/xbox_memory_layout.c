@@ -786,15 +786,23 @@ static int vblank_intr_tick(volatile uint32_t *regs)
     /* Acknowledged (or never raised): complete it. A PGRAPH software method
      * still with the title keeps its bit (see kernel_pgraph_tick).
      *
-     * Several threads run this (the ack thread, the keeper, frame pacing,
-     * and a DPC's back edges), beside the timer thread that raises both
-     * interrupts, so neither register is read and then stored whole: a
-     * vblank raised in between survives the compare-exchange, and
-     * PMC_INTR_0 goes through intr_clear_keeping_swm. */
-    if (v && !__atomic_compare_exchange_n(pcrtc, &v, 0u, 0,
-                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        return 0;                     /* raised again meanwhile */
-    intr_clear_keeping_swm(pmc, 1u << 12);
+     * Several threads run this (the ack thread, the keeper, and the
+     * vblank service that frame pacing and a DPC's back edges call),
+     * while the timer thread raises the next vblank: each register is
+     * changed only if it still holds what was read, and PMC_INTR_0 only
+     * while no vblank is pending -- so a vblank raised in between is
+     * never wiped with the one before it. One that loses the race is
+     * completed on the next pass. */
+    if (v && !__sync_bool_compare_and_swap((uint32_t *)pcrtc, v, 0u))
+        return 0;
+    {
+        uint32_t m = *pmc;
+        if (m && !(*pcrtc & NV2A_VBLANK_PENDING_TAG)) {
+            extern int xbox_nv2a_swm_in_flight(void);
+            uint32_t want = xbox_nv2a_swm_in_flight() ? (m & (1u << 12)) : 0u;
+            if (want != m) (void)__sync_bool_compare_and_swap((uint32_t *)pmc, m, want);
+        }
+    }
     return v != 0;
 }
 
@@ -830,12 +838,21 @@ void xbox_nv2a_vblank_service(void)
  * the voices among them: a 200 ms shader build was 200 ms in which the music
  * ring was not refilled, and the sound stuttered with the picture.
  *
- * This thread does those two whenever the ack thread has been away for more
+ * This thread moves KeTickCount whenever the ack thread has been away for more
  * than 2 ms, and nothing else: GET, the fences and the busy bits still say
  * where the GPU really is. A wait of 100 ms or more is written to the log, the
- * first fifty times. RECOMP_ACK_KEEPER=0 turns it off.
+ * first fifty times.
+ *
+ * The vblank it ends at every pass, a millisecond apart, the ack thread about
+ * or not: the ack thread comes round between pushbuffer runs and frame
+ * pacing's slices, a few milliseconds apart at best, and for all of them the
+ * handler spun with the guest lock, with the threads that make the sound
+ * waiting behind it every frame.
+ * RECOMP_ACK_KEEPER=2: only while the ack thread is away, as before; =0 no
+ * keeper.
  */
 static HANDLE g_nv2a_keeper_thread = NULL;
+static int g_keeper_every = 1;              /* 0: RECOMP_ACK_KEEPER=2 (where it starts) */
 static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
@@ -843,6 +860,7 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
     unsigned long ended = 0, said = 0;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
         long long now = (long long)GetTickCount64(), top = s_ack_top_ms;
+        int away;
         if (top != last_top) {                 /* the ack thread came round again */
             if (away_from && top - away_from >= 100 && said < 50) {
                 said++;
@@ -853,16 +871,20 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
             ended = 0;
             last_top = top;
         }
-        if (top && now - top > 2) {
+        away = top && now - top > 2;
+        if (away || g_keeper_every) {
+            int done = vblank_intr_tick(regs);
+            if (away) ended += (unsigned long)done;
+        }
+        if (away) {
             if (!away_from) away_from = top;
-            ended += (unsigned long)vblank_intr_tick(regs);
             *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                    + g_memory_offset) = GetTickCount();
         }
 #if defined(_WIN32)
         Sleep(1);                           /* 1-2 ms at the 1 ms timer main.c asks for */
 #else
-        { struct timespec ts = { 0, 2000000L }; nanosleep(&ts, NULL); }
+        { struct timespec ts = { 0, 1000000L }; nanosleep(&ts, NULL); }
 #endif
     }
     return 0;
@@ -1096,6 +1118,7 @@ static void xbox_Nv2aAckStart(void)
         nv2a_flush_ack_start(g_nv2a_memory);
 #endif
         { const char *e = getenv("RECOMP_ACK_KEEPER");
+          g_keeper_every = !(e && atoi(e) == 2);
           if (!e || atoi(e))
               g_nv2a_keeper_thread = CreateThread(NULL, 0, nv2a_keeper_thread, g_nv2a_memory, 0, NULL); }
     }

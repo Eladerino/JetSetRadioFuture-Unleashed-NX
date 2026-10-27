@@ -22,6 +22,7 @@
 #include "apu_state.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "apu.h"
 #include "apu_xaudio2.h"
 #include "fpconv.h"
@@ -542,9 +543,72 @@ static int ring_target_frames(void)
     return t;
 }
 
+/*
+ * A frame at a time.
+ *
+ * The output is handed over 256 samples at a time (eight of the APU's frames,
+ * mcpx_apu_monitor_frame), and the pacing went by that: eight frames made
+ * back to back, then a wait of 5.3 ms. Everything the title asks of the APU
+ * is answered between frames -- a voice started or stopped, its front end's
+ * methods -- and a DirectSound call that waits for that waited for the next
+ * eight, up to 5 ms each time, and in a crowd scene that restarts voices all
+ * the time (Shibuya Terminal) those waits add up to whole frames. On the
+ * console the APU makes a frame every 0.67 ms.
+ *
+ * So each frame now waits for its own moment. The level it goes by is the
+ * output ring as the device spends it (xa2_ring_level_smooth: what the last
+ * pull took is counted down at 48 kHz instead of all at once), plus the
+ * frames made since the last 256 were handed over: it rises 32 samples with
+ * every frame made and falls 48 a millisecond, and a frame is made whenever
+ * it is below the target -- one every 0.67 ms, with the APU's lock given up
+ * in between. Without a ring (or a device that has stopped pulling), the
+ * clock, frame by frame. RECOMP_APU_PACE=8: eight at a time, as before.
+ */
+static int pace_by_eight(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RECOMP_APU_PACE"); v = e && atoi(e) == 8; }
+    return v;
+}
+
+/* Wait `us` microseconds with the APU's lock given up, so that the title's
+ * accesses to it go ahead meanwhile. */
+static void apu_wait_us(MCPXAPUState *d, int us)
+{
+    if (us <= 0) return;
+    qemu_mutex_unlock(&d->lock);
+#if defined(_WIN32)
+    {
+        /* Sleep() and winpthreads' nanosleep wait whole milliseconds; a
+         * high-resolution waitable timer (Windows 10 1803 on) a fraction of
+         * one, and before that a plain one does without the rounding. */
+        static HANDLE timer;
+        LARGE_INTEGER due;
+        if (!timer)
+            timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
+                                           TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+        due.QuadPart = -(LONGLONG)us * 10;                   /* relative, 100 ns units */
+        if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+            WaitForSingleObject(timer, INFINITE);
+        else
+            Sleep(1);
+    }
+#else
+    {
+        struct timespec ts;
+        ts.tv_sec = us / 1000000;
+        ts.tv_nsec = (long)(us % 1000000) * 1000L;
+        nanosleep(&ts, NULL);
+    }
+#endif
+    qemu_mutex_lock(&d->lock);
+}
+
 static void throttle(MCPXAPUState *d)
 {
-    if (d->ep_frame_div % 8) {
+    const int by8 = pace_by_eight();
+    if (by8 && d->ep_frame_div % 8) {
         return;
     }
 
@@ -552,14 +616,29 @@ static void throttle(MCPXAPUState *d)
 
     if (ring_target_frames() > 0 && xa2_ring_level() >= 0) {
         for (;;) {
-            int since;
-            if (xa2_ring_level() < ring_target_frames()) break;   /* room: produce */
+            int since, lvl;
+            if (by8) {
+                lvl = xa2_ring_level();
+            } else {
+                lvl = xa2_ring_level_smooth();
+                if (lvl < 0) goto wall_clock;
+                /* and what is made but not handed over yet */
+                lvl += (int)(d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
+            }
+            if (lvl < ring_target_frames()) break;                /* room: produce */
             if (d->pause_requested) break;
             since = xa2_ms_since_pull();
             /* Nothing is pulling (the device stopped): fall back to the
              * wall clock rather than stop the title's audio time. */
             if (since < 0 || since > 60) goto wall_clock;
-            qemu_cond_timedwait(&d->cond, &d->lock, 1);
+            if (by8) {
+                qemu_cond_timedwait(&d->cond, &d->lock, 1);
+            } else {
+                /* Until the level is below the target again: 48 frames a
+                 * millisecond, in waits of a quarter to two milliseconds. */
+                int us = (int)((int64_t)(lvl - ring_target_frames() + 1) * 1000000 / 48000);
+                apu_wait_us(d, us < 250 ? 250 : us > 2000 ? 2000 : us);
+            }
         }
         d->next_frame_time_us = 0;
         d->sleep_acc_us += (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us);
@@ -568,28 +647,44 @@ static void throttle(MCPXAPUState *d)
 
 wall_clock:
 
-    if (d->next_frame_time_us == 0 ||
-        now_us - d->next_frame_time_us > EP_FRAME_US) {
-        /* RECOMP_APU_STATS: how often the thread fell behind and gave up
-         * the time it had lost (each is up to 8 frames never produced). */
-        extern int g_apu_throttle_resets; extern int64_t g_apu_throttle_lost_us;
-        if (d->next_frame_time_us) {
-            g_apu_throttle_resets++;
-            g_apu_throttle_lost_us += now_us - d->next_frame_time_us;
+    {
+        /* One frame's time: eight of them together, or 32 samples at 48 kHz
+         * (666 2/3 us, the third carried). */
+        static int third;
+        int64_t step = EP_FRAME_US;
+        if (!by8) {
+            step = 666;
+            if (++third == 3) { third = 0; step = 667; }
         }
-        d->next_frame_time_us = now_us;
-    }
+        if (d->next_frame_time_us == 0 ||
+            now_us - d->next_frame_time_us > step) {
+            /* RECOMP_APU_STATS: how often the thread fell behind and gave up
+             * the time it had lost (each is up to 8 frames never produced). */
+            extern int g_apu_throttle_resets; extern int64_t g_apu_throttle_lost_us;
+            if (d->next_frame_time_us) {
+                g_apu_throttle_resets++;
+                g_apu_throttle_lost_us += now_us - d->next_frame_time_us;
+            }
+            d->next_frame_time_us = now_us;
+        }
 
-    while (!d->pause_requested) {
-        now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-        int64_t remaining_ms = (d->next_frame_time_us - now_us) / 1000;
-        if (remaining_ms > 0) {
-            qemu_cond_timedwait(&d->cond, &d->lock, (int)remaining_ms);
-        } else {
-            break;
+        while (!d->pause_requested) {
+            now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+            if (by8) {
+                int64_t remaining_ms = (d->next_frame_time_us - now_us) / 1000;
+                if (remaining_ms > 0) {
+                    qemu_cond_timedwait(&d->cond, &d->lock, (int)remaining_ms);
+                } else {
+                    break;
+                }
+            } else {
+                int64_t remaining_us = d->next_frame_time_us - now_us;
+                if (remaining_us <= 0) break;
+                apu_wait_us(d, remaining_us > 2000 ? 2000 : (int)remaining_us);
+            }
         }
+        d->next_frame_time_us += step;
     }
-    d->next_frame_time_us += EP_FRAME_US;
 
     d->sleep_acc_us += (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us);
 }

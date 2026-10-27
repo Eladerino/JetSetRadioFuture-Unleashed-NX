@@ -1106,6 +1106,15 @@ static void w32_suspend_signal_install(void)
 #endif
 }
 
+/* 1 if h is the calling thread (the kernel bridge asks it of a suspend). */
+int w32_is_current_thread(HANDLE h)
+{
+    w32_object *o;
+    if (h == PSEUDO_CURRENT_THREAD) return 1;
+    o = obj_check(h, K_THREAD);
+    return o && o == t_self_obj;
+}
+
 int w32_suspend_pending(void)
 {
     const w32_object *o = t_self_obj;

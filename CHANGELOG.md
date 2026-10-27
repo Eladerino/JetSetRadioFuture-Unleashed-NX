@@ -10,6 +10,71 @@ its version. Downloads are on the
 [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases)
 page.
 
+## 0.5.8 — 26 October 2026
+
+The stutter of a first visit, the sound that stuttered with it, a camera on the
+right stick, and two things for Windows laptops. Every platform is new in 0.5.8.
+
+- **Shaders ready from the first visit.** The console's graphics are drawn
+  here with shaders made from what the game sets up, and each one used to be
+  built the first time the game needed it, with the game waiting: the first
+  minute of every area stuttered, on a phone worst of all (one new shader
+  froze an iPhone for a quarter of a second). The engine now carries a list of
+  the game's shaders -- 343 of them, collected by going through the title, the
+  Garage and fourteen areas -- and on the first start of a new version every
+  one is prepared (about 30 ms on a Mac) and built ahead: on Metal in the
+  background while the title runs, on OpenGL a few milliseconds at a time on
+  loading screens. A shader still missing is built when the game asks, as
+  before.
+  Each machine also keeps what it drew (`states-v1.dat` beside the shader
+  cache), so that a later version's first start builds those ahead too.
+  `RECOMP_SHADER_SEED=0` leaves the engine's list out. Five areas (the stages
+  numbered 50 to 54) are not in the list yet.
+- **The sound no longer stutters with the picture.** The thread that runs the
+  GPU's work also ended the game's vertical-blank handler, which waits for it
+  while holding what every other game thread needs: so whenever the renderer
+  was busy -- building a shader, or a frame of eight hundred draws on a phone
+  -- every game thread stopped with it, the one that streams the music and the
+  voices among them. A small thread now keeps the vertical blank and the
+  system clock going while the renderer is busy (`[NV2A] the GPU thread was
+  busy for ...` in the log when it was 100 ms or more), and the sound's own
+  thread runs above the game's on the Mac and the iPhone, and on Android and
+  Linux where the system allows it, as it already did on Windows.
+  `RECOMP_ACK_KEEPER=0`: as before.
+- **The camera on the right stick**, on every platform, on by default. The
+  original game turns its camera only by itself, and the L trigger puts it
+  behind the skater. Now the right stick (or the arrow keys) turns it around
+  the skater and tilts it, the skater's controls follow the view, and it eases
+  back behind them a moment after the stick is let go; the L trigger still
+  puts it straight behind at once. Not in conversations and the first-person
+  look. Turned off for the original camera: Controls › Camera on the Right
+  Stick on the Mac, the Controls menu or F7 on Windows, F7 on Linux, the
+  settings on the iPhone and on Android -- remembered.
+- **Windows: the dedicated GPU, and full screen remembered.** On a laptop with
+  two GPUs, the game now asks for the dedicated one (NVIDIA Optimus, AMD
+  PowerXpress) instead of the integrated chip it could be given -- a player's
+  flicker in full screen came from that. And the game starts the way it was
+  left, in full screen or in a window; `--fullscreen` and the new
+  `--windowed` choose for one start.
+- On Metal, a slow frame's line in the log (`[HITCH]`) says how busy the GPU
+  was meanwhile and how long it was waited for: whether a heavy scene is the
+  GPU's or the processor's.
+- Tested on a Mac, Metal and OpenGL: Shibuya Terminal and Kibogaoka Hill from
+  an empty save folder, with the engine's list (every shader the game asked
+  for built ahead: 78 and 102) and without it (75 built while the game
+  waited), the right stick turning the camera there and the sound's output
+  never running dry; then the release build on the title, on Dogenzaka Hill
+  with SMAA and MSAA 4× (Metal and OpenGL) and in the Fortified Residential
+  Zone. Linux (Mesa): the attract demo with the list (all but the
+  three shaders the title needs first built on loading screens), F7 and the
+  portable switch; and, on that slow software renderer, the new sound thread:
+  the game's vertical-blank handler ran 46 times a second instead of 39, and
+  the game thread's longest wait for a lock was halved. Windows (under Wine):
+  the title as an upgrade from 0.5.7 (the list taken in beside the old
+  cache), F7 and the Controls menu, the dedicated-GPU switch; full screen kept
+  was tried on a test build. The Android and iPhone builds were built and
+  checked, not run.
+
 ## 0.5.7 — 26 October 2026
 
 What players reported from 0.5.4 to 0.5.6, and two things they asked for. Every

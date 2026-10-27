@@ -27,6 +27,15 @@
       },
       "versions": [
         {
+          "version": "0.5.8",
+          "buildVersion": "0.5.8",
+          "date": "2026-10-26T19:54:06Z",
+          "localizedDescription": "Shaders are built ahead from the first start, so the first visit to an area no longer stutters while they are made, and the sound no longer stutters with the picture. New: the right stick turns the camera (on by default; the settings turn it off).",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.8/JSRF-Unleashed-iOS.ipa",
+          "size": 13379746,
+          "minOSVersion": "15.0"
+        },
+        {
           "version": "0.5.7",
           "buildVersion": "0.5.7",
           "date": "2026-10-26T10:26:20Z",

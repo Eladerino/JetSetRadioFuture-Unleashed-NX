@@ -154,6 +154,10 @@ const char *nv2a_msl_varying_struct(void);
 /* Set (before any program is emitted) by a Metal backend whose compiler
  * honours [[invariant]] -- one that compiles with preserveInvariance. */
 extern int nv2a_vsh_msl_invariant;
+/* Cleared (before any program is emitted) by an OpenGL backend on a driver
+ * where the GLSL programs are better without "invariant gl_Position" (AMD's,
+ * on Mesa). RECOMP_GL_INVARIANT=1 or 0 overrides it either way. */
+extern int nv2a_vsh_glsl_invariant;
 
 /* Reversed depth, and an OpenGL clip volume with z from 0 to w (see
  * depth_defines in nv2a_vsh.c): set before the first program is emitted. */

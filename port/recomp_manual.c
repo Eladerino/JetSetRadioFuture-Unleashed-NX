@@ -4220,13 +4220,23 @@ void sub_00042EE0(void)
  * menu, the iPhone's and the Android app's settings, and on Windows and Linux
  * F7 (and Controls in the Windows window's menu bar); RECOMP_RSTICK_CAMERA=1
  * or 0 overrides.
- * Tests: JSRF_RCAM_LOG=1 logs it ten times a second; JSRF_RCAM_FIXED=<degrees>
- * holds a fixed turn; JSRF_RCAM_DUMPCAM=<s> prints the camera object once.
+ * The turn goes by the game's frames, a sixtieth of a second each, as its own
+ * camera and its first-person look do: by the clock, it came out in uneven
+ * steps from one picture to the next whenever the frames were not evenly
+ * spaced -- a slow pan judders, a player's report: "like a really bad V-Sync".
+ * JSRF_RCAM_CLOCK=1 goes by the clock, as 0.5.8 did.
+ * Tests: JSRF_RCAM_LOG=1 logs it ten times a second (=2: at every frame);
+ * JSRF_RCAM_FIXED=<degrees> holds a fixed turn; JSRF_RCAM_DUMPCAM=<s> prints
+ * the camera object once.
  */
 __attribute__((weak)) int nv_window_pref_rstick_camera(void);
 __attribute__((weak)) int nv_window_pref_rstick_camera(void) { return 0; }   /* no switch: off */
 
-#define RCAM_DEAD   0.24f      /* of full deflection: a resting stick drifts */
+#define RCAM_DEAD   0.20f      /* of full deflection: a resting stick drifts */
+/* The speed: what is past the dead zone, to the power 1.5 -- fine near the
+ * middle of the stick, and not next to nothing at a third of the way (the
+ * square it was gave a thirtieth of a degree a frame at 30%). */
+#define RCAM_CURVE(x) ((x) * sqrtf(fabsf(x)))
 #define RCAM_YAW    2.6f       /* radians a second at full deflection, about 150 degrees */
 #define RCAM_PITCH  1.4f
 #define RCAM_PMAX   0.6f       /* the tilt either way, about 35 degrees */
@@ -4243,6 +4253,7 @@ static struct {
     float    yaw, pitch;       /* the turn, radians: to the right, and up */
     float    idle;             /* seconds since the stick was let go */
     double   last;             /* when the turn was last worked out */
+    uint32_t last_frame;       /* and at which of the game's frames (s_rcam_frames) */
     double   active_until;     /* the stick is the camera's (not the game's) until then */
     uint32_t cam;              /* the camera it was applied to */
     float    game_eye[3];      /* the eye as the game published it */
@@ -4250,6 +4261,8 @@ static struct {
     int32_t  game_hd, our_hd;  /* the heading, likewise */
     int      applied;
 } s_rcam;
+/* The camera's updates (sub_000A5070): one a game frame. */
+static uint32_t s_rcam_frames;
 
 static void rcam_note_pad(XBOX_INPUT_STATE *s)
 {
@@ -4287,7 +4300,7 @@ static int rcam_enabled(void)
 static int rcam_log_on(void)
 {
     static int on = -1;
-    if (on < 0) on = getenv("JSRF_RCAM_LOG") ? 1 : 0;
+    if (on < 0) { const char *v = getenv("JSRF_RCAM_LOG"); on = v ? (atoi(v) == 2 ? 2 : 1) : 0; }
     return on;
 }
 
@@ -4316,16 +4329,28 @@ static void rcam_restore(uint8_t *m, uint32_t cam)
 static void rcam_apply(uint8_t *m, uint32_t cam)
 {
     double now = jsrf_now();
-    float dt = s_rcam.last > 0.0 ? (float)(now - s_rcam.last) : 0.0f;
+    float dt;
     const uint32_t *c;
     float *e, *t, v[3], h, len, el, el2, ca, sa, lo, hi;
     int32_t *hd;
     static double fixed = -1.0e9;
     static double next_log, dump_at = -2.0;
-    uint32_t mode;
+    static int by_clock = -1;
+    uint32_t mode, frames;
     int ok, i;
+    if (by_clock < 0) by_clock = getenv("JSRF_RCAM_CLOCK") ? 1 : 0;
+    /* The game's frames since the last turn (one, as a rule), a sixtieth of a
+     * second each; up to six, after a pause. */
+    frames = s_rcam.last > 0.0 ? s_rcam_frames - s_rcam.last_frame : 0u;
+    if (frames > 6u) frames = 6u;
+    if (by_clock) {
+        dt = s_rcam.last > 0.0 ? (float)(now - s_rcam.last) : 0.0f;
+        if (dt > 0.1f) dt = 0.1f;      /* a hitch, or the first frame */
+    } else {
+        dt = (float)frames * (1.0f / 60.0f);
+    }
     s_rcam.last = now;
-    if (dt > 0.1f) dt = 0.1f;          /* a hitch, or the first frame */
+    s_rcam.last_frame = s_rcam_frames;
     if (cam < 0x10000u || cam + 0x240u >= (64u << 20)) return;
     c = (const uint32_t *)(m + cam);
     if (dump_at == -2.0) {
@@ -4358,9 +4383,8 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
         s_rcam.yaw = s_rcam.pitch = 0.0f;   /* the game puts its camera back behind as well */
         s_rcam.idle = 0.0f;
     } else if (s_rcam.rx != 0.0f || s_rcam.ry != 0.0f) {
-        /* Squared, for a fine turn near the middle of the stick. */
-        s_rcam.yaw   += s_rcam.rx * fabsf(s_rcam.rx) * RCAM_YAW * dt;
-        s_rcam.pitch += s_rcam.ry * fabsf(s_rcam.ry) * RCAM_PITCH * dt;
+        s_rcam.yaw   += RCAM_CURVE(s_rcam.rx) * RCAM_YAW * dt;
+        s_rcam.pitch += RCAM_CURVE(s_rcam.ry) * RCAM_PITCH * dt;
         s_rcam.idle = 0.0f;
     } else {
         s_rcam.idle += dt;
@@ -4415,7 +4439,12 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
         s_rcam.cam = cam;
         s_rcam.applied = 1;
     }
-    if (rcam_log_on() && now >= next_log) {
+    if (rcam_log_on() == 2) {
+        /* Every frame: the step it took, to see that it is even. */
+        fprintf(stderr, "[RCAM] t=%.3f flip %u frame %u (+%u) dt %.4f | stick %.2f %.2f | yaw %.3f pitch %.3f\n",
+                now, nv2a_gl_flips(), s_rcam_frames, frames, dt, s_rcam.rx, s_rcam.ry,
+                s_rcam.yaw * 57.29578f, s_rcam.pitch * 57.29578f);
+    } else if (rcam_log_on() && now >= next_log) {
         next_log = now + 0.1;
         fprintf(stderr, "[RCAM] t=%.2f flip %u mode %u on %d | stick %.2f %.2f lt %d | yaw %.1f pitch %.1f | "
                 "eye (%.2f %.2f %.2f) game (%.2f %.2f %.2f) tgt (%.2f %.2f %.2f) | hd %d game %d | "
@@ -4447,6 +4476,7 @@ void sub_000A5070(void)
     const uint32_t lim = 64u << 20;
     uint32_t cam = g_ecx;
     if (on < 0) on = getenv("JSRF_CAM_LOG") != NULL;
+    s_rcam_frames++;
     rcam_restore((uint8_t *)(uintptr_t)m, cam);     /* the game's own eye, for its update */
     sub_000A5070_gen();
     if (cam >= 0x10000u && cam + 0x240u < lim)

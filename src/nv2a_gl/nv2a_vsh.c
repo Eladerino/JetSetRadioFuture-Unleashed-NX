@@ -457,10 +457,14 @@ NV2A_GLSL_VERSION
  * and Metal's [[invariant]] (with MTLCompileOptions.preserveInvariance) are
  * that promise. RECOMP_GL_INVARIANT=0 leaves them out.
  */
+/* Cleared by the OpenGL backend on AMD's driver on Mesa (radeonsi), where it
+ * has been found to do more harm than good (see glx_init). */
+int nv2a_vsh_glsl_invariant = 1;
 static int vsh_invariant(void)
 {
     static int on = -1;
-    if (on < 0) { const char *v = getenv("RECOMP_GL_INVARIANT"); on = v ? atoi(v) != 0 : 1; }
+    if (on < 0) { const char *v = getenv("RECOMP_GL_INVARIANT");
+                  on = v ? atoi(v) != 0 : nv2a_vsh_glsl_invariant; }
     return on;
 }
 static const char *GLSL_INVARIANT = "invariant gl_Position;\n";
@@ -529,8 +533,9 @@ static void emit_viewport_epilogue(SB *sb, int ff)
          * to (0.53125, 0.53125) for the duration of its fixed-function draws
          * and to (320.53, 240.53) for its vertex-program draws, is added on
          * top by the hardware and is only the half-pixel nudge here. The
-         * body has added it already. Then back to clip space by the surface
-         * size, exactly as the programmable path in xemu does.
+         * body has added it already -- less that nudge (ffVpOff), which the
+         * programmable path leaves out too (vpRect). Then back to clip space
+         * by the surface size, exactly as the programmable path in xemu does.
          *
          * Before this, the shared mode-0 conversion below subtracted that
          * (0.53, 0.53) offset and divided by the viewport scale -- which is
@@ -583,9 +588,13 @@ static void emit_viewport_epilogue(SB *sb, int ff)
         "        // transform its program already applied.\n"
         "        ndc.x = (oPos.x - wideShift) * 2.0 / vpSurface.x - 1.0;\n"
         "        ndc.y = 1.0 - oPos.y * 2.0 / vpSurface.y;\n"
-        "        ndc.z = oPos.z / 16777215.0;\n"
         "#if NV2A_ZREV\n"
-        "        ndc.z = 1.0 - ndc.z;\n"
+        "        // The far end less z, then the divide: 1 - z/16777215 would\n"
+        "        // round z/16777215 next to 1 first and keep, at the far end,\n"
+        "        // only the steps a value next to 1 has.\n"
+        "        ndc.z = (16777215.0 - oPos.z) / 16777215.0;\n"
+        "#else\n"
+        "        ndc.z = oPos.z / 16777215.0;\n"
         "#endif\n"
         "#if !NV2A_CLIP_Z01\n"
         "        ndc.z = ndc.z * 2.0 - 1.0;\n"
@@ -639,14 +648,26 @@ static void emit_viewport_epilogue(SB *sb, int ff)
         "    // viewport registers, which is the same divide wearing a\n"
         "    // different hat; z has no viewport scale to recover it with,\n"
         "    // because this title never applied one.\n"
+        "#if NV2A_ZREV\n"
+        "    // Reversed, as the far end less z and then the divide: 1 - z/w\n"
+        "    // rounds z/w next to 1 first, and keeps at the far end only the\n"
+        "    // steps a value next to 1 has -- the precision reversed depth is\n"
+        "    // there for, thrown away where the city's far side needs it.\n"
+        "    ndc.z = (nv_away0(oPos.w) - oPos.z) / nv_away0(oPos.w);\n"
+        "#else\n"
         "    ndc.z = oPos.z / nv_away0(oPos.w);\n"
+        "#endif\n"
+        "#else\n"
+        "#if NV2A_ZREV\n"
+        "    ndc.z = (zClip.y > zClip.x)\n"
+        "          ? (zClip.y - oPos.z) / (zClip.y - zClip.x)\n"
+        "          : (vpScale.z != 0.0 ? (vpOff.z + vpScale.z - oPos.z) / vpScale.z\n"
+        "                              : 1.0 - (oPos.z - vpOff.z));\n"
         "#else\n"
         "    ndc.z = (zClip.y > zClip.x)\n"
         "          ? (oPos.z - zClip.x) / (zClip.y - zClip.x)\n"
         "          : (oPos.z - vpOff.z) / (vpScale.z != 0.0 ? vpScale.z : 1.0);\n"
         "#endif\n"
-        "#if NV2A_ZREV\n"
-        "    ndc.z = 1.0 - ndc.z;\n"
         "#endif\n"
         "#if !NV2A_CLIP_Z01\n"
         "    ndc.z = ndc.z * 2.0 - 1.0;   // D3D depth [0,1] -> GL [-1,1]\n"

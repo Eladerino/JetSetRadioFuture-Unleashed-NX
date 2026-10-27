@@ -28,4 +28,11 @@ int xa2_ring_level(void);
 /* Milliseconds since the device last pulled from the ring, or -1. */
 int xa2_ms_since_pull(void);
 
+/* The ring as the device spends it: the frames waiting, plus what is left
+ * of the device's last pull at 48 kHz since it was made -- a level that
+ * falls a frame at a time instead of five hundred at once at each pull, for
+ * the APU to keep topped up a frame at a time (apu_core.c, throttle). -1 as
+ * xa2_ring_level. */
+int xa2_ring_level_smooth(void);
+
 #endif /* APU_XAUDIO2_H */

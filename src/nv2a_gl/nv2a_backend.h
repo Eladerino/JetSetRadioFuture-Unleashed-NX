@@ -140,6 +140,11 @@ typedef struct Nv2aRenderState {
     int      stencil_test;
     uint32_t stencil_func, stencil_ref, stencil_rmask, stencil_wmask;
     uint32_t stencil_op[3];
+    /* Polygon offset for filled polygons, as glPolygonOffset takes it: the
+     * slope's factor (per raster pixel) and units of the depth buffer, already
+     * turned round for reversed depth. 0 in poly_offset: none. */
+    int      poly_offset;
+    float    poly_offset_factor, poly_offset_units;
 } Nv2aRenderState;
 
 /* How a texture is sampled. Set when it is created and kept with it, which is

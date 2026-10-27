@@ -385,6 +385,10 @@ static struct {
     /* Stencil (0x032C, 0x0360..0x0378). Recorded; see stencil_apply. */
     uint32_t stencil_en, stencil_wmask, stencil_func, stencil_ref,
              stencil_fmask, stencil_op[3];
+    /* Polygon offset (0x0338, 0x0384, 0x0388): filled polygons' depth moved
+     * by factor x their slope + units of the depth buffer. */
+    uint32_t poly_off_fill;
+    float    poly_off_factor, poly_off_units;
     int      blend_enable, blend_src, blend_dst;
     int      cull_enable, cull_face, front_face;
     int      alpha_test, alpha_func;
@@ -627,6 +631,18 @@ static int      g_failed;
  * (nv2a_metal.m). Chosen once, in gfx_init(). */
 static const Nv2aGfx *G;
 static int g_is_gl;        /* G is OpenGL: the GL-only diagnostics may run */
+#ifdef NV2A_GL_HAVE_GL
+/* GL errors reported so far (eight at most), and whether they are asked for
+ * after every draw (RECOMP_GL_ERRORS_PER_DRAW=1) or once a frame. */
+static int g_gl_err_reports;
+static int gl_err_per_draw(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RECOMP_GL_ERRORS_PER_DRAW");
+                 v = (e && *e && *e != '0'); }
+    return v;
+}
+#endif
 unsigned nv2a_gfx_gl_fbo(uint32_t rt);   /* nv2a_gfx_gl.c */
 #if defined(NV2A_GL_USE_CGL)
 static CGLContextObj g_cgl_ctx;
@@ -781,6 +797,10 @@ static struct {
     unsigned long long hitches, logged, compiles;
     double   compile_s, compile_worst;
 } g_ht;                                         /* the whole run */
+/* The clock (mono_now) as of the last frame shown: what the draw's own
+ * notes, written every few seconds, go by. They each read the clock at every
+ * draw, five reads a draw for lines that come once in five seconds. */
+static double g_frame_clock;
 /* Reversed depth (zrev_start, below gfx_init's declaration). */
 static int g_zrev;
 static uint32_t zrev_func(uint32_t f);
@@ -3399,13 +3419,18 @@ static uint32_t surface_texture_for(const TexStage *t, float *sx, float *sy, int
     return G->target_snapshot(g_surf[i].rt);
 }
 
+/* When upload_texture_inner began to make a texture the cache did not have
+ * (0: it found one). Only those are timed for [HITCH]: a texture found is
+ * most of a frame's lookups, and timing each was two clock reads for every
+ * texture of every draw. */
+static double g_tex_make_t0;
 static uint32_t upload_texture(const TexStage *t)
 {
     uint32_t r; PROF_T0();
-    double t0 = mono_now();
     g_prof.n_tex_lookup++;
+    g_tex_make_t0 = 0.0;
     r = upload_texture_inner(t);
-    g_hf.tex_s += mono_now() - t0;
+    if (g_tex_make_t0 > 0.0) g_hf.tex_s += mono_now() - g_tex_make_t0;
     PROF_ADD(tex);
     return r;
 }
@@ -3735,6 +3760,8 @@ static uint32_t upload_texture_inner(const TexStage *t)
         if (!g_tcache[k].used) { slot = (int)k; break; }
         if (!g_tcache[k].tex && tomb < 0) tomb = (int)k;   /* see tcache_drop */
     }
+    /* Not in the cache: from here on, a texture is being made (timed). */
+    g_tex_make_t0 = mono_now();
     if (stale >= 0) slot = stale;
     else if (tomb >= 0) slot = tomb;
     if (slot < 0) {
@@ -6112,8 +6139,23 @@ static void do_draw_body(void)
     }
     if (uses(slot, NV2A_U_FFMAT)) {
         G->uniform_f(NV2A_U_FFMAT, &S.u.ff_mat[0][0], 4);
-        if (uses(slot, NV2A_U_FFVPOFF))
-            G->uniform_f(NV2A_U_FFVPOFF, S.vp_off_reg, 1);
+        if (uses(slot, NV2A_U_FFVPOFF)) {
+            /* The viewport offset register less the driver's 0.53125 nudge,
+             * as the programmable path takes it off (vpRect): the nudge
+             * moves the console's pixel centres onto its rasteriser's, and
+             * here it moved every fixed-function draw -- the menus, the
+             * Garage's graffiti tiles, the scenery -- half a pixel right and
+             * down of the vertex programs' draws and of the texels they were
+             * laid out for, which a texture shows as a seam or a blur.
+             * RECOMP_GL_FF_NUDGE=1 keeps it, as before. */
+            static int keep = -1;
+            float o[4];
+            if (keep < 0) { const char *v = getenv("RECOMP_GL_FF_NUDGE");
+                            keep = v && *v && *v != '0'; }
+            memcpy(o, S.vp_off_reg, sizeof o);
+            if (!keep) { o[0] -= 0.53125f; o[1] -= 0.53125f; }
+            G->uniform_f(NV2A_U_FFVPOFF, o, 1);
+        }
         if (uses(slot, NV2A_U_FFTEXMAT))
             G->uniform_f(NV2A_U_FFTEXMAT, &S.u.ff_texmat[0][0], 16);
     }
@@ -6471,6 +6513,25 @@ static void do_draw_body(void)
         rs.w_buffer     = S.psh.w_buffer;
         rs.cull_face    = S.cull_face;
         rs.front_face   = S.front_face;
+        /* Polygon offset, which used to be left out: a decal laid on the
+         * surface it marks is drawn a little nearer by it, so as not to fight
+         * that surface for the pixel. The slope's part is per pixel
+         * of the console's raster, so it is taken times the internal
+         * resolution's scale; with reversed depth nearer is larger, and the
+         * offset is turned round. RECOMP_GL_NOPOLYOFFSET=1: none, as before. */
+        { static int nopo = -1;
+          if (nopo < 0) nopo = getenv("RECOMP_GL_NOPOLYOFFSET") ? 1 : 0;
+          if (!nopo && S.poly_off_fill
+           && (S.poly_off_factor != 0.0f || S.poly_off_units != 0.0f)) {
+              float sgn = g_zrev ? -1.0f : 1.0f;
+              rs.poly_offset = 1;
+              rs.poly_offset_factor = sgn * S.poly_off_factor * (float)gl_scale();
+              rs.poly_offset_units  = sgn * S.poly_off_units;
+              { static int said;
+                if (said < 4) { said++;
+                    fprintf(stderr, "  [GL] polygon offset: factor %g, units %g (draw %u)\n",
+                            S.poly_off_factor, S.poly_off_units, S.draws); } }
+          } }
         /* Stencil. RECOMP_GL_NOSTENCIL=1: ignore it, as before. */
         { static int nost = -1;
           if (nost < 0) nost = getenv("RECOMP_GL_NOSTENCIL") ? 1 : 0;
@@ -6753,7 +6814,7 @@ static void do_draw_body(void)
       int mover = (slot >= 0 && g_pcache[slot].uses_a0
                    && S.xf_mode != NV2A_XF_MODE_FIXED);
       int ci;
-      double now_cls = prof_now();
+      double now_cls = g_frame_clock;
       for (ci = 0; ci < ncls; ci++) if (cls[ci].surf == S.color_offset) break;
       if (ci == ncls && ncls < 8) { cls[ncls].surf = S.color_offset; ncls++; }
       if (ci < ncls) { if (mover) cls[ci].mover++; else cls[ci].world++; }
@@ -6782,7 +6843,7 @@ static void do_draw_body(void)
     if (slot >= 0 && g_pcache[slot].uses_a0 && out_n >= 3
         && S.xf_mode != NV2A_XF_MODE_FIXED) {
         static double last_pos; static int per_burst;
-        double now_pos = prof_now();
+        double now_pos = g_frame_clock;
         if (now_pos - last_pos > 5.0) { last_pos = now_pos; per_burst = 0; }
         if (per_burst < 4 && now_pos - last_pos < 0.25) {
             Nv2aVshProgram vp2;
@@ -6892,7 +6953,7 @@ static void do_draw_body(void)
     { static double last_st; static int armed_st = -1;
       extern uint32_t g_recomp_watch_lo, g_recomp_watch_span;
       uint32_t tab = *(const uint32_t *)guest(0x264BA4);
-      double now_st = prof_now();
+      double now_st = g_frame_clock;
       if (armed_st < 0) armed_st = getenv("RECOMP_WATCH_SINTAB") ? 0 : 2;
       if (tab && armed_st == 0) {
           g_recomp_watch_lo = tab; g_recomp_watch_span = 0x8000;
@@ -6942,7 +7003,7 @@ static void do_draw_body(void)
 
     { static double last_pipe; static unsigned long fixed_n, prog_n;
       static unsigned long fixed_big, prog_big;
-      double now_pipe = prof_now();
+      double now_pipe = g_frame_clock;
       if (S.xf_mode == NV2A_XF_MODE_FIXED) {
           fixed_n++; if (n >= 150) fixed_big++;
       } else {
@@ -6960,7 +7021,7 @@ static void do_draw_body(void)
                       && S.xf_mode != NV2A_XF_MODE_FIXED);
       static double last_box; static int box_mover, box_world;
       int probe_this = 0;
-      { double now_box = prof_now();
+      { double now_box = g_frame_clock;
         if (now_box - last_box > 5.0) { last_box = now_box;
                                         box_mover = 0; box_world = 0; } }
       /* RECOMP_GL_CHARDIAG=1 turns on everything in this block. It runs a
@@ -7621,7 +7682,7 @@ static void do_draw_body(void)
       { static double last_tl; static uint32_t tl_frame = 0xFFFFFFFFu;
         static uint32_t tl_surf; static int tl_events;
         static uint32_t tl_seen = 0xFFFFFFFFu; static int tl_arm;
-        double now_tl = prof_now();
+        double now_tl = g_frame_clock;
         /* Arming in the middle of a frame shows only its tail, which is
          * exactly the part that cannot answer the question. Wait for the
          * frame to turn over, then record that whole frame. */
@@ -8939,34 +9000,23 @@ static void do_draw_body(void)
     g_prof.n_draws++;
     S.since_present++;
     /* A GL error turns every later call into a no-op, so a single bad enum
-     * early on reads as "nothing draws" for the rest of the run, so the
-     * first few draws are checked and the report says which one broke. A
-     * check is not free, though: on Mesa glGetError can stall the calling
-     * thread, and at several hundred draws a frame a check per draw costs
-     * real frame time. So after the first eight draws the check runs on
-     * the first draw of each frame instead, which still surfaces a lasting
-     * error within a frame of it happening. RECOMP_GL_ERRCHECK=draw
-     * restores checking every draw. Reports are capped at eight either
-     * way. */
+     * early on reads as "nothing draws" for the rest of the run. The check
+     * used to follow every draw, and only stopped after eight errors: with no
+     * error it never stopped. glGetError makes a driver that works on its own
+     * thread (Mesa's, AMD's and NVIDIA's on Windows) catch up with the game
+     * before it can answer, a wait at every one of a frame's hundreds of
+     * draws. It is asked once a frame now, in present();
+     * RECOMP_GL_ERRORS_PER_DRAW=1 asks after every draw again, to name the
+     * one that broke. */
 #ifdef NV2A_GL_HAVE_GL
-    {
-        static int mode = -1, early, reported;
-        if (mode < 0) { const char *v = getenv("RECOMP_GL_ERRCHECK");
-                        mode = (v && !strcmp(v, "draw")) ? 1 : 0; }
-        if (g_is_gl) {
-            int call = mode ? (reported < 8)
-                            : (early < 8 || S.since_present <= 1);
-            if (call) {
-                GLenum e = glGetError();
-                if (early < 8) early++;
-                if (e != GL_NO_ERROR && reported < 8) {
-                    reported++;
-                    fprintf(stderr, "  [GL] glGetError 0x%04X after draw "
-                            "(prim=%u verts=%u fbo=%ux%u status=0x%04X)\n",
-                            e, S.prim, out_n, g_fbo_w, g_fbo_h,
-                            glCheckFramebufferStatus(GL_FRAMEBUFFER));
-                }
-            }
+    if (g_is_gl && g_gl_err_reports < 8 && gl_err_per_draw()) {
+        GLenum e = glGetError();
+        if (e != GL_NO_ERROR) {
+            fprintf(stderr, "  [GL] glGetError 0x%04X after draw "
+                    "(prim=%u verts=%u fbo=%ux%u status=0x%04X)\n",
+                    e, S.prim, out_n, g_fbo_w, g_fbo_h,
+                    glCheckFramebufferStatus(GL_FRAMEBUFFER));
+            g_gl_err_reports++;
         }
     }
 #endif
@@ -9957,7 +10007,20 @@ static void present(int is_frame)
     uint8_t *dst;
 
     if (!g_ready || !g_fbo_w || !g_fbo_h || !S.color_offset) return;
-    if (is_frame) { S.frames++; prof_report(); tcache_sweep(); tcache_verify();
+#ifdef NV2A_GL_HAVE_GL
+    /* The frame's GL errors, asked once (see after the draw). */
+    if (is_frame && g_is_gl && g_gl_err_reports < 8 && !gl_err_per_draw()) {
+        GLenum e = glGetError();
+        if (e != GL_NO_ERROR) {
+            fprintf(stderr, "  [GL] glGetError 0x%04X during frame %u (%u draws; "
+                    "RECOMP_GL_ERRORS_PER_DRAW=1 names the draw)\n",
+                    e, S.frames, S.since_present);
+            g_gl_err_reports++;
+        }
+    }
+#endif
+    if (is_frame) { S.frames++; g_frame_clock = mono_now();
+                    prof_report(); tcache_sweep(); tcache_verify();
                     /* the census counts one frame, not everything since the
                      * last dump -- otherwise it measures the gap, not the
                      * picture next to it */
@@ -10571,6 +10634,11 @@ static int imm_method(uint32_t method, uint32_t param)
 {
     float f;
     uint32_t a, part;
+    /* Every method of the pushbuffer passes through here first, and almost
+     * none is a per-vertex one: they all lie in two ranges, so anything
+     * outside them is answered before the forty tests below. */
+    if (!((method >= 0x1500 && method < 0x16D0) ||
+          (method >= 0x1880 && method < 0x1B00))) return 0;
     memcpy(&f, &param, 4);
     if (method >= 0x1500 && method < 0x150C) {            /* SET_VERTEX3F */
         part = (method - 0x1500) / 4;
@@ -11528,6 +11596,9 @@ void nv2a_gl_method(uint32_t method, uint32_t param)
     case 0x0370: S.stencil_op[0] = param; break;    /* SET_STENCIL_OP_FAIL */
     case 0x0374: S.stencil_op[1] = param; break;    /* SET_STENCIL_OP_ZFAIL */
     case 0x0378: S.stencil_op[2] = param; break;    /* SET_STENCIL_OP_ZPASS */
+    case 0x0338: S.poly_off_fill = param; break;    /* SET_POLY_OFFSET_FILL_ENABLE */
+    case 0x0384: memcpy(&S.poly_off_factor, &param, 4); break;  /* SET_POLYGON_OFFSET_SCALE_FACTOR */
+    case 0x0388: memcpy(&S.poly_off_units, &param, 4); break;   /* SET_POLYGON_OFFSET_BIAS */
     case M_SET_DEPTH_FUNC:        S.depth_func = (int)param; break;
     case M_SET_ALPHA_TEST_ENABLE: S.alpha_test = (int)param; break;
     case M_SET_ALPHA_FUNC:        S.alpha_func = (int)param; break;

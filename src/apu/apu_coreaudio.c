@@ -40,12 +40,21 @@ static _Atomic uint32_t g_wr, g_rd;
 static _Atomic uint32_t g_underruns;
 static _Atomic uint32_t g_drops;
 static _Atomic uint64_t g_last_pull_ms;
+static _Atomic uint64_t g_last_pull_us;   /* the same, finer: xa2_ring_level_smooth */
+static _Atomic uint32_t g_last_pull_n;    /* and how many frames it took */
 
 static uint64_t ca_now_ms(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+static uint64_t ca_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
 }
 
 /* One device pull: CA_BUF_FRAMES frames out of the ring, silence for any
@@ -59,6 +68,8 @@ static void ca_pull(int16_t (*out)[CA_CHANNELS])
     uint32_t i, n = have < want ? have : want;
 
     atomic_store_explicit(&g_last_pull_ms, ca_now_ms(), memory_order_relaxed);
+    atomic_store_explicit(&g_last_pull_n, n, memory_order_relaxed);
+    atomic_store_explicit(&g_last_pull_us, ca_now_us(), memory_order_release);
     for (i = 0; i < n; i++)
         memcpy(out[i], g_ring[(rd + i) & (CA_RING_FRAMES - 1)], sizeof g_ring[0]);
     if (n < want) {
@@ -220,6 +231,19 @@ int xa2_ms_since_pull(void)
     t = atomic_load_explicit(&g_last_pull_ms, memory_order_relaxed);
     if (!t) return 1 << 30;
     return (int)(ca_now_ms() - t);
+}
+
+int xa2_ring_level_smooth(void)
+{
+    uint64_t t, el;
+    uint32_t n;
+    int lvl = xa2_ring_level();
+    if (lvl < 0) return lvl;
+    t = atomic_load_explicit(&g_last_pull_us, memory_order_acquire);
+    n = atomic_load_explicit(&g_last_pull_n, memory_order_relaxed);
+    if (!t || !n) return lvl;
+    el = (ca_now_us() - t) * CA_RATE / 1000000u;   /* frames played since the pull */
+    return el < n ? lvl + (int)(n - (uint32_t)el) : lvl;
 }
 
 int xa2_submit_samples(const int16_t *samples, int num_samples)
