@@ -519,12 +519,91 @@ static unsigned long g_pb_words;
 static double g_pb_t0;
 void nv2a_pb_time_begin(void);
 void nv2a_pb_time_end(unsigned words);
-void nv2a_pb_time_begin(void) { if (PROF_ON()) g_pb_t0 = prof_now(); }
+
+/* Per-frame overlap accounting (RECOMP_PB_OVERLAP): of each frame's wall
+ * time, how much the pushbuffer walk itself accounts for. The rest is
+ * guest production the walk did not overlap, pacing idle and ack
+ * cadence -- the ceiling on what letting the guest run a frame ahead
+ * could buy back. Frames close at flips (attributed to the segment the
+ * flip lands in, so a frame's walk can be off by one segment) and the
+ * medians print every ten seconds. Heavy frames (walk >= 8 ms, wall
+ * <= 100 ms) are reported apart: paced light frames pad their
+ * non-walk share up to the frame cap, which is not headroom. */
+uint32_t nv2a_gl_flips(void);
+#define O_MAX 1024
+static int      o_on = -1;
+static double   o_seg_t0, o_frame_walk, o_last_flip_t, o_last_report;
+static uint32_t o_last_flips;
+static double   o_wall[O_MAX], o_walk[O_MAX];
+static int      o_n;
+
+static int o_cmp(const void *a, const void *b)
+{
+    double d = *(const double *)a - *(const double *)b;
+    return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+static double o_med(double *v, int n)
+{
+    if (!n) return 0.0;
+    qsort(v, (size_t)n, sizeof(double), o_cmp);
+    return v[n / 2];
+}
+static void o_report(double now)
+{
+    static double wall[O_MAX], walk[O_MAX], gap[O_MAX];
+    static double hwall[O_MAX], hwalk[O_MAX], hgap[O_MAX];
+    int i, hn = 0;
+    for (i = 0; i < o_n; i++) {
+        wall[i] = o_wall[i] * 1e3; walk[i] = o_walk[i] * 1e3;
+        gap[i] = wall[i] - walk[i];
+        if (o_walk[i] >= 0.008 && o_wall[i] <= 0.100) {
+            hwall[hn] = wall[i]; hwalk[hn] = walk[i]; hgap[hn] = gap[i]; hn++;
+        }
+    }
+    fprintf(stderr,
+        "[PBOVERLAP] %d frames: frame %.1f ms, walk %.1f ms, non-walk %.1f ms"
+        " (median) | heavy %d: frame %.1f ms, walk %.1f ms, non-walk %.1f ms\n",
+        o_n, o_med(wall, o_n), o_med(walk, o_n), o_med(gap, o_n),
+        hn, o_med(hwall, hn), o_med(hwalk, hn), o_med(hgap, hn));
+    fflush(stderr);
+    o_n = 0;
+    o_last_report = now;
+}
+static void o_begin(void)
+{
+    if (o_on < 0) o_on = getenv("RECOMP_PB_OVERLAP") ? 1 : 0;
+    if (o_on) o_seg_t0 = prof_now();
+}
+static void o_end(void)
+{
+    double now;
+    uint32_t f;
+    if (!o_on) return;
+    now = prof_now();
+    o_frame_walk += now - o_seg_t0;
+    f = nv2a_gl_flips();
+    if (o_last_flip_t == 0.0) { o_last_flip_t = now; o_last_flips = f; }
+    else if (f != o_last_flips) {
+        if (o_n < O_MAX) {
+            o_wall[o_n] = now - o_last_flip_t;
+            o_walk[o_n] = o_frame_walk;
+            o_n++;
+        }
+        o_frame_walk = 0.0;
+        o_last_flip_t = now;
+        o_last_flips = f;
+    }
+    if (o_n && (o_n >= O_MAX || now - o_last_report >= 10.0)) o_report(now);
+}
+
+void nv2a_pb_time_begin(void) { if (PROF_ON()) g_pb_t0 = prof_now(); o_begin(); }
 void nv2a_pb_time_end(unsigned words)
 {
-    if (!PROF_ON()) return;
-    g_pb_time += prof_now() - g_pb_t0;
-    g_pb_words += words;
+    if (PROF_ON()) {
+        g_pb_time += prof_now() - g_pb_t0;
+        g_pb_words += words;
+    }
+    o_end();
 }
 
 static void prof_report(void)
