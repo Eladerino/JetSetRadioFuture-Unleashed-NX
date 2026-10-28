@@ -2286,7 +2286,12 @@ void sub_00194210(void)
     uint32_t seen = *intr;
     sub_00194210_gen();
     *intr &= ~seen;
-    if (!*intr) *pmc &= ~0x1000u;
+    /* Atomic: the timer thread sets PMC_INTR_0's bits (the next software
+     * method's, a vblank's) while this runs on the game's thread; a plain
+     * read-modify-write could wipe a bit set in between, and a software
+     * method whose bit is gone is never acknowledged: the make-space wait at
+     * 0x0019151B sleeps for good. */
+    if (!*intr) __atomic_fetch_and(pmc, ~0x1000u, __ATOMIC_ACQ_REL);
     g_eax = *intr;
     if (seen & 0x00100000u) xbox_nv2a_software_method_done();
 }
