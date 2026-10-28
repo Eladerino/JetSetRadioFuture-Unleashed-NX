@@ -189,13 +189,25 @@ static uint32_t s_tot_calls, s_tot_returns;
  * a segment under the walk (on the Switch: a stray CALL into unmapped
  * memory). So, with that thread on, the ack thread copies what it is
  * about to acknowledge first (nv2a_pb_snapshot_take) and the walk reads
- * those words from the copy. Anything outside the copy -- a call's
- * target, a jump's -- is still read where it is.
+ * those words from the copy. A range the walk reaches that the copy
+ * does not cover -- a call's target, a jump's landing past the head
+ * window -- is copied on entry to the walk instead (snap_ensure
+ * below): a subroutine can take milliseconds of GL work to walk, and
+ * reading it live tears it across whatever the title writes meanwhile.
+ * The escrow is one consistent moment per range, under the same fence
+ * discipline the walk's data reads already rely on.
  */
+#define SNAP_MAX_WIN 16
 static uint8_t *s_snap;
 static size_t   s_snap_cap;
-static struct { uint32_t lo, hi; size_t off; } s_win[2];
+static struct { uint32_t lo, hi; size_t off; } s_win[SNAP_MAX_WIN];
 static int      s_nwin;
+/* Set by nv2a_pb_snapshot_take: the ack loop is taking the pre-GET copy
+ * this pass, so on-demand windows belong to the same moment and the
+ * next pass's take resets them. Never set where nothing takes the copy
+ * (the flush-ack thread off), and then the walk reads live throughout,
+ * exactly as it did before the copy existed. */
+static int      s_snap_live;
 
 static void snap_add(uint32_t lo, uint32_t hi)
 {
@@ -203,7 +215,7 @@ static void snap_add(uint32_t lo, uint32_t hi)
     size_t off = s_nwin ? s_win[s_nwin - 1].off + (s_win[s_nwin - 1].hi - s_win[s_nwin - 1].lo) : 0;
     size_t n;
     if (hi > (0x80000000u | (64u << 20))) hi = 0x80000000u | (64u << 20);
-    if (s_nwin >= 2 || hi <= lo) return;
+    if (s_nwin >= SNAP_MAX_WIN || hi <= lo) return;
     n = hi - lo;
     if (off + n > s_snap_cap) {
         size_t cap = (off + n + 0xFFFFu) & ~(size_t)0xFFFFu;
@@ -219,6 +231,38 @@ static void snap_add(uint32_t lo, uint32_t hi)
     s_nwin++;
 }
 
+/* Copy whatever of [lo, hi) the current windows do not already cover,
+ * so a walk of that range reads the copy throughout. Bounded per call;
+ * a range past the bound, or one that arrives with the window table
+ * full, keeps the live reads it had. RECOMP_PB_CALLSNAP=0 turns the
+ * on-demand copy off. */
+static void snap_ensure(uint32_t lo, uint32_t hi)
+{
+    static int on = -1;
+    uint32_t cur = lo;
+    size_t budget = 0x400000u;
+    if (on < 0) { const char *e = getenv("RECOMP_PB_CALLSNAP");
+                  on = e ? atoi(e) != 0 : 1; }
+    if (!on || !s_snap_live) return;
+    if (hi > (0x80000000u | (64u << 20))) hi = 0x80000000u | (64u << 20);
+    while (cur < hi) {
+        uint32_t covered_to = 0, next_lo = hi;
+        int i, before;
+        for (i = 0; i < s_nwin; i++) {
+            if (cur >= s_win[i].lo && cur < s_win[i].hi) { covered_to = s_win[i].hi; break; }
+            if (s_win[i].lo > cur && s_win[i].lo < next_lo) next_lo = s_win[i].lo;
+        }
+        if (covered_to) { cur = covered_to; continue; }
+        if (next_lo - cur > budget) next_lo = cur + (uint32_t)budget;
+        if (next_lo <= cur) return;
+        before = s_nwin;
+        snap_add(cur, next_lo);
+        if (s_nwin == before) return;   /* table full or copy refused */
+        budget -= next_lo - cur;
+        cur = next_lo;
+    }
+}
+
 /* last_put and put as the ack loop reads them (physical). Mirrors the
  * ranges its walk will cover. */
 void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put);
@@ -226,6 +270,7 @@ void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
 {
     uint32_t from = 0x80000000u | (last_put & 0x0FFFFFFFu);
     uint32_t to   = 0x80000000u | (put & 0x0FFFFFFFu);
+    s_snap_live = 1;
     s_nwin = 0;
     if (!last_put || put == last_put) return;
     if (to > from) {
@@ -292,6 +337,12 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
         end_va = 0x84000000u;
     if (start_va >= 0x84000000u && start_va < 0xF0000000u)
         end_va = start_va;                /* nothing there to walk */
+
+    /* The submitted span is already in the copy (nv2a_pb_snapshot_take);
+     * a call target or a jump's landing past the head window may not be.
+     * Cover the range this walk is about to read before it reads it. */
+    if (start_va >= 0x80000000u && end_va > start_va)
+        snap_ensure(start_va, end_va);
 
     while (va < end_va && words < 0x100000u) {
         uint32_t w = pb_word(mem, va);
