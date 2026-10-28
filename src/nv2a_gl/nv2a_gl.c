@@ -5248,6 +5248,56 @@ static void do_draw(void)
     }
 }
 
+/* RECOMP_GL_MERGEPROBE: how many issued draws could have been folded
+ * into the draw before them. A fold needs the same program, primitive,
+ * target and texture stages, the same kept vertex buffer, and -- the
+ * part that usually says no -- the same constants and render state,
+ * fingerprinted whole (the uniform block, the constant attributes, the
+ * render state). "Same-state" is everything but the fingerprint;
+ * "foldable" is everything with it; "other-buffer" is foldable but for
+ * the buffer, which a fold would first have to combine. Counts print
+ * as deltas every 16384 issued draws. A probe: it draws nothing
+ * differently. */
+static void merge_probe_note(int slot, uint32_t vc_vb, int mode, int seq)
+{
+    static int on = -1;
+    static uint32_t p_vb, p_rt, p_tex[4];
+    static int p_slot, p_mode, p_seq, p_valid;
+    static uint64_t p_fp;
+    static unsigned long n_draw, n_a, n_b, n_c, since;
+    uint64_t fp;
+    int same_state, st;
+    if (on < 0) on = getenv("RECOMP_GL_MERGEPROBE") ? 1 : 0;
+    if (!on) return;
+    fp = vc_hash(&S.u, sizeof S.u, 0x9E3779B97F4A7C15ull);
+    fp = vc_hash(S.const_attr, sizeof S.const_attr, fp);
+    fp = vc_hash(&g_draw_rs, sizeof g_draw_rs, fp);
+    n_draw++;
+    same_state = p_valid && slot == p_slot && mode == p_mode && seq == p_seq
+              && g_cur_rt == p_rt;
+    for (st = 0; st < 4; st++)
+        if ((S.tex[st].enabled ? S.tex[st].offset : 0u) != p_tex[st])
+            same_state = 0;
+    if (same_state && vc_vb && vc_vb == p_vb) {
+        n_a++;
+        if (fp == p_fp) n_b++;
+    } else if (same_state && vc_vb && fp == p_fp) {
+        n_c++;
+    }
+    p_valid = 1; p_slot = slot; p_mode = mode; p_seq = seq;
+    p_vb = vc_vb; p_rt = g_cur_rt; p_fp = fp;
+    for (st = 0; st < 4; st++) p_tex[st] = S.tex[st].enabled ? S.tex[st].offset : 0u;
+    if (++since >= 16384) {
+        fprintf(stderr, "[MERGEPROBE] %lu draws: same-state %lu (%.1f%%), "
+                "foldable %lu (%.1f%%), same-state other-buffer %lu (%.1f%%)\n",
+                n_draw, n_a, 100.0 * (double)n_a / (double)n_draw,
+                n_b, 100.0 * (double)n_b / (double)n_draw,
+                n_c, 100.0 * (double)n_c / (double)n_draw);
+        fflush(stderr);
+        n_draw = n_a = n_b = n_c = 0; since = 0;
+    }
+}
+
 static void do_draw_body(void)
 {
     static float *vbuf;
@@ -7822,6 +7872,7 @@ static void do_draw_body(void)
         } }
     }
     if (!curtain_skip && !g_surf_lost) {
+        merge_probe_note(slot, vc_vb, mode, vc_seq);
         PROF_T0();
         if (vc_vb && !vc_seq) G->draw_indexed(mode, out_n, vc_i32);
         else                  G->draw(mode, out_n);
