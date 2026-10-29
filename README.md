@@ -497,6 +497,9 @@ xemu is LGPL-2.1-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
   [docs/xboxrecomp-toolkit.md](docs/xboxrecomp-toolkit.md).
 - [xemu](https://xemu.app) — the NV2A and MCPX APU hardware models, without
   which none of the graphics or audio would exist.
+- Dear ImGui — the library the in-game menu is drawn with.
+- [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
+  in-game menu's design and code were adapted from.
 - The title lettering in the banner is set in
   [Nise JSRF](https://www.dafont.com/nisejsrf.font), a free font by Yoyo.
 - Smilebit and SEGA, who made the game.

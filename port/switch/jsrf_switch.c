@@ -102,6 +102,10 @@ Result __wrap_threadCreate(Thread *t, ThreadFunc entry, void *arg,
 #define JSRF_VERSION "dev"
 #endif
 
+/* The in-game menu's About box asks the port for its version
+ * (src/menu/menu_sdl.cpp, which holds only a weak reference). */
+const char *recomp_version(void) { return JSRF_VERSION; }
+
 /* libnx configuration, overridden by giving the weak symbols strong
  * definitions here (the same route the other Switch recomp ports
  * take):

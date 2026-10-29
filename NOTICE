@@ -117,4 +117,15 @@ Reference material (no code taken)
   for them.
 
 
+Dear ImGui — in-game menu library
+----------------------------------
+
+  third_party/imgui is Dear ImGui by Omar Cornut (MIT, see
+  LICENSES/imgui-MIT.txt), vendored unmodified. The menu drawn with
+  it (src/menu) is adapted from the in-game menu of JSRF-PC
+  (https://github.com/spriteice/JSRF-PC), a fork of the same upstream
+  project, under the same MIT terms as the rest of this project's own
+  code (see LICENSE).
+
+
 Contributors to xboxrecomp itself are credited in CONTRIBUTORS.md.

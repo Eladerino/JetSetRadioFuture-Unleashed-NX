@@ -503,6 +503,49 @@ void xbox_InputInit(void)
     open_controllers();
 }
 
+#if defined(XBOXRECOMP_MENU)
+/* The in-game menu (src/menu): 1 while it has the controls, 0 while it
+ * is shut, -1 when there is none. Linked in through the renderer. */
+extern int xbox_MenuIsOpen(void);
+#endif
+#if defined(__SWITCH__) && defined(XBOXRECOMP_MENU)
+extern void xbox_MenuSetOpen(int on);
+
+/* The menu's button, watched on player one's polls: Minus, which SDL
+ * calls Back. A tap toggles the menu, a half-second hold toggles it
+ * while held, and L+R+Minus toggles it at once; the press is the
+ * port's in every case, never the game's (its bit is masked out of
+ * the state below). Polled here because the pad reaches this layer by
+ * polling, not by events the menu could take. */
+static void menu_button_tick(SDL_GameController *c)
+{
+    static int was_down, fired;
+    static Uint32 down_at;
+    int down;
+    Uint32 now;
+
+    if (xbox_MenuIsOpen() < 0) return;      /* no menu in this window */
+    if (!c || !SDL_GameControllerGetAttached(c)) { was_down = 0; return; }
+    down = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK) ? 1 : 0;
+    now = SDL_GetTicks();
+    if (down && !was_down) {
+        down_at = now;
+        fired = 0;
+        if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
+         && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) {
+            xbox_MenuSetOpen(!xbox_MenuIsOpen());
+            fired = 1;
+        }
+    } else if (down && !fired && now - down_at >= 500) {
+        xbox_MenuSetOpen(!xbox_MenuIsOpen());
+        fired = 1;
+    } else if (!down && was_down && !fired) {
+        xbox_MenuSetOpen(!xbox_MenuIsOpen());
+    }
+    was_down = down;
+}
+#endif
+
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 {
     WORD out = 0;
@@ -517,6 +560,19 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     memset(pState, 0, sizeof(XBOX_INPUT_STATE));
     memset(analog, 0, sizeof analog);
     memset(axes, 0, sizeof axes);
+
+#if defined(__SWITCH__) && defined(XBOXRECOMP_MENU)
+    if (dwPort == 0) menu_button_tick(g_pads[0]);
+#endif
+#if defined(XBOXRECOMP_MENU)
+    /* While the menu is up, the game gets a connected, silent pad: the
+     * menu is navigating with these same buttons. */
+    if (xbox_MenuIsOpen() > 0) {
+        g_controller_connected[dwPort] = TRUE;
+        pState->dwPacketNumber = ++g_packet[dwPort];
+        return ERROR_SUCCESS;
+    }
+#endif
 
     if (!host_pad_off()) {
         SDL_GameController *c;
@@ -534,6 +590,9 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) out |= XBOX_GAMEPAD_DPAD_RIGHT;
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START))      out |= XBOX_GAMEPAD_START;
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK))       out |= XBOX_GAMEPAD_BACK;
+#if defined(__SWITCH__) && defined(XBOXRECOMP_MENU)
+            out &= ~(WORD)XBOX_GAMEPAD_BACK;   /* Minus is the menu's button */
+#endif
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSTICK))  out |= XBOX_GAMEPAD_LEFT_THUMB;
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) out |= XBOX_GAMEPAD_RIGHT_THUMB;
             /* analog[] in the order the Mac's backend uses:

@@ -26,6 +26,12 @@ endif()
 
 project(jsrf_recomp C)
 
+# The in-game menu (src/menu) is the tree's only C++: Dear ImGui and the
+# menu around it, built when the runtime's NV2A_GL_MENU is on (the Switch
+# build among them). Enabled here, before the runtime is added, so its
+# library can be built under this project.
+enable_language(CXX)
+
 # Nintendo Switch (devkitPro toolchain), as in the runtime's CMakeLists.
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     set(SWITCH TRUE)

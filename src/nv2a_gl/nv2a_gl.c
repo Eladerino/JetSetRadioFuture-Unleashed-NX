@@ -32,6 +32,9 @@
 #include "nv2a_psh.h"
 #include "nv2a_backend.h"
 #include "nv2a_shader_cache.h"
+#if defined(XBOXRECOMP_MENU)
+#include "menu_sdl.h"   /* the in-game menu (src/menu), drawn over this window */
+#endif
 
 /*
  * Two ways to get a 3.3 core context.
@@ -1409,6 +1412,15 @@ static int gl_init(uint32_t w, uint32_t h)
             (const char *)glGetString(GL_RENDERER),
             (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION));
 
+#if defined(XBOXRECOMP_MENU)
+    /* The in-game menu starts with the window: it draws into this
+     * context at present time (sdl_present) and takes its events from
+     * sdl_pump. If ImGui cannot start, the game runs without it. */
+    xbox_MenuInit(g_window, g_sdl_ctx,
+                  (const char *)glGetString(GL_RENDERER),
+                  (const char *)glGetString(GL_VERSION));
+#endif
+
     return gl_init_common(w, h);
 }
 
@@ -1986,6 +1998,12 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
     glBlitFramebuffer(0, 0, sw, sh,
                       (ww - dw) / 2, (wh - dh) / 2, (ww - dw) / 2 + dw, (wh - dh) / 2 + dh,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#if defined(XBOXRECOMP_MENU)
+    /* The menu over the fitted frame, in the window's framebuffer,
+     * before the swap. Both calls are a flag test while it is shut. */
+    xbox_MenuFrame();
+    xbox_MenuDraw();
+#endif
     SDL_GL_SwapWindow(g_window);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)rfb);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)dfb);
@@ -2391,6 +2409,9 @@ static void sdl_pump(void)
         if (want != nv_window_pref_rstick_camera()) sdl_toggle_rstick_camera();
     }
     while (SDL_PollEvent(&ev)) {
+#if defined(XBOXRECOMP_MENU)
+        if (xbox_MenuEvent(&ev)) continue;      /* the menu's event, not the game's */
+#endif
         switch (ev.type) {
         case SDL_QUIT:
             fprintf(stderr, "  [GL] window closed; stopping\n");

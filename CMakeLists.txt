@@ -66,6 +66,14 @@ if(NOT WIN32 OR XBOXRECOMP_WIN_GL)
     add_subdirectory(src/nv2a_gl)
 endif()
 
+# The in-game menu (src/menu): nv2a_gl links it when NV2A_GL_MENU is on
+# (src/nv2a_gl/CMakeLists.txt, which has just run); the library is added
+# here, after that directory. It is the tree's only C++.
+if(NV2A_GL_MENU)
+    enable_language(CXX)
+    add_subdirectory(src/menu)
+endif()
+
 # USB: MCPX OHCI host controllers. A title's XAPI is statically linked and
 # drives these registers directly, so a pad only exists if they do.
 add_subdirectory(src/usb)
