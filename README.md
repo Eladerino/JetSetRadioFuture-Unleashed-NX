@@ -27,6 +27,12 @@ a homebrew `.nro` for a console running Atmosphère. Everything else in
 this README describes the upstream project and its downloads; there is
 no Switch download.
 
+Like the upstream project, this is an unofficial fan project: it is
+not affiliated with or endorsed by SEGA or Smilebit, *Jet Set Radio
+Future* is © SEGA, and the licences in this repository cover the code
+only. No game data is included or distributed; see
+[Legality](#legality).
+
 **It boots and plays.** Logos, title, saving and loading, character
 select and gameplay all work on real hardware. The areas tested most
 (the hideout, Dogenzaka Hill, Shibuya Terminal) run at 40-60 fps on an
@@ -34,7 +40,7 @@ overclocked console (CPU 1963 / GPU 1152 / memory 2133 MHz), and light
 scenes reach the game's 60 fps cap; stock clocks will be slower. It has
 not been played from start to finish, so later areas should be expected
 to have bugs. The port's status and open issues are kept in the
-[Switch port notes](docs/switch-handoff-2026-10-25.md), and how it is
+[Switch port notes](docs/switch-port.md), and how it is
 tested in the [testing notes](docs/switch-testing-notes.md).
 
 - **You build it yourself, from your own disc.** The recompiler turns the
