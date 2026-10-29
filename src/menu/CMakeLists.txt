@@ -21,6 +21,13 @@ target_include_directories(xbox_menu PRIVATE ${_imgui})
 target_compile_definitions(xbox_menu PUBLIC XBOXRECOMP_MENU=1)
 find_package(SDL2 REQUIRED)
 target_link_libraries(xbox_menu PRIVATE SDL2::SDL2 ${CMAKE_DL_LIBS})
+# The engine takes its GL headers from SDL2's include directories
+# (src/nv2a_gl adds ${SDL2_INCLUDE_DIRS} to its own includes): on the
+# Switch those directories are the portlibs include root, which is
+# also where Mesa's GLES3 headers live, and the SDL2::SDL2 target
+# alone does not carry that root. The OpenGL backend includes
+# <GLES3/gl3.h>, so take the same directories here.
+target_include_directories(xbox_menu PRIVATE ${SDL2_INCLUDE_DIRS})
 # Nothing here may need the C++ runtime library: the engine still links
 # against libc alone.
 target_compile_options(xbox_menu PRIVATE
