@@ -26,6 +26,7 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_opengl3.h"
 #include <stdio.h>
+#include <string.h>
 
 /* The GLSL ImGui's shaders are compiled as: the context the window asks for
  * (nv2a_gl.c's gl_init), not ImGui's default guess. */
@@ -102,10 +103,11 @@ static const char *about_text(void)
     return buf;
 }
 
-/* The game started again, as a new render scale starts it (nv2a_gl.c): what
- * waits for the next start applies, Developer's switches among them. Not
- * offered where the game cannot start itself again (port/main.c's). */
-extern "C" void nv_window_restart(void);
+/* The game started again, as a new render scale starts it (nv2a_gl.c):
+ * the host's own restart, which is what the wait-for-the-next-start
+ * settings (the Developer's switches among them) apply through. Weak:
+ * a host that cannot start itself again simply does not offer the
+ * Restart row; the desktop host's is port/main.c's. */
 extern "C" void recomp_restart_self(void) __attribute__((weak));
 
 /* The window's close button: sdl_pump's SDL_QUIT, which reports and exits. */
@@ -121,7 +123,7 @@ static void exit_game(void)
 static const XBOX_MENU_ITEM k_file[] = {
     { XBOX_MENU_FILE, XBOX_ITEM_INFO,      "About", NULL, NULL,      NULL, NULL, 0, about_text, NULL, NULL, NULL, 0, 0, 0, NULL, 0 },
     { XBOX_MENU_FILE, XBOX_ITEM_SEPARATOR, NULL,    NULL, NULL,      NULL, NULL, 0, NULL,       NULL, NULL, NULL, 0, 0, 0, NULL, 0 },
-    { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Restart", NULL, nv_window_restart, NULL, NULL, 0, NULL,
+    { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Restart", NULL, recomp_restart_self, NULL, NULL, 0, NULL,
       "The game restarts, losing unsaved progress.", NULL, NULL, 0, 0, 0, NULL, 0 },
     { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Exit",  NULL, exit_game, NULL, NULL, 0, NULL,
       "Unsaved progress is lost.", NULL, NULL, 0, 0, 0, NULL, 0 },
@@ -180,12 +182,16 @@ extern "C" int xbox_MenuInit(SDL_Window *window, void *gl_context, const char *a
     if (!g_mu) return 0;
     g_about_gpu = about_gpu;
     g_about_gl = about_gl;
-    /* Restart only where the game can start itself again, as Render scale. */
+    /* Restart only where the game can start itself again, as Render
+     * scale: the row is the one named so, and it goes in only when the
+     * host provided recomp_restart_self. (Its callback is that same
+     * weak symbol, so with no host restart it reads NULL, the same as
+     * About's; the name is what tells the row apart.) */
     {
         XBOX_MENU_ITEM rows[sizeof k_file / sizeof k_file[0]];
         int n = 0;
         for (const XBOX_MENU_ITEM &it : k_file)
-            if (it.run != nv_window_restart || recomp_restart_self) rows[n++] = it;
+            if (!it.label || strcmp(it.label, "Restart") != 0 || recomp_restart_self) rows[n++] = it;
         xbox_MenuAdd(rows, n);
     }
     g_ready = 1;
