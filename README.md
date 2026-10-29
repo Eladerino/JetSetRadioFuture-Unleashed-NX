@@ -35,23 +35,30 @@ only. No game data is included or distributed; see
 [Legality](#legality).
 
 **It boots and plays.** Logos, title, saving and loading, character
-select and gameplay all work on real hardware. The areas tested most
-(the hideout, Dogenzaka Hill, Shibuya Terminal) run at 40-60 fps on an
-overclocked console (CPU 1963 / GPU 1152 / memory 2133 MHz), and light
-scenes reach the game's 60 fps cap; stock clocks will be slower. It has
-not been played from start to finish, so later areas should be expected
-to have bugs. The port's status and open issues are kept in the
+select and gameplay all work on real hardware. Frame rates in the
+areas tested most, on an overclocked console (CPU 1963 / GPU 1152 /
+memory 2133 MHz): the hideout and other light scenes hold the game's
+60 fps cap, and the busiest districts, Shibuya Terminal and
+Dogenzaka Hill, average around 40 fps in their crowded sightlines.
+At stock clocks the same areas run slower. It has not been played
+from start to finish, so later areas should be expected to have
+bugs. The port's status and open issues are kept in the
 [Switch port notes](docs/switch-port.md), and how it is
 tested in the [testing notes](docs/switch-testing-notes.md).
+Switch bugs are best reported as an issue in this repository, with
+the run's `Logs/last-run.log` attached.
 
-- **Prebuilt:** download `jsrf-unleashed.nro` from this repository's
+- **Prebuilt:** download `jsrf-unleashed-switch.zip` from this
+  repository's
   [Releases](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases)
-  page, put it in `sdmc:/switch/jsrf-unleashed/`, and put your game
-  files in the `game/` folder beside it: either the extracted files
-  (`default.xbe` and `Media/`) or a single `.iso` of the US disc, which
-  the first launch unpacks into the folder. The `.nro` is the engine
-  and the recompiled code only; every texture, model, song and video
-  comes from your copy.
+  page and extract it at the root of the SD card. It puts
+  `jsrf-unleashed.nro`, `options.txt` and an empty `game/` folder in
+  `sdmc:/switch/jsrf-unleashed/`. Then put your game files in that
+  `game/` folder: either the extracted files (`default.xbe` and
+  `Media/`) or a single `.iso` of the US disc, which the first launch
+  unpacks into the folder. The `.nro` is the engine and the
+  recompiled code only; every texture, model, song and video comes
+  from your copy.
 - **Or build it yourself, from your own disc.** The recompiler turns
   the `default.xbe` on your disc into C on your machine, and that code,
   the game files and the built `.nro` stay there. None of them are in
@@ -68,14 +75,36 @@ tested in the [testing notes](docs/switch-testing-notes.md).
   the engine and lays out a folder to copy to
   `sdmc:/switch/jsrf-unleashed/`. `SKIP_RECOMP=1` reuses the generated
   code for engine-only rebuilds.
-- **Settings live in `options.txt`** beside the `.nro`: plain text,
-  written once by the first build and never overwritten afterwards.
-  It covers widescreen (16:9 in gameplay; logos and the title screen
-  stay 4:3), internal resolution (1x to 4x), anisotropic filtering, the
-  60 fps cap, the shader cache, and `fast_gpu`, the asynchronous GPU
-  path, which is on by default on Switch; `fast_gpu=0` falls back to
-  the serial path.
-- **Each run writes `Logs/last-run.log`** in the game folder (the
+- **Settings live in `options.txt`** beside the `.nro`: plain text
+  that ships in the release and is never overwritten by an update, so
+  copying a new `.nro` over the old one keeps your settings. It
+  covers widescreen (16:9 in gameplay; logos and the title screen
+  stay 4:3), internal resolution (1x to 4x), anisotropic filtering,
+  the 60 fps cap, the shader cache, and `fast_gpu`, the asynchronous
+  GPU path, which is on by default on Switch; `fast_gpu=0` falls back
+  to the serial path.
+- **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
+  together) to open it over the game. It holds the display settings
+  (render scale, frame rate), the graphics settings (widescreen,
+  SMAA, MSAA, anisotropic filtering, shadow volumes) and the
+  right-stick camera toggle. Most apply at once; choices are
+  remembered between runs, and `options.txt` still wins at startup
+  for anything it sets. File > About lists the build and the credits.
+- **Performance and overclocking:** the recommended settings are the
+  shipped defaults (render scale 1x, SMAA on, MSAA off, anisotropic
+  filtering 4x, shadow volumes drawn, the 60 fps cap). In crowded
+  areas, the menu's Shadow volumes > Skip characters is the one
+  change worth trying: it trades character shadows for frame rate.
+  The frame rates above were measured with the console heavily
+  overclocked, well past Nintendo's stock clocks (CPU 1020 / GPU up
+  to 921 / memory 1600 MHz). **Overclocking is optional and at your
+  own risk:** it makes the console run hotter, drains the battery
+  faster, can cause crashes and may shorten the hardware's life, and
+  launch-model consoles have the least headroom. The standard tool
+  is [sys-clk](https://github.com/retronx-team/sys-clk), whose own
+  limits are lower than the clocks used here. The port runs at stock
+  clocks too, just slower.
+- **Each run writes `Logs/last-run.log`** in the port's folder (the
   previous run is kept as `previous-run.log`). After a run,
   [`tools/switch/prof.sh`](tools/switch/prof.sh) on the build machine
   turns the log's profile into a per-function breakdown, resolved
