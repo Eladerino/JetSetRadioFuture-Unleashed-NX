@@ -12,6 +12,16 @@ add_library(xbox_input STATIC ${XBOX_INPUT_SOURCES})
 
 target_include_directories(xbox_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# xinput_device.c carries the in-game menu's pad handling (opening it
+# from the pad, and keeping the pad from the game while it is open)
+# under XBOXRECOMP_MENU. That define is xbox_menu's to give and it
+# reaches the modules that link xbox_menu; this one does not, so take
+# it here under the same condition that builds the menu. NV2A_GL_MENU
+# is an option, so it reads the same in this directory.
+if(NV2A_GL_MENU)
+    target_compile_definitions(xbox_input PRIVATE XBOXRECOMP_MENU=1)
+endif()
+
 if(WIN32 AND NOT XBOXRECOMP_WIN_GL)
     target_link_libraries(xbox_input PUBLIC platform xinput)
 elseif(APPLE)
