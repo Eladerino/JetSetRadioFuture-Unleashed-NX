@@ -36,6 +36,9 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 - fast_gpu is the default on Switch (see the testing notes for
   the machinery and its guards). The serial path remains
   available with fast_gpu=0.
+- An in-game menu (hold Minus) carries the display, graphics
+  and controller settings; most apply live, and choices are
+  remembered between runs.
 - The renderer drops, and logs, any draw whose index range runs
   outside guest memory, instead of faulting in the vertex cache.
 - The lifted code keeps guest registers in host registers
