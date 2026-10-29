@@ -100,9 +100,12 @@ the run's `Logs/last-run.log` attached.
   to 921 / memory 1600 MHz). **Overclocking is optional and at your
   own risk:** it makes the console run hotter, drains the battery
   faster, can cause crashes and may shorten the hardware's life, and
-  launch-model consoles have the least headroom. The standard tool
-  is [sys-clk](https://github.com/retronx-team/sys-clk), whose own
-  limits are lower than the clocks used here. The port runs at stock
+  launch-model consoles have the least headroom. The clocks used
+  here were set with
+  [HorizonOC](https://github.com/Horizon-OC/Horizon-OC/releases);
+  the standard tool is
+  [sys-clk](https://github.com/retronx-team/sys-clk), whose own
+  limits are lower than that. The port runs at stock
   clocks too, just slower.
 - **Each run writes `Logs/last-run.log`** in the port's folder (the
   previous run is kept as `previous-run.log`). After a run,
