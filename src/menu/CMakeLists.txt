@@ -29,6 +29,16 @@ target_compile_definitions(xbox_menu PRIVATE
     IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_DEBUG_TOOLS
     IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
     $<$<BOOL:${NV2A_GLES}>:IMGUI_IMPL_OPENGL_ES3>)
+# The generator expression above only sees NV2A_GLES when it was set as
+# a cache or parent-scope variable. The engine's own CMakeLists sets it
+# with a plain set() inside src/nv2a_gl's directory scope (on for
+# Android and the Switch), which this directory cannot see: there the
+# expression yields nothing, the backend builds its desktop GL loader
+# (which includes dlfcn.h; the Switch does not have it) and the menu's
+# shaders get the desktop GLSL version. Name those targets directly.
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    target_compile_definitions(xbox_menu PRIVATE IMGUI_IMPL_OPENGL_ES3)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # C++ compilers define _GNU_SOURCE, with which glibc 2.38's headers
     # turn sscanf into __isoc23_sscanf@GLIBC_2.38 -- past the 2.34 floor.
