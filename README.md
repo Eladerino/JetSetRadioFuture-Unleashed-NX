@@ -24,8 +24,9 @@ you own.
 This fork adds a Nintendo Switch target to the upstream project,
 [JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed):
 a homebrew `.nro` for a console running Atmosphère. Everything else in
-this README describes the upstream project and its downloads; there is
-no Switch download.
+this README describes the upstream project and its downloads. The
+Switch port can be had two ways, a prebuilt `.nro` or a build from
+source; both need the files from your own copy of the game.
 
 Like the upstream project, this is an unofficial fan project: it is
 not affiliated with or endorsed by SEGA or Smilebit, *Jet Set Radio
@@ -43,10 +44,18 @@ to have bugs. The port's status and open issues are kept in the
 [Switch port notes](docs/switch-port.md), and how it is
 tested in the [testing notes](docs/switch-testing-notes.md).
 
-- **You build it yourself, from your own disc.** The recompiler turns the
-  `default.xbe` on your disc into C on your machine, and that code, the
-  game files and the built `.nro` stay there. None of them are in this
-  repository and none should be added to it.
+- **Prebuilt:** download `jsrf-unleashed.nro` from this repository's
+  [Releases](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases)
+  page, put it in `sdmc:/switch/jsrf-unleashed/`, and put your game
+  files in the `game/` folder beside it: either the extracted files
+  (`default.xbe` and `Media/`) or a single `.iso` of the US disc, which
+  the first launch unpacks into the folder. The `.nro` is the engine
+  and the recompiled code only; every texture, model, song and video
+  comes from your copy.
+- **Or build it yourself, from your own disc.** The recompiler turns
+  the `default.xbe` on your disc into C on your machine, and that code,
+  the game files and the built `.nro` stay there. None of them are in
+  this repository and none should be added to it.
 - **Launch it through title takeover** (hold R while starting any
   installed game, then pick it in the homebrew menu). Applet mode,
   through the Album, does not give homebrew the memory or the system
