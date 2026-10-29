@@ -20,7 +20,13 @@ target_include_directories(xbox_menu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(xbox_menu PRIVATE ${_imgui})
 target_compile_definitions(xbox_menu PUBLIC XBOXRECOMP_MENU=1)
 find_package(SDL2 REQUIRED)
-target_link_libraries(xbox_menu PRIVATE SDL2::SDL2 ${CMAKE_DL_LIBS})
+target_link_libraries(xbox_menu PRIVATE SDL2::SDL2)
+# The desktop GL loader opens libGL with dlopen, which is what
+# ${CMAKE_DL_LIBS} is for; the ES 3 builds compile that loader out,
+# and the Switch has no libdl to link in the first place.
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    target_link_libraries(xbox_menu PRIVATE ${CMAKE_DL_LIBS})
+endif()
 # The engine takes its GL headers from SDL2's include directories
 # (src/nv2a_gl adds ${SDL2_INCLUDE_DIRS} to its own includes): on the
 # Switch those directories are the portlibs include root, which is
