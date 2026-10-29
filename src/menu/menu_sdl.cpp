@@ -59,20 +59,34 @@ static volatile int g_busy_total;
  * with it; the runtime is not. */
 extern "C" const char *recomp_version(void) __attribute__((weak));
 
-/* File > About, a section at a time: the build, the OS, the graphics card,
- * SDL, OpenGL, Dear ImGui. Every section is written the same way, and so is
- * any added later: its name on a line of its own, then each detail -- the
- * version first, where it has one -- on a line starting with "-", and a blank
- * line between one section and the next (docs/menu-format.md). */
+/* File > About, a section at a time: what the project is and who it
+ * credits, then the build, the OS, the graphics card, SDL, OpenGL, Dear
+ * ImGui. Every section is written the same way, and so is any added later:
+ * its name on a line of its own, then each detail -- the version first,
+ * where it has one -- on a line starting with "-", and a blank line
+ * between one section and the next (docs/menu-format.md). */
 static const char *about_text(void)
 {
-    static char buf[768];
+    static char buf[2048];
     SDL_version built, running;
     SDL_VERSION(&built);
     SDL_GetVersion(&running);
     snprintf(buf, sizeof buf,
              "JSRF Unleashed NX\n"
              "-%s\n\n"
+             "About\n"
+             "-An unofficial fan port of Jet Set Radio Future\n"
+             "-for the Nintendo Switch, rebuilt from the original\n"
+             "-Xbox game by static recompilation. It needs your\n"
+             "-own copy of the game to play, and is not affiliated\n"
+             "-with or endorsed by SEGA.\n\n"
+             "Credits\n"
+             "-Jet Set Radio Future by Smilebit and SEGA\n"
+             "-The Switch port of JetSetRadioFuture-Unleashed\n"
+             "-by JuMatt, built on xboxrecomp by sp00nz and\n"
+             "-the xemu project's NV2A and APU hardware models\n"
+             "-The in-game menu, adapted from JSRF-PC\n"
+             "-by spriteice\n\n"
              "%s\n"
              "-Built with %s\n\n"
              "Graphics\n"
