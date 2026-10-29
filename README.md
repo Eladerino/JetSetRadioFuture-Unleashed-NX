@@ -29,7 +29,7 @@ you own.
 | Linux, x86_64 (glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 36 and newer) | [JSRF-Unleashed-linux-x86_64.tar.gz](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-linux-x86_64.tar.gz) — less tested than the Mac build |
 | iPhone and iPad, iOS 15 or later (iPhone XS or newer recommended) | [JSRF-Unleashed-iOS.ipa](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-iOS.ipa) — less tested on iPads |
 | Windows 10 or 11, 64-bit | [JSRF-Unleashed-windows-x86_64.zip](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-windows-x86_64.zip) — tested under Wine |
-| Android 10 or later, 64-bit, OpenGL ES 3.0 | [JSRF-Unleashed-android-arm64.apk](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-android-arm64.apk) — tested in the Android emulator |
+| Android 10 or later, 64-bit, Snapdragon 8 Gen 1 or newer | [JSRF-Unleashed-android-arm64.apk](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-android-arm64.apk) — tested in the Android emulator |
 
 Every version is on the [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases) page; what changed is in the [changelog](CHANGELOG.md).
 
@@ -188,8 +188,9 @@ resolution (used from the next start). Saves are kept in the game folder (in
 somewhere first. Each run's log is
 `Android/data/com.jumatt.jsrfunleashed/files/Logs/last-run.log`.
 
-It needs Android 10 or later on a 64-bit phone or tablet with OpenGL ES 3.0
-(any from the last several years). So far it has been run in the Android
+It needs Android 10 or later on a 64-bit phone or tablet with a Snapdragon 8
+Gen 1 or newer: the game runs on the phone's processor, so a slower one lags
+whatever the resolution. So far it has been run in the Android
 emulator only — unpacking a disc image, boot, title, attract demo, the
 on-screen controls — not on a phone yet: reports are welcome.
 
