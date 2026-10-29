@@ -455,6 +455,10 @@ two tables of functions its discovery pass had missed (`recomp_seeded.c` and
 functions themselves, and a build whose generated code has neither file gets
 empty tables in their place.
 
+## AI assistance
+
+This project is developed with help from AI coding tools. All code is reviewed and tested by the maintainer before it is committed.
+
 ## Legality
 
 The releases contain the engine: the runtime (the kernel layer and the
