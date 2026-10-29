@@ -7,8 +7,6 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 
 ## Repository rules
 
-- The repository is private and stays private until announced
-  otherwise.
 - The game image, the generated C (port/recomp/gen), build
   outputs (.nro/.elf) and anything derived from the game's binary
   never enter the repository and never leave the build machine.
