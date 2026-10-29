@@ -1310,6 +1310,9 @@ static void pres_start(void);        /* the presenter, below */
 static void sdl_menu_init(void);     /* the menu bar, below */
 static int  sdl_cfg_get(const char *key, int def);   /* the settings file, below */
 #endif
+#if defined(XBOXRECOMP_MENU)
+static void sdl_menu_register(void);   /* this window's in-game menu rows, below */
+#endif
 
 static int gl_init(uint32_t w, uint32_t h)
 {
@@ -1419,6 +1422,7 @@ static int gl_init(uint32_t w, uint32_t h)
     xbox_MenuInit(g_window, g_sdl_ctx,
                   (const char *)glGetString(GL_RENDERER),
                   (const char *)glGetString(GL_VERSION));
+    sdl_menu_register();
 #endif
 
     return gl_init_common(w, h);
@@ -1837,6 +1841,144 @@ static void sdl_toggle_rstick_camera(void)
     nv_window_set_rstick_camera(!nv_window_pref_rstick_camera());
     sdl_menu_update();
 }
+
+#if defined(XBOXRECOMP_MENU)
+#include "menu.h"
+
+/* The window's rows in the in-game menu: the settings the hotkeys above
+ * own, offered there too. Each row points at the same state and saves
+ * through the same settings file as its hotkey; the menu holds no copy.
+ * Three of the values live further down the file (defined with their
+ * readers); the declarations here reach them. */
+static int    g_skipvol;            /* defined with the draw code, below */
+static int    skipvol_init(void);
+static int    g_aniso_forced;       /* defined with tex_aniso, below */
+static int    aniso_forced(void);
+static double g_fps_period;         /* defined with frame_pace, below */
+static void   fps_period_init(void);
+
+static int menu_scale_state(void)
+{
+    int s = (int)gl_scale();
+    if (s > NV2A_SCALE_MAX) s = NV2A_SCALE_MAX;
+    return s - 1;
+}
+
+static void menu_scale_pick(int i)
+{
+    int fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+#if defined(__ANDROID__)
+    fs = 0;     /* always full screen, as in sdl_choose_scale */
+#endif
+    sdl_restart_at(i + 1, fs);
+}
+
+static int menu_fps_state(void)
+{
+    if (g_fps_period < 0.0) fps_period_init();
+    if (g_fps_period == 0.0) return 2;              /* Unlimited */
+    return g_fps_period > 1.0 / 40.0 ? 1 : 0;       /* 30, else 60 */
+}
+
+static void menu_fps_pick(int i)
+{
+    static const int fps[3] = { 60, 30, 0 };
+    g_fps_period = fps[i] > 0 ? 1.0 / fps[i] : 0.0;
+    sdl_cfg_set("fps", fps[i]);
+    sdl_menu_update();
+}
+
+static void menu_smaa_flip(void) { sdl_pick_smaa(!nv2a_smaa()); }
+
+static int menu_msaa_state(void)
+{
+    int m = g_msaa_want;
+    if (!g_msaa_live) {
+        /* The choice is only stored on such a device; show what is
+         * stored, not the count in use. */
+        int c = sdl_cfg_get("msaa", 0);
+        if (c) m = c;
+    }
+    return m >= 8 ? 3 : m >= 4 ? 2 : m >= 2 ? 1 : 0;
+}
+
+static void menu_msaa_pick(int i) { sdl_pick_msaa(1 << i); }
+
+static int menu_aniso_state(void)
+{
+    int v = aniso_forced();
+    return v >= 16 ? 4 : v >= 8 ? 3 : v >= 4 ? 2 : v >= 2 ? 1 : 0;
+}
+
+static void menu_aniso_pick(int i)
+{
+    g_aniso_forced = 1 << i;
+    sdl_cfg_set("aniso", g_aniso_forced);
+    sdl_menu_update();
+}
+
+static int menu_skipvol_state(void)
+{
+    return g_skipvol < 0 ? skipvol_init() : g_skipvol;
+}
+
+static void menu_skipvol_pick(int i)
+{
+    g_skipvol = i;
+    sdl_cfg_set("skipvol", i);
+    sdl_menu_update();
+}
+
+static void sdl_menu_register(void)
+{
+    static const char *const scale_names[NV2A_SCALE_MAX] = {
+        "1x", "2x", "3x", "4x",
+#if NV2A_SCALE_MAX > 4
+        "5x", "6x",
+#endif
+    };
+    static const char *const fps_names[] = { "60", "30", "Unlimited" };
+    static const char *const msaa_names[] = { "Off", "2x", "4x", "8x" };
+    static const char *const aniso_names[] = { "Off", "2x", "4x", "8x", "16x" };
+    static const char *const skipvol_names[] = {
+        "Draw all", "Skip characters", "Skip scenery", "Skip all"
+    };
+    static const XBOX_MENU_ITEM rows[] = {
+        { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_CHOICE,
+          .label = "Render scale (Restart)",
+          .state = menu_scale_state, .pick = menu_scale_pick,
+          .choices = scale_names, .nchoices = NV2A_SCALE_MAX,
+          .confirm = "The new scale is stored and the game restarts; "
+                     "on the Switch it applies at the next start." },
+        { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_CHOICE,
+          .label = "Frame rate",
+          .state = menu_fps_state, .pick = menu_fps_pick,
+          .choices = fps_names, .nchoices = 3 },
+        { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Widescreen (16:9)",
+          .state = nv2a_widescreen, .run = sdl_toggle_widescreen },
+        { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
+          .label = "SMAA",
+          .state = nv2a_smaa, .run = menu_smaa_flip },
+        { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
+          .label = "MSAA (Restart)",
+          .state = menu_msaa_state, .pick = menu_msaa_pick,
+          .choices = msaa_names, .nchoices = 4 },
+        { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
+          .label = "Anisotropic filtering",
+          .state = menu_aniso_state, .pick = menu_aniso_pick,
+          .choices = aniso_names, .nchoices = 5 },
+        { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
+          .label = "Shadow volumes",
+          .state = menu_skipvol_state, .pick = menu_skipvol_pick,
+          .choices = skipvol_names, .nchoices = 4 },
+        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Right-stick camera",
+          .state = nv_window_pref_rstick_camera, .run = sdl_toggle_rstick_camera },
+    };
+    xbox_MenuAdd(rows, (int)(sizeof rows / sizeof rows[0]));
+}
+#endif /* XBOXRECOMP_MENU */
 
 #if defined(_WIN32)
 /*
@@ -3469,22 +3611,44 @@ static uint32_t tex_title_levels(const TexStage *t, uint32_t w, uint32_t h)
     return n ? n : 1;
 }
 
+/* Shadow volumes skipped, as a bit mask (RECOMP_GL_SKIPVOL, the
+ * settings' skipvol= under it): 1 the vertex programs' volumes (the
+ * characters'), 2 the fixed-function pipeline's (the scenery's),
+ * 3 both, 0 draw them all. Read on every draw; -1 until first set. */
+static int g_skipvol = -1;
+static int skipvol_init(void)
+{
+    const char *e = getenv("RECOMP_GL_SKIPVOL");
+    g_skipvol = e ? atoi(e) : sdl_cfg_get("skipvol", 0);
+    if (g_skipvol < 0) g_skipvol = 0;
+    if (g_skipvol > 3) g_skipvol = 3;
+    return g_skipvol;
+}
+
 /* Anisotropic filtering for a mipmapped texture: 16x, or RECOMP_GL_ANISO
  * (1 turns it off), and never less than the title asked for itself
  * (TEXTURE_CONTROL0's LOG_MAX_ANISO). With the chain, the level is chosen for
  * a surface's narrow side and up to that many samples are taken along its
  * long one: a road or a wall seen at a glancing angle stays sharp instead of
  * going to the blur of the level its long side needs. */
+/* The forced level: RECOMP_GL_ANISO, the settings' aniso= under it, 16
+ * by default. File scope so the in-game menu's row can hold it too. */
+static int g_aniso_forced = -1;
+static int aniso_forced(void)
+{
+    if (g_aniso_forced < 0) {
+        const char *v = getenv("RECOMP_GL_ANISO");
+        g_aniso_forced = v ? atoi(v) : sdl_cfg_get("aniso", 16);
+        if (g_aniso_forced < 1) g_aniso_forced = 1;
+        if (g_aniso_forced > 16) g_aniso_forced = 16;
+    }
+    return g_aniso_forced;
+}
+
 static uint8_t tex_aniso(const TexStage *t)
 {
-    static int forced = -1;
+    int forced = aniso_forced();
     int title = 1 << ((t->control0 >> 4) & 3);
-    if (forced < 0) {
-        const char *v = getenv("RECOMP_GL_ANISO");
-        forced = v ? atoi(v) : 16;
-        if (forced < 1) forced = 1;
-        if (forced > 16) forced = 16;
-    }
     return (uint8_t)(forced > title ? forced : title);
 }
 
@@ -5464,14 +5628,16 @@ static void do_draw_body(void)
                            only_xf = v ? atol(v) : -1; }
       if (only_xf >= 0 && (long)S.xf_mode != only_xf) return; }
     if (S.xf_mode == NV2A_XF_MODE_FIXED && texgen_note(n)) return;
-    /* RECOMP_GL_SKIPVOL=1 / =2 (a probe): leave out the shadow volumes drawn
-     * by vertex programs (the characters') / by the fixed-function pipeline
-     * (the scenery's): the batches that only count in the stencil buffer. */
-    { static int sv = -1;
-      if (sv < 0) { const char *e = getenv("RECOMP_GL_SKIPVOL"); sv = e ? atoi(e) : 0; }
+    /* RECOMP_GL_SKIPVOL (a probe, and the menu's Shadow volumes row):
+     * leave out the shadow volumes -- the batches that only count in the
+     * stencil buffer. A bit mask: 1 the ones drawn by vertex programs
+     * (the characters'), 2 the fixed-function pipeline's (the scenery's),
+     * 3 both. File scope (g_skipvol) so the menu can hold it too. */
+    { int sv = (g_skipvol < 0) ? skipvol_init() : g_skipvol;
       if (sv && S.stencil_en && S.stencil_func == 0x207
           && (S.stencil_op[2] == 0x1E02 || S.stencil_op[2] == 0x1E03)
-          && (sv == 1) == (S.xf_mode != NV2A_XF_MODE_FIXED)) return; }
+          && (((sv & 1) && S.xf_mode != NV2A_XF_MODE_FIXED)
+           || ((sv & 2) && S.xf_mode == NV2A_XF_MODE_FIXED))) return; }
     /* RECOMP_GL_SKIP_LIT=1: leave out the fixed-function batches the T&L
      * unit lights (=ab: every other displayed frame), to see what they are. */
     { static int sk = -1;
@@ -9947,16 +10113,24 @@ static void pace_sleep(const struct timespec *ts)
 #define pace_sleep(ts) nanosleep((ts), NULL)
 #endif
 
+/* The cap's period in seconds (0 = no cap), from RECOMP_FPS, the
+ * settings' fps= under it, 60 by default. File scope so the in-game
+ * menu's row can hold it too. */
+static double g_fps_period = -1.0;
+static void fps_period_init(void)
+{
+        const char *v = getenv("RECOMP_FPS");
+        double fps = v ? atof(v) : (double)sdl_cfg_get("fps", 60);
+        g_fps_period = (fps > 0.0) ? 1.0 / fps : 0.0;
+}
+
 static void frame_pace(void)
 {
-        static double period = -1.0;
         static double deadline;
         double now;
-        if (period < 0.0) {
-            const char *v = getenv("RECOMP_FPS");
-            double fps = v ? atof(v) : 60.0;
-            period = (fps > 0.0) ? 1.0 / fps : 0.0;
-        }
+        double period;
+        if (g_fps_period < 0.0) fps_period_init();
+        period = g_fps_period;   /* a copy: the body negates it, below */
         /*
          * No cap while the title is not drawing a scene.
          *
