@@ -187,6 +187,14 @@ extern "C" int xbox_MenuInit(SDL_Window *window, void *gl_context, const char *a
     io.IniFilename = NULL;              /* nothing written beside the game */
     io.LogFilename = NULL;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    /* The queue is flattened, not trickled: on the Switch the feed
+     * re-asserts the face keys after the backend in the same frame
+     * (switch_feed_nav), and trickling puts a key's second change off
+     * to the next frame -- which left a held button reading as a
+     * fresh press on alternate frames, and the Nintendo layout row
+     * flicked on and off under one press. Flattened, a frame's last
+     * word on a key is its state, as the feed's design assumes. */
+    io.ConfigInputTrickleEventQueue = false;
     /* The window keeps its own rule for the pointer (hidden in full screen). */
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.Fonts->AddFontDefaultVector();   /* the scalable one: see scale_to_window */
