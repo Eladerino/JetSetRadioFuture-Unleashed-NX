@@ -447,8 +447,13 @@ static int glx_soft_renderer(const char *r)
  * Not on a software renderer, which takes them but decompresses a block at
  * every sample it reads: there a texture the front half decoded once draws
  * faster. On llvmpipe the attract demo ran at 7.5 frames a second with them as
- * they are and 10.5 with them decoded, as before. RECOMP_GL_DXT=1 hands them
- * over there too. */
+ * they are and 10.5 with them decoded, as before.
+ *
+ * Nor, for now, on Apple's OpenGL (the Mac's second backend, after Metal): in
+ * the Fortified Residential Zone two frames where the level changes took 157
+ * and 130 ms with them as they are, against 38 and 27 decoded, the time going
+ * neither to textures nor to shaders. Until that is understood they are
+ * decoded there as before. RECOMP_GL_DXT=1 hands them over in both cases. */
 static int glx_s3tc(void)
 {
     static int has = -1;
@@ -470,6 +475,13 @@ static int glx_s3tc(void)
             fprintf(stderr, "  [GL] %s takes DXT textures but draws them faster decoded "
                             "(RECOMP_GL_DXT=1: as they are)\n", r);
         }
+#if defined(__APPLE__)
+        if (has && !(v && atoi(v) == 1)) {
+            has = 0;
+            fprintf(stderr, "  [GL] Apple's OpenGL: DXT textures decoded, as before "
+                            "(RECOMP_GL_DXT=1: as they are)\n");
+        }
+#endif
     }
     return has;
 }
