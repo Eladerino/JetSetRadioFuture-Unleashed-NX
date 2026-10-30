@@ -57,7 +57,8 @@ the run's `Logs/last-run.log` attached.
   `game/` folder: either the extracted files (`default.xbe` and
   `Media/`) or a single `.iso` of the US disc, which the first launch
   unpacks into the folder (leave a few GB free on the card for the
-  unpack). The `.nro` is the engine and the
+  unpack, and expect that first launch to take a few minutes while
+  it works through the disc; later launches start straight away). The `.nro` is the engine and the
   recompiled code only; every texture, model, song and video comes
   from your copy. Saves live in `game/UDATA`, as on an Xbox; copy
   that folder to back them up.
