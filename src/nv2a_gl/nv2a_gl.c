@@ -1313,6 +1313,7 @@ static int  sdl_cfg_get(const char *key, int def);   /* the settings file, below
 #if defined(XBOXRECOMP_MENU)
 static void sdl_menu_register(void);   /* this window's in-game menu rows, below */
 #endif
+int nv_window_pref_vsync(void);        /* the vsync preference, below */
 
 static int gl_init(uint32_t w, uint32_t h)
 {
@@ -1395,9 +1396,9 @@ static int gl_init(uint32_t w, uint32_t h)
     SDL_GL_MakeCurrent(g_window, g_sdl_ctx);
     /* No waiting for the display's refresh by default: the frame is paced
      * by the emulated vblank (RECOMP_FPS), and the swap happens on the
-     * thread that runs the GPU. RECOMP_VSYNC=1 asks for it anyway. */
-    { const char *v = getenv("RECOMP_VSYNC");
-      SDL_GL_SetSwapInterval(v && atoi(v) ? 1 : 0); }
+     * thread that runs the GPU. RECOMP_VSYNC=1 asks for it anyway, and
+     * the settings file's vsync= under it (the menu's Vsync row). */
+    SDL_GL_SetSwapInterval(nv_window_pref_vsync());
 #if !defined(NV2A_GLES)
     /* Or, on Windows, a presenter thread swaps in step with the display. */
     pres_start();
@@ -1566,6 +1567,27 @@ static void nv_window_set_nintendo_layout(int on)
     sdl_cfg_set("nintendo_layout", g_nintendo_layout);
     fprintf(stderr, "[WIN] the Nintendo layout (A/B, X/Y swapped): %s\n",
             on ? "on" : "off");
+}
+
+/* Vsync: wait for the display's refresh at the swap. Off by default --
+ * the frame is paced by the emulated vblank instead (see gl_init).
+ * RECOMP_VSYNC stands over the settings file's vsync=, as elsewhere;
+ * the menu's row applies it at once through SDL_GL_SetSwapInterval. */
+static volatile int g_vsync = -1;
+int nv_window_pref_vsync(void)
+{
+    if (g_vsync < 0) {
+        const char *e = getenv("RECOMP_VSYNC");
+        g_vsync = e ? atoi(e) != 0 : sdl_cfg_get("vsync", 0) != 0;
+    }
+    return g_vsync;
+}
+static void nv_window_set_vsync(int on)
+{
+    g_vsync = on ? 1 : 0;
+    SDL_GL_SetSwapInterval(g_vsync);
+    sdl_cfg_set("vsync", g_vsync);
+    fprintf(stderr, "[WIN] vsync: %s\n", on ? "on" : "off");
 }
 
 /* The keyboard as a gamepad -- the same layout as the Mac's, by key POSITION
@@ -1877,6 +1899,12 @@ static void sdl_toggle_nintendo_layout(void)
     nv_window_set_nintendo_layout(!nv_window_pref_nintendo_layout());
 }
 
+/* Display > Vsync: applies at once, no restart. */
+static void sdl_toggle_vsync(void)
+{
+    nv_window_set_vsync(!nv_window_pref_vsync());
+}
+
 #if defined(XBOXRECOMP_MENU)
 #include "menu.h"
 
@@ -1964,6 +1992,137 @@ static void menu_skipvol_pick(int i)
     sdl_menu_update();
 }
 
+/* The Developer rows, and Controller's Both sticks: switches the rest
+ * of the engine reads from its environment, most of them once, as it
+ * starts. A flip here sets the variable for this process and, on the
+ * Switch, rewrites the matching line of options.txt in place -- the
+ * file the launcher reads first at the next start, which is where
+ * these take effect, so the rows say (Restart). Presence switches
+ * (a variable that only has to be set) are unset rather than set to
+ * 0 when turned off, and their options.txt line is dropped where the
+ * launcher would otherwise set them again from it: profile is the
+ * exception, whose friendly name the launcher itself unsets at 0. */
+enum {
+    DEV_LOG, DEV_PROFILE, DEV_SAMPLE, DEV_LOGDIR, DEV_SPIN,
+    DEV_FASTGPU, DEV_SHADERCACHE, DEV_MUTE, DEV_WIDEFX, DEV_CRC32,
+    DEV_OVERLAP, DEV_MERGE, DEV_CALLSNAP, DEV_SEMLOG, DEV_STICKBOTH,
+    DEV_COUNT
+};
+static const struct { const char *var, *opt; int def, pres, drop; } k_dev[DEV_COUNT] = {
+    [DEV_LOG]         = { "JSRF_LOG",              "log",                   1, 0, 0 },
+    [DEV_PROFILE]     = { "RECOMP_GL_PROFILE",     "profile",               0, 1, 0 },
+    [DEV_SAMPLE]      = { "JSRF_SAMPLE",           "sample",                0, 0, 0 },
+    [DEV_LOGDIR]      = { "JSRF_LOG_DIRECT",       "log_direct",            0, 0, 0 },
+    [DEV_SPIN]        = { "JSRF_SPIN_LOG",         "JSRF_SPIN_LOG",         0, 0, 0 },
+    [DEV_FASTGPU]     = { "RECOMP_NV2A_FLUSH_ACK", "fast_gpu",              0, 0, 0 },
+    [DEV_SHADERCACHE] = { "RECOMP_SHADER_CACHE",   "shader_cache",          1, 0, 0 },
+    [DEV_MUTE]        = { "RECOMP_MUTE",           "mute",                  0, 0, 0 },
+    [DEV_WIDEFX]      = { "RECOMP_WIDE_FX_FULL",   "RECOMP_WIDE_FX_FULL",   1, 0, 0 },
+    [DEV_CRC32]       = { "RECOMP_GL_CRC32HASH",   "RECOMP_GL_CRC32HASH",   1, 0, 0 },
+    [DEV_OVERLAP]     = { "RECOMP_PB_OVERLAP",     "RECOMP_PB_OVERLAP",     0, 1, 1 },
+    [DEV_MERGE]       = { "RECOMP_GL_MERGEPROBE",  "RECOMP_GL_MERGEPROBE",  0, 1, 1 },
+    [DEV_CALLSNAP]    = { "RECOMP_PB_CALLSNAP",    "RECOMP_PB_CALLSNAP",    1, 0, 0 },
+    [DEV_SEMLOG]      = { "RECOMP_PB_SEMLOG",      "RECOMP_PB_SEMLOG",      0, 1, 1 },
+    [DEV_STICKBOTH]   = { "RECOMP_MENU_STICK_BOTH","RECOMP_MENU_STICK_BOTH",0, 1, 1 },
+};
+static int g_dev_val[DEV_COUNT], g_dev_init[DEV_COUNT];
+
+static void dev_env_set(const char *var, const char *val)   /* val NULL: unset */
+{
+#if defined(_WIN32)
+    _putenv_s(var, val ? val : "");
+#else
+    if (val) setenv(var, val, 1); else unsetenv(var);
+#endif
+}
+
+#if defined(__SWITCH__)
+/* options.txt sits beside the settings file JSRF_SETTINGS_FILE names.
+ * One line is set (or, with drop, removed); every other line is copied
+ * through untouched, comments and all, as the wiring rule asks. */
+static void switch_options_set(const char *key, int val, int drop)
+{
+    const char *sf = getenv("JSRF_SETTINGS_FILE");
+    char path[1100], tmp[1100], line[1200];
+    size_t kl = strlen(key);
+    FILE *in, *out;
+    int done = 0;
+    char *slash;
+    if (!sf || !*sf) return;
+    snprintf(path, sizeof path, "%s", sf);
+    slash = strrchr(path, '/');
+    if (!slash) return;
+    snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "options.txt");
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (!(out = fopen(tmp, "w"))) return;
+    if ((in = fopen(path, "r")) != NULL) {
+        while (fgets(line, sizeof line, in)) {
+            if (!strncmp(line, key, kl) && line[kl] == '=') {
+                if (!done && !drop) fprintf(out, "%s=%d\n", key, val);
+                done = 1;
+            } else fputs(line, out);
+        }
+        fclose(in);
+    }
+    if (!done && !drop) fprintf(out, "%s=%d\n", key, val);
+    fclose(out);
+    if (rename(tmp, path) != 0) { remove(path); rename(tmp, path); }
+}
+#endif /* __SWITCH__ */
+
+static int dev_get(int i)
+{
+    if (!g_dev_init[i]) {
+        const char *e = getenv(k_dev[i].var);
+        g_dev_val[i] = e ? (k_dev[i].pres ? 1 : atoi(e) != 0) : k_dev[i].def;
+        g_dev_init[i] = 1;
+    }
+    return g_dev_val[i];
+}
+static void dev_flip(int i)
+{
+    int v = !dev_get(i);
+    g_dev_val[i] = v;
+    dev_env_set(k_dev[i].var, (k_dev[i].pres && !v) ? NULL : (v ? "1" : "0"));
+#if defined(__SWITCH__)
+    switch_options_set(k_dev[i].opt, v, k_dev[i].drop && !v);
+#endif
+    fprintf(stderr, "[MENU] %s = %d, from the next start (%s in options.txt)\n",
+            k_dev[i].var, v, k_dev[i].opt);
+}
+#define DEV_FUNCS(id) \
+    static int  dev_state_##id(void) { return dev_get(id); } \
+    static void dev_run_##id(void)   { dev_flip(id); }
+DEV_FUNCS(DEV_LOG) DEV_FUNCS(DEV_PROFILE) DEV_FUNCS(DEV_SAMPLE)
+DEV_FUNCS(DEV_LOGDIR) DEV_FUNCS(DEV_SPIN) DEV_FUNCS(DEV_FASTGPU)
+DEV_FUNCS(DEV_SHADERCACHE) DEV_FUNCS(DEV_MUTE) DEV_FUNCS(DEV_WIDEFX)
+DEV_FUNCS(DEV_CRC32) DEV_FUNCS(DEV_OVERLAP) DEV_FUNCS(DEV_MERGE)
+DEV_FUNCS(DEV_CALLSNAP) DEV_FUNCS(DEV_SEMLOG) DEV_FUNCS(DEV_STICKBOTH)
+
+/* The Developer page's first row: what the renderer has been doing
+ * since it was last asked -- rates over the interval, from the same
+ * counters the per-second profile report uses. */
+static const char *menu_status_text(void)
+{
+    static char buf[256];
+    static double last_t;
+    static uint32_t last_flips, last_draws, last_tris;
+    double now = prof_now(), dt = now - last_t;
+    if (!last_t || dt < 0.5) {
+        last_t = now; last_flips = S.flips; last_draws = S.draws; last_tris = S.tris;
+        return "Counting from now.\n\nOpen Status again in a few seconds and it "
+               "will show the rates over the time between the two looks: "
+               "frames, draws and triangles a second.";
+    }
+    snprintf(buf, sizeof buf,
+             "%.0f frames a second\n%u draws a second\n%.0f thousand triangles a second\n\n"
+             "Over the %.1f seconds since Status was last opened.",
+             (S.flips - last_flips) / dt, (unsigned)((S.draws - last_draws) / dt),
+             (S.tris - last_tris) / dt / 1000.0, dt);
+    last_t = now; last_flips = S.flips; last_draws = S.draws; last_tris = S.tris;
+    return buf;
+}
+
 static void sdl_menu_register(void)
 {
     static const char *const scale_names[NV2A_SCALE_MAX] = {
@@ -1989,6 +2148,9 @@ static void sdl_menu_register(void)
           .label = "Frame rate",
           .state = menu_fps_state, .pick = menu_fps_pick,
           .choices = fps_names, .nchoices = 3 },
+        { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Vsync",
+          .state = nv_window_pref_vsync, .run = sdl_toggle_vsync },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "Widescreen (16:9)",
           .state = nv2a_widescreen, .run = sdl_toggle_widescreen },
@@ -2013,8 +2175,61 @@ static void sdl_menu_register(void)
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Nintendo layout (A/B, X/Y)",
           .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout },
+        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Both sticks in game menus (Restart)",
+          .state = dev_state_DEV_STICKBOTH, .run = dev_run_DEV_STICKBOTH },
+    };
+    /* The Developer page: the engine's own switches, each labelled
+     * (Restart) because the part that reads it already has. They are
+     * written to options.txt, so the next start picks them up. */
+    static const XBOX_MENU_ITEM dev_rows[] = {
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_INFO,
+          .label = "Status", .text = menu_status_text },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Run log (Restart)",
+          .state = dev_state_DEV_LOG, .run = dev_run_DEV_LOG },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Profiler (Restart)",
+          .state = dev_state_DEV_PROFILE, .run = dev_run_DEV_PROFILE },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Sampler (Restart)",
+          .state = dev_state_DEV_SAMPLE, .run = dev_run_DEV_SAMPLE },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Log direct (Restart)",
+          .state = dev_state_DEV_LOGDIR, .run = dev_run_DEV_LOGDIR },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Spin log (Restart)",
+          .state = dev_state_DEV_SPIN, .run = dev_run_DEV_SPIN },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Fast GPU (Restart)",
+          .state = dev_state_DEV_FASTGPU, .run = dev_run_DEV_FASTGPU },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Shader cache (Restart)",
+          .state = dev_state_DEV_SHADERCACHE, .run = dev_run_DEV_SHADERCACHE },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Mute (Restart)",
+          .state = dev_state_DEV_MUTE, .run = dev_run_DEV_MUTE },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Widescreen FX full frame (Restart)",
+          .state = dev_state_DEV_WIDEFX, .run = dev_run_DEV_WIDEFX },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "CRC32 texture hashing (Restart)",
+          .state = dev_state_DEV_CRC32, .run = dev_run_DEV_CRC32 },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "PB overlap accounting (Restart)",
+          .state = dev_state_DEV_OVERLAP, .run = dev_run_DEV_OVERLAP },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Merge probe (Restart)",
+          .state = dev_state_DEV_MERGE, .run = dev_run_DEV_MERGE },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "PB call snapshot (Restart)",
+          .state = dev_state_DEV_CALLSNAP, .run = dev_run_DEV_CALLSNAP },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "PB semaphore log (Restart)",
+          .state = dev_state_DEV_SEMLOG, .run = dev_run_DEV_SEMLOG },
     };
     xbox_MenuAdd(rows, (int)(sizeof rows / sizeof rows[0]));
+    xbox_MenuAdd(dev_rows, (int)(sizeof dev_rows / sizeof dev_rows[0]));
 }
 #endif /* XBOXRECOMP_MENU */
 

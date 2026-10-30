@@ -90,11 +90,15 @@ the run's `Logs/last-run.log` attached.
   to the serial path.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
   together) to open it over the game. It holds the display settings
-  (render scale, frame rate), the graphics settings (widescreen,
+  (render scale, frame rate, vsync), the graphics settings (widescreen,
   SMAA, MSAA, anisotropic filtering, shadow volumes), the
   right-stick camera toggle and a Nintendo layout option that
   swaps A/B and X/Y so the face buttons work by their printed
-  names (it is `nintendo_layout` in `options.txt`). Most apply at once; choices are
+  names (it is `nintendo_layout` in `options.txt`). A Developer
+  page holds a live status readout and the engine's logging and
+  diagnostic switches (the run log, the profiler, fast GPU, the
+  shader cache and more); those are written to `options.txt` and
+  take effect at the next start. Most apply at once; choices are
   remembered between runs, and `options.txt` still wins at startup
   for anything it sets. File > About lists the build and the credits.
 - **Performance and overclocking:** the recommended settings are the
