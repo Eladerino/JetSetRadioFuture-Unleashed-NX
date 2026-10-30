@@ -495,7 +495,7 @@ typedef struct {
     unsigned n_draws, n_const_upload, n_prog_switch, n_tex_upload, n_tex_lookup;
     unsigned long vbo_bytes, unif_vec4;
     unsigned tex_held;                  /* textures the cache holds, now */
-    unsigned long long tex_held_bytes;  /* ... and their size, uploaded as RGBA8 */
+    unsigned long long tex_held_bytes;  /* ... and their size, as handed over */
     unsigned n_tex_rewritten;           /* dropped by tcache_verify: rewritten in place */
     unsigned long long tex_verified;    /* source bytes tcache_verify compared */
 } GlProfile;
@@ -788,7 +788,7 @@ static struct {
  * written, then one in fifty.
  */
 static struct {
-    unsigned compiles, tex_new;
+    unsigned compiles, tex_new, tex_dxt;        /* tex_dxt: DXT as they are (tex_dxt_direct) */
     double   compile_s, compile_worst, tex_s;
     double   idle_s;                            /* building ahead for the shader cache */
     double   pso_ms0;                           /* the backend's pipeline time at the frame's start */
@@ -1018,6 +1018,7 @@ static struct {
     uint32_t sampling;      /* how it is sampled (sampler_key): part of what it is */
     int      bias;          /* uploaded as a bump source (g_upload_bias_bg) */
     int      used;
+    size_t   held;          /* bytes handed to the device: RGBA8, or DXT as stored */
 } g_tcache[TEX_CACHE];
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -3199,7 +3200,14 @@ static uint32_t swz_to_linear(uint32_t f)
     }
 }
 
-static uint32_t decode_texel(uint32_t f, const uint8_t *p)
+/* Inlined wherever it is called, so that a loop over one format (decode_rows)
+ * gets that format's code alone. */
+#if defined(_MSC_VER)
+#define TEXEL_INLINE static __forceinline
+#else
+#define TEXEL_INLINE static inline __attribute__((always_inline))
+#endif
+TEXEL_INLINE uint32_t decode_texel(uint32_t f, const uint8_t *p)
 {
     uint32_t v;
     switch (f) {
@@ -3296,19 +3304,77 @@ static void tex_alpha_census(const uint8_t *rgba, uint32_t w, uint32_t h,
  * linear one -- decoded to RGBA8, row 0 first, into `rgba`. 0 for a format
  * this cannot decode. */
 static int g_upload_bias_bg;   /* see psh_sync_textures: bump sources */
+/* A texel, ARGB, as the bytes R, G, B, A, in one write: every host this runs
+ * on is little-endian. */
+TEXEL_INLINE void put_rgba(uint8_t *o, uint32_t argb)
+{
+    uint32_t v = (argb & 0xFF00FF00u) | ((argb >> 16) & 0xFFu) | ((argb & 0xFFu) << 16);
+    memcpy(o, &v, 4);
+}
+/* A swizzled or linear level's rows in one format, `lin` a constant: each
+ * format a loop of its own, where every texel used to ask decode_texel which
+ * format it was -- two to seven times as fast, texel for texel the same
+ * (spriteice's; tests/tex_decode). */
+TEXEL_INLINE void decode_rows(uint32_t lin, uint32_t bpp, int swz, const uint8_t *src,
+                              uint32_t w, uint32_t h, uint32_t pitch, const uint32_t *offx,
+                              const uint32_t *offy, uint32_t bias, uint8_t *rgba)
+{
+    uint32_t x, y;
+    for (y = 0; y < h; y++) {
+        const uint8_t *row = swz ? src + (size_t)offy[y] * bpp : src + (size_t)y * pitch;
+        uint8_t *o = rgba + (size_t)y * w * 4;
+        if (swz)
+            for (x = 0; x < w; x++)
+                put_rgba(o + (size_t)x * 4, decode_texel(lin, row + (size_t)offx[x] * bpp) ^ bias);
+        else
+            for (x = 0; x < w; x++)
+                put_rgba(o + (size_t)x * 4, decode_texel(lin, row + (size_t)x * bpp) ^ bias);
+    }
+}
+/* decode_level's for every format but DXT: apart, so that the DXT loop keeps
+ * its block decode inlined. */
+static int decode_texels(uint32_t color, const uint8_t *src, uint32_t w, uint32_t h,
+                         uint32_t pitch, uint8_t *rgba)
+{
+    /* Where each column and each row lands in a swizzled image, worked
+     * out once per level: swizzle_offset(x, y) is offx[x] | offy[y], and
+     * working it out per texel was most of the time a swizzled upload
+     * took. */
+    static uint32_t offx[4096], offy[4096];
+    uint32_t lin = fmt_is_swz(color) ? swz_to_linear(color) : color;
+    uint32_t bpp = linear_bpp(lin), bias = g_upload_bias_bg ? 0x00008080u : 0u;
+    uint32_t x, y;
+    int swz = fmt_is_swz(color);
+    if (!bpp) return 0;
+    if (swz) {
+        uint32_t mx, my;
+        xbox_swizzle_masks(w, h, &mx, &my);
+        for (x = 0; x < w; x++) offx[x] = swizzle_deposit(x, mx);
+        for (y = 0; y < h; y++) offy[y] = swizzle_deposit(y, my);
+    }
+    if (!pitch) pitch = w * bpp;
+#define ROWS(f, b) case f: decode_rows(f, b, swz, src, w, h, pitch, offx, offy, bias, rgba); break
+    switch (lin) {
+    ROWS(0x12, 4); ROWS(0x1E, 4); ROWS(0x3F, 4); ROWS(0x40, 4); ROWS(0x41, 4);
+    ROWS(0x10, 2); ROWS(0x1C, 2); ROWS(0x11, 2); ROWS(0x1D, 2); ROWS(0x20, 2);
+    ROWS(0x13, 1); ROWS(0x1F, 1);
+    default: return 0;
+    }
+#undef ROWS
+    return 1;
+}
 static int decode_level(uint32_t color, const uint8_t *src, uint32_t w, uint32_t h,
                         uint32_t pitch, uint8_t *rgba)
 {
     if (fmt_is_dxt(color)) {
-        /* Decoded here rather than handed to the driver compressed.
+        /* Decoded here only where the device doesn't take the blocks as
+         * they are, or the texels are read (tex_dxt_direct says when).
          *
-         * Passing the blocks straight through is faster and exact, but it
-         * makes every texture in the game depend on the host advertising
-         * S3TC -- and when it does not, glCompressedTexImage2D fails, the
-         * texture stays undefined, and every surface samples black. That is
-         * a whole-screen failure caused by a driver capability, which is not
-         * a trade worth making for an upload that happens once per texture
-         * and is cached afterwards.
+         * Handing every texture over compressed would make it depend on
+         * the host advertising S3TC -- and when it does not,
+         * glCompressedTexImage2D fails, the texture stays undefined, and
+         * every surface samples black. So the blocks go straight through
+         * only where the device says it takes them.
          *
          * A block at a time: decoded per texel, every block was decoded
          * sixteen times -- 4 ms a texture, and the 49 a new area brings at
@@ -3332,41 +3398,8 @@ static int decode_level(uint32_t color, const uint8_t *src, uint32_t w, uint32_t
                 }
             }
         return 1;
-    } else {
-        /* Where each column and each row lands in a swizzled image, worked
-         * out once per level: swizzle_offset(x, y) is offx[x] | offy[y], and
-         * working it out per texel was most of the time a swizzled upload
-         * took. */
-        static uint32_t offx[4096], offy[4096];
-        uint32_t lin = fmt_is_swz(color) ? swz_to_linear(color) : color;
-        uint32_t bpp = linear_bpp(lin);
-        uint32_t x, y;
-        int swz = fmt_is_swz(color);
-        if (!bpp) return 0;
-        if (swz) {
-            uint32_t mx, my;
-            xbox_swizzle_masks(w, h, &mx, &my);
-            for (x = 0; x < w; x++) offx[x] = swizzle_deposit(x, mx);
-            for (y = 0; y < h; y++) offy[y] = swizzle_deposit(y, my);
-        }
-        for (y = 0; y < h; y++) {
-            for (x = 0; x < w; x++) {
-                const uint8_t *p;
-                uint32_t argb;
-                if (swz)
-                    p = src + (size_t)(offx[x] | offy[y]) * bpp;
-                else
-                    p = src + (size_t)y * (pitch ? pitch : w * bpp) + (size_t)x * bpp;
-                argb = decode_texel(lin, p);
-                if (g_upload_bias_bg) argb ^= 0x00008080u;
-                rgba[((size_t)y * w + x) * 4 + 0] = (uint8_t)(argb >> 16);
-                rgba[((size_t)y * w + x) * 4 + 1] = (uint8_t)(argb >> 8);
-                rgba[((size_t)y * w + x) * 4 + 2] = (uint8_t)argb;
-                rgba[((size_t)y * w + x) * 4 + 3] = (uint8_t)(argb >> 24);
-            }
-        }
-        return 1;
     }
+    return decode_texels(color, src, w, h, pitch, rgba);
 }
 
 /*
@@ -3511,14 +3544,9 @@ static uint32_t tex_content(uint32_t color, uint32_t height, uint32_t pitch,
 static void tcache_drop(uint32_t k)
 {
     if (g_tcache[k].used && g_tcache[k].tex) {
-        uint32_t l, wl = g_tcache[k].w, hl = g_tcache[k].h;
         G->tex_free(g_tcache[k].tex);
         g_prof.tex_held--;
-        for (l = 0; l < (g_tcache[k].levels ? g_tcache[k].levels : 1); l++) {
-            g_prof.tex_held_bytes -= (unsigned long long)wl * hl * 4;
-            wl = wl > 1 ? wl / 2 : 1;
-            hl = hl > 1 ? hl / 2 : 1;
-        }
+        g_prof.tex_held_bytes -= (unsigned long long)g_tcache[k].held;
     }
     g_tcache[k].tex = 0;
     g_tcache[k].offset = 0xFFFFFFFFu;
@@ -3718,6 +3746,38 @@ static uint32_t sampler_key(const Nv2aSampler *s)
          | (uint32_t)s->levels << 16;
 }
 
+/*
+ * DXT textures handed to the device as the title stored them.
+ *
+ * They were all decoded to RGBA8 here (decode_level), so that no texture
+ * depended on the driver taking S3TC. Entering a level makes 50 to 110
+ * textures in one frame, and decoding them was most of the time those frames
+ * took: 61 to 75% of it in frames of 50 to 217 ms, as spriteice measured on a
+ * ROG Xbox Ally X. Where the device takes them (tex_new_dxt), DXT1, 3 and 5
+ * now go to it as they are: nothing to decode, and a quarter to an eighth of
+ * the bytes to hand over. Where it doesn't (Metal, an OpenGL without S3TC --
+ * most phones), they are decoded as before, and so they are where the texels
+ * are read -- a bump source's bias (g_upload_bias_bg), the transparency
+ * census, the texture dump -- or for a chain the device makes itself
+ * (RECOMP_GL_MIPMAP). RECOMP_GL_DXT=0 decodes them all, to compare. The log
+ * says once which it is.
+ */
+static int g_dxt_direct = -1;   /* not asked yet; 0 decoded; 1 as they are */
+static unsigned g_dxt_made[2];  /* DXT textures made: decoded, as they are */
+static int tex_dxt_direct(const Nv2aSampler *smp)
+{
+    if (g_dxt_direct < 0) {
+        const char *v = getenv("RECOMP_GL_DXT"), *why = NULL;
+        if (v && atoi(v) == 0) why = "RECOMP_GL_DXT=0";
+        else if (!G->tex_new_dxt) why = "this device has no way to take them";
+        else if (getenv("RECOMP_GL_TEXALPHA") || getenv("RECOMP_GL_DUMP_TEX"))
+            why = "the census or the dump reads their texels";
+        g_dxt_direct = !why;
+        if (why) fprintf(stderr, "  [GL] DXT textures decoded (%s)\n", why);
+    }
+    return g_dxt_direct && !g_upload_bias_bg && !(smp->mip && smp->levels < 2);
+}
+
 static uint32_t upload_texture_inner(const TexStage *t)
 {
     uint32_t va = resolve(t->offset);
@@ -3726,9 +3786,9 @@ static uint32_t upload_texture_inner(const TexStage *t)
     int other_sampling = 0;
     uint32_t tex;
     uint8_t *rgba = NULL;
-    size_t rgba_bytes = 0;
+    size_t rgba_bytes = 0;      /* handed over: RGBA8, or DXT as it is */
     Nv2aSampler smp;
-    int slot = -1, stale = -1, tomb = -1;
+    int slot = -1, stale = -1, tomb = -1, dxt = 0;
 
     if (!w || !h || w > 4096 || h > 4096) return 0;
     nlev = tex_title_levels(t, w, h);
@@ -3826,6 +3886,25 @@ static uint32_t upload_texture_inner(const TexStage *t)
     /* Until the new texture exists the slot holds nothing. */
     tcache_drop((uint32_t)slot);
 
+    /* DXT as it is, where the device takes it (tex_dxt_direct). */
+    if (fmt_is_dxt(t->color) && tex_dxt_direct(&smp)) {
+        tex = G->tex_new_dxt(w, h, t->color == 0x0C ? 1 : t->color == 0x0E ? 3 : 5, src, &smp);
+        if (tex) {
+            uint32_t l, wl = w, hl = h;
+            for (l = 0; l < (smp.mip && nlev > 1 ? nlev : 1); l++) {
+                rgba_bytes += tex_bytes(t->color, wl, hl);
+                wl = wl > 1 ? wl / 2 : 1;
+                hl = hl > 1 ? hl / 2 : 1;
+            }
+            if (!g_dxt_made[1])
+                fprintf(stderr, "  [GL] DXT textures handed to the device as they are\n");
+            dxt = 1;
+            goto made;
+        }
+        g_dxt_direct = 0;
+        fprintf(stderr, "  [GL] DXT textures decoded (the device doesn't take them)\n");
+    }
+
     /* Level 0, and the rest of the title's chain after it when it has one
      * (tex_title_levels): each level decoded as the base is, from where the
      * last one ended, into one buffer level after level. */
@@ -3863,16 +3942,6 @@ static uint32_t upload_texture_inner(const TexStage *t)
             hl = hl > 1 ? hl / 2 : 1;
         }
         tex_alpha_census(rgba, w, h, t->color, fmt_is_dxt(t->color));
-        /* How much of the city has a chain, once a while: uploads with one,
-         * and the levels they carried. */
-        { static unsigned long n, with, lv, twice;
-          n++;
-          if (nlev > 1) { with++; lv += nlev; }
-          if (other_sampling) twice++;
-          if (n == 200 || n % 2000 == 0)
-              fprintf(stderr, "  [GL] mipmaps: %lu of %lu textures uploaded with the title's own "
-                              "chain (%.1f levels each); %lu a second time, sampled another way\n",
-                      with, n, with ? (double)lv / with : 0.0, twice); }
     }
     /* RECOMP_GL_DUMP_TEX=<prefix>: every texture as uploaded. A frame that
      * shades to black is either sampling the wrong place or sampling a black
@@ -3953,10 +4022,24 @@ static uint32_t upload_texture_inner(const TexStage *t)
     free(rgba);
     if (!tex) return 0;
 
+made:
+    /* How much of the city has a chain, once a while: uploads with one,
+     * and the levels they carried. */
+    { static unsigned long n, with, lv, twice;
+      n++;
+      if (nlev > 1) { with++; lv += nlev; }
+      if (other_sampling) twice++;
+      if (n == 200 || n % 2000 == 0)
+          fprintf(stderr, "  [GL] mipmaps: %lu of %lu textures uploaded with the title's own "
+                          "chain (%.1f levels each); %lu a second time, sampled another way\n",
+                  with, n, with ? (double)lv / with : 0.0, twice); }
+    if (fmt_is_dxt(t->color)) g_dxt_made[dxt]++;
+    if (dxt) g_hf.tex_dxt++;
     g_prof.n_tex_upload++;
     g_hf.tex_new++;
     g_prof.tex_held++;
     g_prof.tex_held_bytes += (unsigned long long)rgba_bytes;
+    g_tcache[slot].held = rgba_bytes;
     g_tcache[slot].used = 1;
     g_tcache[slot].offset = t->offset; g_tcache[slot].format = t->color;
     g_tcache[slot].w = w; g_tcache[slot].h = h; g_tcache[slot].pitch = t->pitch;
@@ -4623,7 +4706,9 @@ static const char *vc_debug_switch(void)
         "DUMP_FB", "DUMP_AFTER", "DUMP_EVERY", "DUMP_3D", "DUMP_TRIS",
         "DUMP_CHARS", "DUMP_DEPTH",
         /* the timeline probe: a draw's number, surface and vertex count */
-        "TIMELINE", NULL
+        "TIMELINE",
+        /* DXT textures decoded rather than handed over as they are */
+        "DXT", NULL
     };
     static char name[64];
     char **e;
@@ -9980,10 +10065,12 @@ static void frame_pace(void)
                           g_ht.logged++;
                           fprintf(stderr, "[HITCH] frame %u: %.1f ms flip to flip, %u draws | "
                                   "%u programs built in %.1f ms (worst %.1f)%s | %u textures new, "
-                                  "%.1f ms in textures | %.1f ms the rest%s\n",
+                                  "%.1f ms in textures | %.1f ms the rest%s | %u of the new "
+                                  "textures DXT as they are\n",
                                   S.frames, ms, S.draws - g_hf.draws0, g_hf.compiles,
                                   1000.0 * g_hf.compile_s, 1000.0 * g_hf.compile_worst, pl,
-                                  g_hf.tex_new, 1000.0 * g_hf.tex_s, other < 0.0 ? 0.0 : other, gp);
+                                  g_hf.tex_new, 1000.0 * g_hf.tex_s, other < 0.0 ? 0.0 : other, gp,
+                                  g_hf.tex_dxt);
                       }
                   }
               }
@@ -11814,6 +11901,9 @@ void nv2a_gl_report(void)
         surf_desc(4), surf_desc(5), surf_desc(6), surf_desc(7),
         g_tex_dead[0][0], g_tex_dead[0][1], g_tex_dead[0][2],
         g_tex_dead[1][0], g_tex_dead[1][1], g_tex_dead[1][2]);
+    if (g_dxt_made[0] || g_dxt_made[1])
+        fprintf(stderr, "  [GL] DXT textures: %u handed to the device as they are, %u decoded\n",
+                g_dxt_made[1], g_dxt_made[0]);
     if (G) G->report();
     fflush(stderr);
 }
