@@ -291,8 +291,35 @@ else()
     target_link_options(jsrf_recomp PRIVATE -rdynamic)
 endif()
 if(SWITCH)
-    # devkitPro's Switch.cmake turns the linked ELF into the .nro.
-    nx_create_nro(jsrf_recomp)
+    # devkitPro's Switch.cmake turns the linked ELF into the .nro. The
+    # NACP generated here is what the homebrew menu shows for it: with
+    # none, the tools fall back to their defaults (author "Unknown",
+    # version "1.0.0"). The display version is the release's numeric
+    # core; JSRF_VERSION itself, suffix and describe tail and all, is
+    # what the engine prints in its log and About.
+    string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" JSRF_DISPLAY_VERSION "${JSRF_VERSION}")
+    if(NOT JSRF_DISPLAY_VERSION)
+        set(JSRF_DISPLAY_VERSION "0.1.0")
+    endif()
+    nx_generate_nacp(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jsrf_recomp.nacp"
+        NAME "JSRF Unleashed NX"
+        AUTHOR "Eladerino"
+        VERSION "${JSRF_DISPLAY_VERSION}")
+    # An icon only when one is handed to the build from outside the
+    # repo (JSRF_ICON, a 256x256 baseline JPEG): the icon is part of
+    # the distributed .nro, so no game artwork ships in it. Without
+    # one, devkitPro's default icon is used, as before.
+    set(JSRF_ICON "" CACHE FILEPATH "Optional .nro icon (256x256 JPEG) kept outside the repo")
+    if(JSRF_ICON AND EXISTS "${JSRF_ICON}")
+        message(STATUS "NRO icon (from outside the repo): ${JSRF_ICON}")
+        nx_create_nro(jsrf_recomp
+            NACP "${CMAKE_CURRENT_BINARY_DIR}/jsrf_recomp.nacp"
+            ICON "${JSRF_ICON}")
+    else()
+        nx_create_nro(jsrf_recomp
+            NACP "${CMAKE_CURRENT_BINARY_DIR}/jsrf_recomp.nacp")
+    endif()
 endif()
 if(MSVC)
     target_link_options(jsrf_recomp PRIVATE /LARGEADDRESSAWARE)

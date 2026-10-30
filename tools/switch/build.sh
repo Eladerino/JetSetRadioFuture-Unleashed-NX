@@ -25,6 +25,10 @@
 #   SKIP_RECOMP=1      reuse port/recomp/gen from an earlier run (after a
 #                      source change outside the generated code; regenerating
 #                      touches every generated file and recompiles them all)
+#   JSRF_ICON=path     a 256x256 baseline JPEG to embed as the .nro's
+#                      icon in the homebrew menu. Kept outside the repo
+#                      on purpose: the icon ships inside the .nro, so
+#                      releases use devkitPro's default icon.
 #   EXPORT_DIR  a folder the finished .nro is also copied to, for dragging
 #              onto the SD card (default under WSL: Downloads\jsrf-unleashed-switch
 #              in your Windows profile; "none" turns it off). Only the .nro
@@ -173,7 +177,8 @@ fi
 say "building the Switch engine (-j$JOBS)"
 cmake -S port -B "$WORK_DIR/build-switch" \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_BUILD_TYPE=Release \
+    ${JSRF_ICON:+-DJSRF_ICON="$JSRF_ICON"}
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"
 
 NRO="$(find "$WORK_DIR/build-switch" -name '*.nro' | head -1)"
