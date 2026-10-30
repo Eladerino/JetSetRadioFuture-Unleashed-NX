@@ -1514,6 +1514,17 @@ static void sdl_cfg_set(const char *key, int val)
     }
 }
 
+#if defined(__SWITCH__)
+/* On the Switch the launcher reads options.txt before the engine
+ * starts and puts it in the environment, where it stands over this
+ * settings file: a choice the menu keeps only here is undone by the
+ * next launch. So a menu choice for a setting options.txt names is
+ * written there too, under its friendly name, by switch_options_set
+ * (below, with the Developer page's switches, which have always been
+ * kept that way). */
+static void switch_options_set(const char *key, int val, int drop);
+#endif
+
 /* nv2a_widescreen() asks this when RECOMP_WIDESCREEN is not set. */
 int nv_window_pref_widescreen(void) { return sdl_cfg_get("widescreen", 0) != 0; }
 
@@ -1565,6 +1576,9 @@ static void nv_window_set_nintendo_layout(int on)
 {
     g_nintendo_layout = on ? 1 : 0;
     sdl_cfg_set("nintendo_layout", g_nintendo_layout);
+#if defined(__SWITCH__)
+    switch_options_set("nintendo_layout", g_nintendo_layout, 0);
+#endif
     fprintf(stderr, "[WIN] the Nintendo layout (A/B, X/Y swapped): %s\n",
             on ? "on" : "off");
 }
@@ -1708,6 +1722,9 @@ static void sdl_toggle_widescreen(void)
     int on = !nv2a_widescreen();
     nv2a_set_widescreen(on);
     sdl_cfg_set("widescreen", on);
+#if defined(__SWITCH__)
+    switch_options_set("widescreen", on, 0);
+#endif
     /* A window (not full screen, not maximised) takes the new shape at the
      * same height, as the Mac's does. */
     if (!(SDL_GetWindowFlags(g_window) & (SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_MAXIMIZED))) {
@@ -1929,6 +1946,9 @@ static int menu_scale_state(void)
 
 static void menu_scale_pick(int i)
 {
+#if defined(__SWITCH__)
+    switch_options_set("scale", i + 1, 0);
+#endif
     int fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
 #if defined(__ANDROID__)
     fs = 0;     /* always full screen, as in sdl_choose_scale */
@@ -1948,6 +1968,9 @@ static void menu_fps_pick(int i)
     static const int fps[3] = { 60, 30, 0 };
     g_fps_period = fps[i] > 0 ? 1.0 / fps[i] : 0.0;
     sdl_cfg_set("fps", fps[i]);
+#if defined(__SWITCH__)
+    switch_options_set("fps", fps[i], 0);
+#endif
     sdl_menu_update();
 }
 
@@ -1977,6 +2000,9 @@ static void menu_aniso_pick(int i)
 {
     g_aniso_forced = 1 << i;
     sdl_cfg_set("aniso", g_aniso_forced);
+#if defined(__SWITCH__)
+    switch_options_set("aniso", g_aniso_forced, 0);
+#endif
     sdl_menu_update();
 }
 
