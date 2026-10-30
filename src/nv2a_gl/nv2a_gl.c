@@ -10829,6 +10829,45 @@ static void methtrace_note(uint32_t method, uint32_t param)
     fprintf(stderr, "[MT] f%u d%u %04X = %08X (%g)\n", S.flips, S.since_present, method, param, f);
 }
 
+/*
+ * A run of index words in one call.
+ *
+ * In 99th Street the walk reads about 13 million words a second, and 55% of
+ * them are indices: ARRAY_ELEMENT16 or 32, one method written
+ * non-incrementing with up to 2047 words (spriteice's count). Each word went
+ * through three calls and every check nv2a_gl_method makes ahead of its
+ * switch, to land in S.idx.
+ *
+ * The first word still goes through nv2a_gl_method, which starts the batch,
+ * or draws what it holds if a constant or an array moved since
+ * (split_batch_if_state_moved). The rest are appended here as nv2a_gl_method
+ * would append them, dropped the same way once S.idx is full. Nothing
+ * nv2a_gl_method checks can change between two words of one run: only another
+ * method moves a constant or an array, and the per-method logs (methval_note,
+ * methtrace_note) skip the index methods.
+ */
+void nv2a_gl_indices(uint32_t method, const uint32_t *p, uint32_t n)
+{
+    uint32_t room, i;
+    nv2a_gl_method(method, p[0]);
+    if (n < 2 || !nv2a_gl_enabled() || g_failed) return;
+    p++;
+    n--;
+    if (method == M_ARRAY_ELEMENT16) {
+        room = (MAX_INDICES - S.idx_count) / 2;     /* two indices a word */
+        if (n > room) n = room;
+        for (i = 0; i < n; i++) {
+            S.idx[S.idx_count++] = p[i] & 0xFFFF;
+            S.idx[S.idx_count++] = p[i] >> 16;
+        }
+    } else if (method == M_ARRAY_ELEMENT32) {
+        room = MAX_INDICES - S.idx_count;
+        if (n > room) n = room;
+        memcpy(&S.idx[S.idx_count], p, n * sizeof *p);
+        S.idx_count += n;
+    }
+}
+
 void nv2a_gl_method(uint32_t method, uint32_t param)
 {
     if (!nv2a_gl_enabled() || g_failed) return;
