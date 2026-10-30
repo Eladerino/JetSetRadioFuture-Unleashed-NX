@@ -13,6 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The window's frame rate for the bar (nv2a_gl.c), weak as About's
+ * version is: a window without it simply shows no rate. */
+extern "C" double nv2a_menu_frame_rate(void) __attribute__((weak));
+
 static const char *const k_menu_title[] = { "File", "Display", "Graphics", "Controller", "Developer" };
 static_assert(IM_ARRAYSIZE(k_menu_title) == XBOX_MENU_COUNT, "a title for each menu in menu.h");
 
@@ -301,8 +305,11 @@ extern "C" void menu_build(int just_opened)
             ImGui::SetNavCursorVisibleAfterMove();
         }
         ImGui::PopItemFlag();
-        /* The way out, said on the bar's empty right side, in the
-         * disabled colour so it reads as a hint, not a row. */
+        /* The bar's empty right side: the frame rate as it stands,
+         * then the way out, both in the disabled colour so they read
+         * as readouts, not rows. The rate is the window's own count
+         * (nv2a_gl.c), asked for by name as About asks for the
+         * version; without it, the hint alone. */
         {
             const char *hint =
 #if defined(__SWITCH__)
@@ -310,9 +317,17 @@ extern "C" void menu_build(int just_opened)
 #else
                 "F1 or Back closes this menu";
 #endif
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth()
-                                 - ImGui::CalcTextSize(hint).x
-                                 - ImGui::GetStyle().WindowPadding.x);
+            float right = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
+            float hint_w = ImGui::CalcTextSize(hint).x;
+            double rate = nv2a_menu_frame_rate ? nv2a_menu_frame_rate() : 0.0;
+            if (rate > 0.0) {
+                char buf[16];
+                snprintf(buf, sizeof buf, "%.0f fps", rate);
+                ImGui::SameLine(right - hint_w - ImGui::CalcTextSize(buf).x
+                                - ImGui::GetStyle().ItemSpacing.x * 2.0f);
+                ImGui::TextDisabled("%s", buf);
+            }
+            ImGui::SameLine(right - hint_w);
             ImGui::TextDisabled("%s", hint);
         }
         ImGui::EndMainMenuBar();

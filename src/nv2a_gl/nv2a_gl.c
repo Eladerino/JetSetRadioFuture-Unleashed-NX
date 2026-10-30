@@ -2149,6 +2149,24 @@ static const char *menu_status_text(void)
     return buf;
 }
 
+/* The menu bar's frame rate (menu.cpp asks for it by this name):
+ * flips over the last half second or so, from the same counters
+ * Status reads, smoothed by only ever being measured over a whole
+ * window. 0 until the first window has passed. */
+double nv2a_menu_frame_rate(void)
+{
+    static double last_t, rate;
+    static uint32_t last_flips;
+    double now = prof_now();
+    if (!last_t) { last_t = now; last_flips = S.flips; return 0.0; }
+    if (now - last_t >= 0.5) {
+        rate = (S.flips - last_flips) / (now - last_t);
+        last_t = now;
+        last_flips = S.flips;
+    }
+    return rate;
+}
+
 static void sdl_menu_register(void)
 {
     static const char *const scale_names[NV2A_SCALE_MAX] = {
