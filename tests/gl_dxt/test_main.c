@@ -12,6 +12,10 @@
  * its own way); a transparent texel may not. A chain the driver would have
  * to make itself, and a format that isn't DXT1, 3 or 5, are refused, so the
  * front half decodes those. (After spriteice's test.)
+ *
+ * A software renderer (llvmpipe here) takes no DXT as they are unless
+ * RECOMP_GL_DXT=1: run.py runs this once without it, where only that is
+ * checked, and once with it, for all of the above.
  */
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -114,6 +118,15 @@ int main(void)
     G = nv2a_gfx_gl();
     check(G->init(), "init");
     check(G->tex_new_dxt != NULL, "the device has tex_new_dxt");
+    if (!getenv("RECOMP_GL_DXT")) {
+        const char *r = (const char *)glGetString(GL_RENDERER);
+        if (r && (strstr(r, "llvmpipe") || strstr(r, "softpipe"))) {
+            check(G->tex_new_dxt(8, 8, 1, blocks, &plain) == 0,
+                  "a software renderer takes no DXT as they are");
+            printf("ok: %s takes no DXT as they are\ngl_dxt: passes\n", r);
+            return 0;
+        }
+    }
 
     srand(5);
     for (i = 0; i < sizeof blocks; i++) blocks[i] = (uint8_t)rand();

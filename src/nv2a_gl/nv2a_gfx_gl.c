@@ -423,12 +423,37 @@ static int glx_target_read_depth(uint32_t h, uint32_t pw, uint32_t ph, float *ou
 
 /* ---- textures ------------------------------------------------------------ */
 
+/* A renderer that draws on the processor: Mesa's llvmpipe and softpipe,
+ * SwiftShader, Apple's and Microsoft's software renderers. */
+static int glx_soft_renderer(const char *r)
+{
+    static const char *const soft[] = { "llvmpipe", "softpipe", "swiftshader", "software",
+                                        "basic render", NULL };
+    char lc[256];
+    size_t i;
+    int k;
+    if (!r) return 0;
+    for (i = 0; r[i] && i < sizeof lc - 1; i++)
+        lc[i] = (char)(r[i] >= 'A' && r[i] <= 'Z' ? r[i] - 'A' + 'a' : r[i]);
+    lc[i] = 0;
+    for (k = 0; soft[k]; k++)
+        if (strstr(lc, soft[k])) return 1;
+    return 0;
+}
+
 /* Whether the driver takes DXT1, 3 and 5 as they are: S3TC, an extension
- * every desktop driver has and few phones do. Asked once. */
+ * every desktop driver has and few phones do. Asked once.
+ *
+ * Not on a software renderer, which takes them but decompresses a block at
+ * every sample it reads: there a texture the front half decoded once draws
+ * faster. On llvmpipe the attract demo ran at 7.5 frames a second with them as
+ * they are and 10.5 with them decoded, as before. RECOMP_GL_DXT=1 hands them
+ * over there too. */
 static int glx_s3tc(void)
 {
     static int has = -1;
     if (has < 0) {
+        const char *r = (const char *)glGetString(GL_RENDERER), *v = getenv("RECOMP_GL_DXT");
 #if defined(NV2A_GLES)
         has = gles_has_ext("GL_EXT_texture_compression_s3tc");
 #else
@@ -440,6 +465,11 @@ static int glx_s3tc(void)
             if (e && !strcmp(e, "GL_EXT_texture_compression_s3tc")) has = 1;
         }
 #endif
+        if (has && glx_soft_renderer(r) && !(v && atoi(v) == 1)) {
+            has = 0;
+            fprintf(stderr, "  [GL] %s takes DXT textures but draws them faster decoded "
+                            "(RECOMP_GL_DXT=1: as they are)\n", r);
+        }
     }
     return has;
 }

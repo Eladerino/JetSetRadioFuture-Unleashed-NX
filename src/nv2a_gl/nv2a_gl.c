@@ -3756,8 +3756,8 @@ static uint32_t sampler_key(const Nv2aSampler *s)
  * ROG Xbox Ally X. Where the device takes them (tex_new_dxt), DXT1, 3 and 5
  * now go to it as they are: nothing to decode, and a quarter to an eighth of
  * the bytes to hand over. Where it doesn't (Metal, an OpenGL without S3TC --
- * most phones), they are decoded as before, and so they are where the texels
- * are read -- a bump source's bias (g_upload_bias_bg), the transparency
+ * most phones -- or one drawing on the processor, see glx_s3tc), they are
+ * decoded as before, and so they are where the texels are read -- a bump source's bias (g_upload_bias_bg), the transparency
  * census, the texture dump -- or for a chain the device makes itself
  * (RECOMP_GL_MIPMAP). RECOMP_GL_DXT=0 decodes them all, to compare. The log
  * says once which it is.
@@ -3902,7 +3902,7 @@ static uint32_t upload_texture_inner(const TexStage *t)
             goto made;
         }
         g_dxt_direct = 0;
-        fprintf(stderr, "  [GL] DXT textures decoded (the device doesn't take them)\n");
+        fprintf(stderr, "  [GL] DXT textures decoded (the device doesn't take them as they are)\n");
     }
 
     /* Level 0, and the rest of the title's chain after it when it has one

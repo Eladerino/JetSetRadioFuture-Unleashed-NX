@@ -1,10 +1,12 @@
 """DXT textures handed to the OpenGL backend as they are (tex_new_dxt), on a
 headless EGL context: test_main.c with nv2a_gfx_gl.c as the engine builds it,
-for OpenGL 3.3 core.
+for OpenGL 3.3 core; once as the engine runs, once with RECOMP_GL_DXT=1 (which
+hands them over on a software renderer too).
 
 Linux, with EGL and Mesa (llvmpipe is enough): libegl-dev, libgl-dev. Skips
 where there is no EGL context to be had.
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -18,5 +20,11 @@ with tempfile.TemporaryDirectory(prefix="gl-dxt-") as directory:
     exe = str(pathlib.Path(directory) / "test")
     subprocess.run([cc, "-std=gnu11", "-O1", "-Wall", "-Wextra", "-Isrc/nv2a_gl"] + sources
                    + ["-o", exe, "-lEGL", "-lGL", "-lm"], cwd=root, check=True)
-    r = subprocess.run([exe], timeout=300)
-sys.exit(1 if r.returncode else 0)
+    failed = 0
+    for force in (False, True):
+        env = {k: v for k, v in os.environ.items() if k != "RECOMP_GL_DXT"}
+        if force:
+            env["RECOMP_GL_DXT"] = "1"
+        print("---", "RECOMP_GL_DXT=1" if force else "as the engine runs")
+        failed += subprocess.run([exe], timeout=300, env=env).returncode != 0
+sys.exit(1 if failed else 0)
