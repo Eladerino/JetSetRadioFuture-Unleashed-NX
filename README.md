@@ -25,7 +25,7 @@ This fork adds a Nintendo Switch target to the upstream project,
 [JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed):
 a homebrew `.nro` for a console running Atmosphère. Everything else in
 this README describes the upstream project and its downloads. The
-Switch port can be had two ways, a prebuilt `.nro` or a build from
+Switch port can be had two ways, a prebuilt download or a build from
 source; both need the files from your own copy of the game.
 
 Like the upstream project, this is an unofficial fan project: it is
@@ -56,9 +56,11 @@ the run's `Logs/last-run.log` attached.
   `sdmc:/switch/jsrf-unleashed/`. Then put your game files in that
   `game/` folder: either the extracted files (`default.xbe` and
   `Media/`) or a single `.iso` of the US disc, which the first launch
-  unpacks into the folder. The `.nro` is the engine and the
+  unpacks into the folder (leave a few GB free on the card for the
+  unpack). The `.nro` is the engine and the
   recompiled code only; every texture, model, song and video comes
-  from your copy.
+  from your copy. Saves live in `game/UDATA`, as on an Xbox; copy
+  that folder to back them up.
 - **Or build it yourself, from your own disc.** The recompiler turns
   the `default.xbe` on your disc into C on your machine, and that code,
   the game files and the built `.nro` stay there. None of them are in
@@ -69,7 +71,8 @@ the run's `Logs/last-run.log` attached.
   calls the guest memory is built on, and the game says so on screen and
   exits.
 - **[`tools/switch/build.sh`](tools/switch/build.sh)** does the whole
-  build on Linux or WSL2: installs devkitPro if it is missing,
+  build from a clone of this repository, on Linux or WSL2: installs
+  devkitPro if it is missing,
   recompiles from a disc image or an extracted folder, checks the
   result is the standalone US build (9333 of 9342 functions), builds
   the engine and lays out a folder to copy to
@@ -137,6 +140,7 @@ away.
 | iPhone and iPad, iOS 15 or later (iPhone XS or newer recommended) | [JSRF-Unleashed-iOS.ipa](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-iOS.ipa) — less tested on iPads |
 | Windows 10 or 11, 64-bit | [JSRF-Unleashed-windows-x86_64.zip](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-windows-x86_64.zip) — tested under Wine |
 | Android 10 or later, 64-bit, OpenGL ES 3.0 | [JSRF-Unleashed-android-arm64.apk](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-android-arm64.apk) — tested in the Android emulator |
+| Nintendo Switch, Atmosphère (this fork) | [jsrf-unleashed-switch.zip](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest/download/jsrf-unleashed-switch.zip) — the `.nro`, the settings file and an empty `game/` folder; see [Nintendo Switch (this fork)](#nintendo-switch-this-fork) above |
 
 Every version is on the [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases) page; what changed is in the [changelog](CHANGELOG.md).
 
@@ -536,6 +540,8 @@ xemu is LGPL-2.1-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 - Dear ImGui — the library the in-game menu is drawn with.
 - [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
   in-game menu's design and code were adapted from.
+- devkitPro and libnx — the homebrew toolchain and library the
+  Switch build is made with.
 - The title lettering in the banner is set in
   [Nise JSRF](https://www.dafont.com/nisejsrf.font), a free font by Yoyo.
 - Smilebit and SEGA, who made the game.
