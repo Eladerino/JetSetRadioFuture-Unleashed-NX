@@ -151,8 +151,19 @@ static void set_open(int on)
     ImGuiIO &io = ImGui::GetIO();
     if (on == g_open) return;
     if (on) {
-        /* Pads plugged in while the menu was shut were not seen: look again. */
+        /* Pads plugged in while the menu was shut were not seen: look again.
+         * On the Switch the pad reaches ImGui through the polled feed
+         * alone (switch_feed_nav), so the backend is told Manual, with no
+         * gamepads of its own: its polling reads the buttons unswapped
+         * and asserts them every frame, so with the Nintendo layout on
+         * the two feeds press the swapped and unswapped face keys in the
+         * same press -- an activate and a cancel together -- and no press
+         * ever lands clean. */
+#if defined(__SWITCH__)
+        ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_Manual);
+#else
         ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll);
+#endif
         g_just_opened = 1;
     } else {
         /* What was held when it shut is let go of, not remembered. */
