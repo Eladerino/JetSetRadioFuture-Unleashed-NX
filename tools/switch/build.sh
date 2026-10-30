@@ -266,6 +266,10 @@ EOF
             "# Frame rate cap: 60 as on the Xbox. 0 removes the cap (testing only)." \
             "fps=60" \
             "" \
+            "# Wait for the display's refresh before showing each frame." \
+            "# The same choice is in the in-game menu, under Display (Vsync)." \
+            "RECOMP_VSYNC=0" \
+            "" \
             "# ---- sound" \
             "" \
             "mute=0" \
@@ -291,9 +295,35 @@ EOF
             "# chasing a freeze; normally the log is written every 0.25 s." \
             "log_direct=0" \
             "" \
+            "# Log time spent busy-waiting (spinning). A Developer page switch." \
+            "JSRF_SPIN_LOG=0" \
+            "" \
             "# 1 = let the game hand work to the GPU thread without waiting" \
             "# for it to finish the last batch. 0 = the old, slower hand-off." \
             "fast_gpu=1" \
+            "" \
+            "# In widescreen, draw full-screen effects (the boost smear and its" \
+            "# like) across the whole frame instead of squeezing them into a" \
+            "# 4:3 box. A Developer page switch." \
+            "RECOMP_WIDE_FX_FULL=1" \
+            "" \
+            "# Key the vertex and texture caches with CRC32, which the CPU does" \
+            "# in hardware. A Developer page switch." \
+            "RECOMP_GL_CRC32HASH=1" \
+            "" \
+            "# Keep a snapshot of the push buffer's calls, so a crash report can" \
+            "# say what the GPU was last told to do. A Developer page switch." \
+            "RECOMP_PB_CALLSNAP=1" \
+            "" \
+            "# Four Developer switches are read by their presence alone, so" \
+            "# they are NOT lines to set to 0 -- a RECOMP_PB_OVERLAP=0 line" \
+            "# would turn it on. Add the line with =1 to turn one on; leave" \
+            "# the line out for off. The in-game menu writes and removes" \
+            "# these lines itself:" \
+            "#   RECOMP_PB_OVERLAP=1       count push-buffer overlap, in the log" \
+            "#   RECOMP_GL_MERGEPROBE=1    probe merging draws, log the findings" \
+            "#   RECOMP_PB_SEMLOG=1        log GPU semaphore waits and releases" \
+            "#   RECOMP_MENU_STICK_BOTH=1  both sticks in the game's own menus" \
             "" \
             "# 1 = the face buttons by their printed names (A confirms," \
             "# B goes back, X and Y likewise) instead of by Xbox position." \
