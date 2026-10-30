@@ -263,6 +263,12 @@ static void scale_to_window(void)
 }
 
 #if defined(__SWITCH__)
+/* The window's Nintendo-layout preference (nv2a_gl), weak as the input
+ * layer has it: with it on, the menu's own face buttons follow the
+ * printed names too, or the menu would feel backwards in the hands of
+ * the player who just turned the layout on. */
+extern "C" int nv_window_pref_nintendo_layout(void) __attribute__((weak));
+
 /* Pad navigation, fed from the polled controller: the input layer polls
  * the pad rather than taking its events, so the menu's navigation is fed
  * the same way, as ImGui key events on their edges, with the left stick
@@ -294,10 +300,48 @@ static void switch_feed_nav(void)
             if (SDL_IsGameController(i)) { pad = SDL_GameControllerOpen(i); if (pad) break; }
         if (!pad) { prev = 0; return; }
     }
-    for (i = 0; i < (int)(sizeof map / sizeof map[0]); i++) {
-        int down = SDL_GameControllerGetButton(pad, map[i].b) ? 1 : 0;
-        if (down) cur |= 1u << i;
-        if ((cur ^ prev) & (1u << i)) io.AddKeyEvent(map[i].k, down != 0);
+    {
+        /* The layout can be flipped from this very menu, mid-press: the
+         * press that flips it starts under one mapping and ends under
+         * the other. On a change, release every face key and swallow
+         * the face buttons until they are all up, so no key sticks
+         * down and the held press does not land again as its new
+         * meaning (the confirm press becoming a cancel). */
+        static int swap_was = -1, swallow;
+        int swap = nv_window_pref_nintendo_layout
+                && nv_window_pref_nintendo_layout();
+        if (swap != swap_was) {
+            if (swap_was >= 0) {
+                io.AddKeyEvent(ImGuiKey_GamepadFaceDown,  false);
+                io.AddKeyEvent(ImGuiKey_GamepadFaceRight, false);
+                io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  false);
+                io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    false);
+                prev = 0;
+                swallow = 1;
+            }
+            swap_was = swap;
+        }
+        {
+            int rawface = 0;
+            for (i = 0; i < (int)(sizeof map / sizeof map[0]); i++) {
+                ImGuiKey k = map[i].k;
+                int down = SDL_GameControllerGetButton(pad, map[i].b) ? 1 : 0;
+                if (k == ImGuiKey_GamepadFaceDown || k == ImGuiKey_GamepadFaceRight
+                 || k == ImGuiKey_GamepadFaceLeft || k == ImGuiKey_GamepadFaceUp) {
+                    if (down) rawface = 1;
+                    if (swallow) down = 0;
+                    if (swap) {   /* the pairs trade keys, as for the game */
+                        if      (k == ImGuiKey_GamepadFaceDown)  k = ImGuiKey_GamepadFaceRight;
+                        else if (k == ImGuiKey_GamepadFaceRight) k = ImGuiKey_GamepadFaceDown;
+                        else if (k == ImGuiKey_GamepadFaceLeft)  k = ImGuiKey_GamepadFaceUp;
+                        else if (k == ImGuiKey_GamepadFaceUp)    k = ImGuiKey_GamepadFaceLeft;
+                    }
+                }
+                if (down) cur |= 1u << i;
+                if ((cur ^ prev) & (1u << i)) io.AddKeyEvent(k, down != 0);
+            }
+            if (swallow && !rawface) swallow = 0;
+        }
     }
     prev = cur;
     {

@@ -290,6 +290,11 @@ EOF
             "# for it to finish the last batch. 0 = the old, slower hand-off." \
             "fast_gpu=1" \
             "" \
+            "# 1 = the face buttons by their printed names (A confirms," \
+            "# B goes back, X and Y likewise) instead of by Xbox position." \
+            "# The same choice is in the in-game menu, under Controller." \
+            "nintendo_layout=0" \
+            "" \
             "# Any other engine variable can go here too as NAME=value" \
             "# (RECOMP_... or JSRF_...)." > "$EXPORT_DIR/options.txt"
     fi

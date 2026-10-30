@@ -91,8 +91,10 @@ the run's `Logs/last-run.log` attached.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
   together) to open it over the game. It holds the display settings
   (render scale, frame rate), the graphics settings (widescreen,
-  SMAA, MSAA, anisotropic filtering, shadow volumes) and the
-  right-stick camera toggle. Most apply at once; choices are
+  SMAA, MSAA, anisotropic filtering, shadow volumes), the
+  right-stick camera toggle and a Nintendo layout option that
+  swaps A/B and X/Y so the face buttons work by their printed
+  names (it is `nintendo_layout` in `options.txt`). Most apply at once; choices are
   remembered between runs, and `options.txt` still wins at startup
   for anything it sets. File > About lists the build and the credits.
 - **Performance and overclocking:** the recommended settings are the

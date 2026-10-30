@@ -125,6 +125,13 @@ __attribute__((weak)) int nv_window_touch_stick(short *x, short *y)
     return 0;
 }
 
+/* The window's Nintendo-layout preference (nv2a_gl): 1 when the face
+ * buttons are to reach the game by their printed Switch names rather
+ * than by Xbox position. A weak definition that says "off", which the
+ * window's replaces -- a build with no window has no swap. */
+__attribute__((weak)) int nv_window_pref_nintendo_layout(void);
+__attribute__((weak)) int nv_window_pref_nintendo_layout(void) { return 0; }
+
 static int kb_merge(DWORD dwPort, WORD *out, unsigned char analog[8], short axes[4])
 {
     extern int nv_window_keys(unsigned short *b, unsigned char *a)
@@ -596,11 +603,22 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSTICK))  out |= XBOX_GAMEPAD_LEFT_THUMB;
             if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) out |= XBOX_GAMEPAD_RIGHT_THUMB;
             /* analog[] in the order the Mac's backend uses:
-             * A B X Y Black White LT RT; the shoulders are Black and White. */
-            analog[0] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A) ? 255 : 0;
-            analog[1] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B) ? 255 : 0;
-            analog[2] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_X) ? 255 : 0;
-            analog[3] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_Y) ? 255 : 0;
+             * A B X Y Black White LT RT; the shoulders are Black and White.
+             * SDL names the face buttons by Xbox position (A is the bottom
+             * one), which on a Switch pad is the button printed B; with the
+             * Nintendo layout on, both pairs trade places so the printed
+             * name is the one that reaches the game. */
+            if (nv_window_pref_nintendo_layout()) {
+                analog[0] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B) ? 255 : 0;
+                analog[1] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A) ? 255 : 0;
+                analog[2] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_Y) ? 255 : 0;
+                analog[3] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_X) ? 255 : 0;
+            } else {
+                analog[0] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A) ? 255 : 0;
+                analog[1] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B) ? 255 : 0;
+                analog[2] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_X) ? 255 : 0;
+                analog[3] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_Y) ? 255 : 0;
+            }
             analog[4] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 255 : 0;
             analog[5] = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 255 : 0;
             /* SDL trigger axes are 0..32767 -> Xbox analog button 0..255 */

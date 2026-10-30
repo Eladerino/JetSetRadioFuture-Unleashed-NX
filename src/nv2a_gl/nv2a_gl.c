@@ -1539,6 +1539,35 @@ static volatile int g_sdl_want_rcam = -1;
 void nv_window_request_rstick_camera(int on);
 void nv_window_request_rstick_camera(int on) { g_sdl_want_rcam = on ? 1 : 0; }
 
+/* The face buttons by their printed names (the Nintendo layout): SDL
+ * reports the pad by Xbox position, so on a Switch controller the
+ * button printed A reaches the game as B and the one printed B as A
+ * (X and Y likewise). On, the input layer swaps both pairs back, so
+ * the printed button does what its name says in the game's menus;
+ * the game's own prompts are drawn for an Xbox pad and do not move.
+ * Off by default. RECOMP_NINTENDO_LAYOUT stands over the settings
+ * file's nintendo_layout=, as with fps= and skipvol=; the input
+ * layer and the menu's pad navigation ask every poll, so a change
+ * in the menu applies at once. */
+static volatile int g_nintendo_layout = -1;
+int nv_window_pref_nintendo_layout(void);
+int nv_window_pref_nintendo_layout(void)
+{
+    if (g_nintendo_layout < 0) {
+        const char *e = getenv("RECOMP_NINTENDO_LAYOUT");
+        g_nintendo_layout = e ? atoi(e) != 0
+                              : sdl_cfg_get("nintendo_layout", 0) != 0;
+    }
+    return g_nintendo_layout;
+}
+static void nv_window_set_nintendo_layout(int on)
+{
+    g_nintendo_layout = on ? 1 : 0;
+    sdl_cfg_set("nintendo_layout", g_nintendo_layout);
+    fprintf(stderr, "[WIN] the Nintendo layout (A/B, X/Y swapped): %s\n",
+            on ? "on" : "off");
+}
+
 /* The keyboard as a gamepad -- the same layout as the Mac's, by key POSITION
  * (scancodes), so W A S D on QWERTY is Z Q S D on AZERTY:
  *   W A S D    left stick + d-pad       arrows   right stick
@@ -1842,6 +1871,12 @@ static void sdl_toggle_rstick_camera(void)
     sdl_menu_update();
 }
 
+/* Controller > Nintendo layout: applies at once, no restart. */
+static void sdl_toggle_nintendo_layout(void)
+{
+    nv_window_set_nintendo_layout(!nv_window_pref_nintendo_layout());
+}
+
 #if defined(XBOXRECOMP_MENU)
 #include "menu.h"
 
@@ -1975,6 +2010,9 @@ static void sdl_menu_register(void)
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Right-stick camera",
           .state = nv_window_pref_rstick_camera, .run = sdl_toggle_rstick_camera },
+        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Nintendo layout (A/B, X/Y)",
+          .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout },
     };
     xbox_MenuAdd(rows, (int)(sizeof rows / sizeof rows[0]));
 }
