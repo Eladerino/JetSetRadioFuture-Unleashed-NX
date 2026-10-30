@@ -107,6 +107,8 @@ static number_cols number_columns(int m)
     return c;
 }
 
+static void item_tip(const XBOX_MENU_ITEM *it);   /* below, with draw_item */
+
 static void draw_number(const XBOX_MENU_ITEM *it, const number_cols *cols)
 {
     const ImGuiStyle &st = ImGui::GetStyle();
@@ -118,6 +120,7 @@ static void draw_number(const XBOX_MENU_ITEM *it, const number_cols *cols)
     ImGui::PushID(g_items.index_from_ptr(it));
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(it->label);
+    item_tip(it);
     ImGui::SameLine(x + cols->label + st.ItemSpacing.x);
     ImGui::PushItemFlag(ImGuiItemFlags_ButtonRepeat, true);   /* held: on it goes */
     if (ImGui::Button("-", ImVec2(side, side))) to = step_from(it, v, -1);
@@ -138,6 +141,20 @@ static void draw_number(const XBOX_MENU_ITEM *it, const number_cols *cols)
     if (to != v) it->set(to);
 }
 
+/* A row's tip, while the row is hovered or has the pad: BeginItemTooltip
+ * follows the pad's focus as it does the mouse, after the usual short
+ * hover delay, so a pad user resting on a row gets the same words. */
+static void item_tip(const XBOX_MENU_ITEM *it)
+{
+    if (!it->tip) return;
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(it->tip);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
 static void draw_item(const XBOX_MENU_ITEM *it, const number_cols *cols)
 {
     switch (it->kind) {
@@ -146,9 +163,11 @@ static void draw_item(const XBOX_MENU_ITEM *it, const number_cols *cols)
         break;
     case XBOX_ITEM_ACTION:
         if (ImGui::MenuItem(it->label)) chosen(it, -1);
+        item_tip(it);
         break;
     case XBOX_ITEM_TOGGLE:
         if (ImGui::MenuItem(it->label, NULL, it->state() != 0)) chosen(it, -1);
+        item_tip(it);
         break;
     case XBOX_ITEM_CHOICE:
         if (ImGui::BeginMenu(it->label)) {
@@ -157,7 +176,7 @@ static void draw_item(const XBOX_MENU_ITEM *it, const number_cols *cols)
                 if (ImGui::MenuItem(it->choices[i], NULL, i == cur) && i != cur)
                     chosen(it, i);
             ImGui::EndMenu();
-        }
+        } else item_tip(it);
         break;
     case XBOX_ITEM_TOGGLES:
         if (ImGui::BeginMenu(it->label)) {
@@ -165,10 +184,11 @@ static void draw_item(const XBOX_MENU_ITEM *it, const number_cols *cols)
             for (i = 0; i < it->nchoices; i++)
                 if (ImGui::MenuItem(it->choices[i], NULL, (on >> i) & 1)) chosen(it, i);
             ImGui::EndMenu();
-        }
+        } else item_tip(it);
         break;
     case XBOX_ITEM_INFO:
         if (ImGui::MenuItem(it->label)) g_info = g_items.index_from_ptr(it);
+        item_tip(it);
         break;
     case XBOX_ITEM_NUMBER:
         draw_number(it, cols);

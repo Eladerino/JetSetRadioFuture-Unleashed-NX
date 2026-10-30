@@ -83,6 +83,10 @@ typedef struct XBOX_MENU_ITEM {
      * Display's Skip intro, added as the game starts, below the window's
      * rows, added once the window is up. */
     int             last;
+    /* Said in a tooltip while the row is hovered or has the pad: what
+     * the setting does, in a line or two of plain words. NULL: no
+     * tooltip. Kept last so tables written before it stay valid. */
+    const char     *tip;
 } XBOX_MENU_ITEM;
 
 /* Adds rows to the end of their menus (above any `last` row), copied: the

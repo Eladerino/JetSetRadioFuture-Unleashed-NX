@@ -135,12 +135,15 @@ static void exit_game(void)
 
 /* Every field, in order: C++11 has no designated initializers. */
 static const XBOX_MENU_ITEM k_file[] = {
-    { XBOX_MENU_FILE, XBOX_ITEM_INFO,      "About", NULL, NULL,      NULL, NULL, 0, about_text, NULL, NULL, NULL, 0, 0, 0, NULL, 0 },
-    { XBOX_MENU_FILE, XBOX_ITEM_SEPARATOR, NULL,    NULL, NULL,      NULL, NULL, 0, NULL,       NULL, NULL, NULL, 0, 0, 0, NULL, 0 },
+    { XBOX_MENU_FILE, XBOX_ITEM_INFO,      "About", NULL, NULL,      NULL, NULL, 0, about_text, NULL, NULL, NULL, 0, 0, 0, NULL, 0,
+      "What this is, who made it, and this build's details." },
+    { XBOX_MENU_FILE, XBOX_ITEM_SEPARATOR, NULL,    NULL, NULL,      NULL, NULL, 0, NULL,       NULL, NULL, NULL, 0, 0, 0, NULL, 0, NULL },
     { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Restart", NULL, recomp_restart_self, NULL, NULL, 0, NULL,
-      "The game restarts, losing unsaved progress.", NULL, NULL, 0, 0, 0, NULL, 0 },
+      "The game restarts, losing unsaved progress.", NULL, NULL, 0, 0, 0, NULL, 0,
+      "Starts the game over from the top, as if it had just been launched." },
     { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Exit",  NULL, exit_game, NULL, NULL, 0, NULL,
-      "Unsaved progress is lost.", NULL, NULL, 0, 0, 0, NULL, 0 },
+      "Unsaved progress is lost.", NULL, NULL, 0, 0, 0, NULL, 0,
+      "Closes the game." },
 };
 
 /* ---- opening and closing ------------------------------------------------ */

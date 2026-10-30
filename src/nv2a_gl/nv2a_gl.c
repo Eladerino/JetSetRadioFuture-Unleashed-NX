@@ -2143,90 +2143,157 @@ static void sdl_menu_register(void)
           .state = menu_scale_state, .pick = menu_scale_pick,
           .choices = scale_names, .nchoices = NV2A_SCALE_MAX,
           .confirm = "The new scale is stored and the game restarts; "
-                     "on the Switch it applies at the next start." },
+                     "on the Switch it applies at the next start.",
+          .tip = "How many times the game's own resolution it renders "
+                 "at. Higher is sharper and slower; a lower scale is "
+                 "the cheapest speed-up there is." },
         { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_CHOICE,
           .label = "Frame rate",
           .state = menu_fps_state, .pick = menu_fps_pick,
-          .choices = fps_names, .nchoices = 3 },
+          .choices = fps_names, .nchoices = 3,
+          .tip = "Caps the frame rate. 60 is the original game's pace; "
+                 "Unlimited lets it run as fast as it can." },
         { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_TOGGLE,
           .label = "Vsync",
-          .state = nv_window_pref_vsync, .run = sdl_toggle_vsync },
+          .state = nv_window_pref_vsync, .run = sdl_toggle_vsync,
+          .tip = "Waits for the display's refresh before showing each "
+                 "frame. On is steadier; off can tear, and the frame "
+                 "is paced by the game's own vblank either way." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "Widescreen (16:9)",
-          .state = nv2a_widescreen, .run = sdl_toggle_widescreen },
+          .state = nv2a_widescreen, .run = sdl_toggle_widescreen,
+          .tip = "Widens the view to fill a 16:9 screen instead of "
+                 "the original 4:3." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "SMAA",
-          .state = nv2a_smaa, .run = menu_smaa_flip },
+          .state = nv2a_smaa, .run = menu_smaa_flip,
+          .tip = "A smoothing pass over edges after rendering: a "
+                 "softer picture for a small cost." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
           .label = "MSAA (Restart)",
           .state = menu_msaa_state, .pick = menu_msaa_pick,
-          .choices = msaa_names, .nchoices = 4 },
+          .choices = msaa_names, .nchoices = 4,
+          .tip = "Smooths edges while rendering. Higher is smoother "
+                 "and costs more; applies at the next start." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
           .label = "Anisotropic filtering",
           .state = menu_aniso_state, .pick = menu_aniso_pick,
-          .choices = aniso_names, .nchoices = 5 },
+          .choices = aniso_names, .nchoices = 5,
+          .tip = "Keeps ground and wall textures sharp where they "
+                 "run away from you at a shallow angle." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
           .label = "Shadow volumes",
           .state = menu_skipvol_state, .pick = menu_skipvol_pick,
-          .choices = skipvol_names, .nchoices = 4 },
+          .choices = skipvol_names, .nchoices = 4,
+          .tip = "A speed experiment: shadow volumes are work the "
+                 "renderer can skip, for characters, for scenery, or "
+                 "for everything. Skipped shadows simply don't appear." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Right-stick camera",
-          .state = nv_window_pref_rstick_camera, .run = sdl_toggle_rstick_camera },
+          .state = nv_window_pref_rstick_camera, .run = sdl_toggle_rstick_camera,
+          .tip = "The right stick moves the camera. Off, it does what "
+                 "it did on the Xbox." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Nintendo layout (A/B, X/Y)",
-          .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout },
+          .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout,
+          .tip = "A and B trade places, and X and Y too, in the game "
+                 "and in this menu, so each button does what its "
+                 "printed name says. The game's own prompts are drawn "
+                 "for an Xbox pad and don't move." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Both sticks in game menus (Restart)",
-          .state = dev_state_DEV_STICKBOTH, .run = dev_run_DEV_STICKBOTH },
+          .state = dev_state_DEV_STICKBOTH, .run = dev_run_DEV_STICKBOTH,
+          .tip = "In the game's own menus, the right stick moves the "
+                 "selection too, not just the left. Applies at the "
+                 "next start." },
     };
     /* The Developer page: the engine's own switches, each labelled
      * (Restart) because the part that reads it already has. They are
      * written to options.txt, so the next start picks them up. */
     static const XBOX_MENU_ITEM dev_rows[] = {
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_INFO,
-          .label = "Status", .text = menu_status_text },
+          .label = "Status", .text = menu_status_text,
+          .tip = "Frames, draws and triangles a second, counted "
+                 "between one look at Status and the next." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Run log (Restart)",
-          .state = dev_state_DEV_LOG, .run = dev_run_DEV_LOG },
+          .state = dev_state_DEV_LOG, .run = dev_run_DEV_LOG,
+          .tip = "The run log, written to the Logs folder. Off stops "
+                 "the logging altogether: a small saving, and nothing "
+                 "left to look at when something breaks." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Profiler (Restart)",
-          .state = dev_state_DEV_PROFILE, .run = dev_run_DEV_PROFILE },
+          .state = dev_state_DEV_PROFILE, .run = dev_run_DEV_PROFILE,
+          .tip = "A once-a-second report in the log: frame time and "
+                 "where it went. For finding what makes a scene slow." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Sampler (Restart)",
-          .state = dev_state_DEV_SAMPLE, .run = dev_run_DEV_SAMPLE },
+          .state = dev_state_DEV_SAMPLE, .run = dev_run_DEV_SAMPLE,
+          .tip = "Samples what the renderer is doing as it runs and "
+                 "writes the samples to the log, for profiling a "
+                 "stretch of play." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Log direct (Restart)",
-          .state = dev_state_DEV_LOGDIR, .run = dev_run_DEV_LOGDIR },
+          .state = dev_state_DEV_LOGDIR, .run = dev_run_DEV_LOGDIR,
+          .tip = "Log lines are written the moment they happen "
+                 "instead of through the buffer. Slower; it catches "
+                 "the last lines before a crash." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Spin log (Restart)",
-          .state = dev_state_DEV_SPIN, .run = dev_run_DEV_SPIN },
+          .state = dev_state_DEV_SPIN, .run = dev_run_DEV_SPIN,
+          .tip = "Logs time spent busy-waiting (spinning) to the log." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Fast GPU (Restart)",
-          .state = dev_state_DEV_FASTGPU, .run = dev_run_DEV_FASTGPU },
+          .state = dev_state_DEV_FASTGPU, .run = dev_run_DEV_FASTGPU,
+          .tip = "Acknowledges GPU flushes from a second thread "
+                 "during kickoff. A speed experiment for GPU-bound "
+                 "scenes." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Shader cache (Restart)",
-          .state = dev_state_DEV_SHADERCACHE, .run = dev_run_DEV_SHADERCACHE },
+          .state = dev_state_DEV_SHADERCACHE, .run = dev_run_DEV_SHADERCACHE,
+          .tip = "Keeps compiled shaders on disk between runs, so a "
+                 "scene doesn't stutter while its shaders compile "
+                 "again. The first run with it off, or after it's "
+                 "cleared, is the slow one." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Mute (Restart)",
-          .state = dev_state_DEV_MUTE, .run = dev_run_DEV_MUTE },
+          .state = dev_state_DEV_MUTE, .run = dev_run_DEV_MUTE,
+          .tip = "No sound at all: the audio core is skipped, not "
+                 "just turned down." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Widescreen FX full frame (Restart)",
-          .state = dev_state_DEV_WIDEFX, .run = dev_run_DEV_WIDEFX },
+          .state = dev_state_DEV_WIDEFX, .run = dev_run_DEV_WIDEFX,
+          .tip = "In widescreen, full-screen effects (the boost smear "
+                 "and its like) are drawn across the whole frame. "
+                 "Off squeezes them into a 4:3 box, where they smear." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "CRC32 texture hashing (Restart)",
-          .state = dev_state_DEV_CRC32, .run = dev_run_DEV_CRC32 },
+          .state = dev_state_DEV_CRC32, .run = dev_run_DEV_CRC32,
+          .tip = "The vertex and texture caches key their entries "
+                 "with CRC32, which this CPU does in hardware. Off "
+                 "compares the long way." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB overlap accounting (Restart)",
-          .state = dev_state_DEV_OVERLAP, .run = dev_run_DEV_OVERLAP },
+          .state = dev_state_DEV_OVERLAP, .run = dev_run_DEV_OVERLAP,
+          .tip = "Counts how much of each frame the push-buffer walk "
+                 "spends overlapped with everything else, into the "
+                 "log. Measuring only; it changes nothing." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Merge probe (Restart)",
-          .state = dev_state_DEV_MERGE, .run = dev_run_DEV_MERGE },
+          .state = dev_state_DEV_MERGE, .run = dev_run_DEV_MERGE,
+          .tip = "Probes whether neighbouring draws could be merged "
+                 "into one, and logs what it finds. Measuring only." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB call snapshot (Restart)",
-          .state = dev_state_DEV_CALLSNAP, .run = dev_run_DEV_CALLSNAP },
+          .state = dev_state_DEV_CALLSNAP, .run = dev_run_DEV_CALLSNAP,
+          .tip = "Keeps a snapshot of the push buffer's calls, so a "
+                 "crash report can say what the GPU was last told "
+                 "to do." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB semaphore log (Restart)",
-          .state = dev_state_DEV_SEMLOG, .run = dev_run_DEV_SEMLOG },
+          .state = dev_state_DEV_SEMLOG, .run = dev_run_DEV_SEMLOG,
+          .tip = "Logs the GPU's semaphore waits and releases to the "
+                 "log. Chatty; for stalls and hangs." },
     };
     xbox_MenuAdd(rows, (int)(sizeof rows / sizeof rows[0]));
     xbox_MenuAdd(dev_rows, (int)(sizeof dev_rows / sizeof dev_rows[0]));
