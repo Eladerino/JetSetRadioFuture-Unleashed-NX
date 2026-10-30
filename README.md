@@ -4,7 +4,7 @@
 
 # JSRF Unleashed
 
-**Jet Set Radio Future, running natively on Mac, Windows, Linux, Android, iPhone and iPad.** Not an emulator — the
+**Jet Set Radio Future, running natively on Nintendo Switch, Mac, Windows, Linux, Android, iPhone and iPad.** Not an emulator — the
 game's own code, statically recompiled into C and built as a native
 application.
 
@@ -83,7 +83,8 @@ the run's `Logs/last-run.log` attached.
   copying a new `.nro` over the old one keeps your settings. It
   covers widescreen (16:9 in gameplay; logos and the title screen
   stay 4:3), internal resolution (1x to 4x), anisotropic filtering,
-  the 60 fps cap, the shader cache, and `fast_gpu`, the asynchronous
+  the 60 fps cap, the shader cache, the run log (`log=0` writes no
+  log file at all), and `fast_gpu`, the asynchronous
   GPU path, which is on by default on Switch; `fast_gpu=0` falls back
   to the serial path.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
