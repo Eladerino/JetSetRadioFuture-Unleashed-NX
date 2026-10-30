@@ -307,12 +307,14 @@ EOF
             "# 4:3 box. A Developer page switch." \
             "RECOMP_WIDE_FX_FULL=1" \
             "" \
-            "# Key the vertex and texture caches with CRC32, which the CPU does" \
-            "# in hardware. A Developer page switch." \
+            "# Check the vertex and texture caches' contents with the CPU's" \
+            "# CRC instructions (fast). 0 = the older software hash. A" \
+            "# Developer page switch." \
             "RECOMP_GL_CRC32HASH=1" \
             "" \
-            "# Keep a snapshot of the push buffer's calls, so a crash report can" \
-            "# say what the GPU was last told to do. A Developer page switch." \
+            "# With fast_gpu, copy the GPU command lists the game replays by" \
+            "# reference before drawing them, so the game cannot rewrite one" \
+            "# halfway through. 0 = read them live. A Developer page switch." \
             "RECOMP_PB_CALLSNAP=1" \
             "" \
             "# Four Developer switches are read by their presence alone, so" \

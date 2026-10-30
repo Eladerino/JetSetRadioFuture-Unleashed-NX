@@ -2356,9 +2356,10 @@ static void sdl_menu_register(void)
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB call snapshot (Restart)",
           .state = dev_state_DEV_CALLSNAP, .run = dev_run_DEV_CALLSNAP,
-          .tip = "Keeps a snapshot of the push buffer's calls, so a "
-                 "crash report can say what the GPU was last told "
-                 "to do." },
+          .tip = "With fast GPU on, copies the command lists the "
+                 "game replays by reference before drawing them, so "
+                 "the game cannot rewrite one halfway through. Off "
+                 "reads them live." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB semaphore log (Restart)",
           .state = dev_state_DEV_SEMLOG, .run = dev_run_DEV_SEMLOG,
