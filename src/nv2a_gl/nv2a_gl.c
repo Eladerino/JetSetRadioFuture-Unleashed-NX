@@ -518,6 +518,10 @@ static double prof_now(void)
 /* Time spent walking the pushbuffer, measured by the walker and reported here
  * so that it lands beside the GL numbers. See nv2a_pb_scan. */
 static double g_pb_time;
+#ifdef NV2A_GL_HAVE_GL
+static int g_is_gl;        /* tentative: it is described with the GL objects below */
+void nv2a_gfx_gl_uniform_counts(unsigned long *sent, unsigned long *skipped);
+#endif
 static unsigned long g_pb_words;
 static double g_pb_t0;
 void nv2a_pb_time_begin(void);
@@ -687,6 +691,21 @@ static void prof_report(void)
             g_prof.tex_held, g_prof.tex_held_bytes >> 20,
             (g_prof.tex_verified - prev.tex_verified) >> 10,
             g_prof.n_tex_rewritten - prev.n_tex_rewritten);
+#ifdef NV2A_GL_HAVE_GL
+        if (g_is_gl) {
+            /* Small uniforms set to the value their program already held
+             * are skipped in the backend (RECOMP_GL_UNIFORM_SKIP=0 sends
+             * them all): how many calls that saved. */
+            static unsigned long prev_sent, prev_skip;
+            unsigned long sent, skip;
+            nv2a_gfx_gl_uniform_counts(&sent, &skip);
+            fprintf(stderr, "[GLPROF]   uniform calls per second: %lu sent, "
+                    "%lu skipped as unchanged\n",
+                    (unsigned long)((sent - prev_sent) / dt),
+                    (unsigned long)((skip - prev_skip) / dt));
+            prev_sent = sent; prev_skip = skip;
+        }
+#endif
         {
             static double prev_pb; static unsigned long prev_words;
             fprintf(stderr,

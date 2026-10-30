@@ -505,6 +505,7 @@ static int glx_tex_read(uint32_t t, uint32_t w, uint32_t h, void *bgra)
 /* ---- programs and uniforms ----------------------------------------------- */
 
 #define MAX_PROGS 4096
+struct prog_ushadow { uint64_t have; uint32_t v[NV2A_U_COUNT][4]; };  /* see glx_uniform_f */
 static int g_bin_ok;             /* program binaries are saved and loaded */
 static struct {
     GLuint prog;
@@ -515,6 +516,7 @@ static struct {
      * uploaded whole. */
     GLint  csize;
     int    used;
+    struct prog_ushadow *ush;   /* its small uniforms as last sent: glx_uniform_f */
 } *g_prog;
 static uint32_t g_cur_prog;      /* handle in use, 0 none */
 
@@ -640,6 +642,10 @@ static uint32_t glx_adopt(GLuint prog)
     if (i == MAX_PROGS) { fprintf(stderr, "  [GL] out of program slots\n"); glDeleteProgram(prog); return 0; }
     g_prog[i].prog = prog;
     g_prog[i].used = 1;
+    /* A freshly linked program holds zeros, not what an earlier program in
+     * this slot was sent. */
+    free(g_prog[i].ush);
+    g_prog[i].ush = calloc(1, sizeof *g_prog[i].ush);
     /* Where this program keeps each uniform, looked up once. A name looked
      * up in one place and not another is a uniform that silently stays at
      * zero, so there is exactly one list: nv2a_uniform_desc. */
@@ -874,6 +880,8 @@ static void glx_prog_free(uint32_t h)
     glDeleteProgram(g_prog[h - 1].prog);
     g_prog[h - 1].used = 0;
     g_prog[h - 1].prog = 0;
+    free(g_prog[h - 1].ush);
+    g_prog[h - 1].ush = NULL;
     if (g_cur_prog == h) g_cur_prog = 0;
 }
 
@@ -889,12 +897,71 @@ static void glx_prog_use(uint32_t h)
     g_cur_prog = h;
 }
 
+/* The small uniforms (16 bytes or less: the scalars, the vectors, a 2x2
+ * matrix, every int and sampler) as each program was last sent them.
+ *
+ * The draw path sets them on every draw whether they changed or not --
+ * position mode, fog, the alpha test, each stage's scale and offset, the
+ * samplers -- and almost none of them change from one draw to the next.
+ * A glUniform call is not free on Mesa even when the value is the same:
+ * the location is validated and remapped, the value converted and copied,
+ * and the stage's constants marked dirty for the next draw. A uniform's
+ * value belongs to the program object and lasts as long as it does, so
+ * a value this program already holds is skipped here, compared bit for
+ * bit. Arrays and matrices bigger than 16 bytes (c[], the fixed-function
+ * matrices, the lights) always go through. RECOMP_GL_UNIFORM_SKIP=0 sends
+ * every call, as before. */
+static unsigned long g_ush_sent, g_ush_skipped;
+
+static int ush_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("RECOMP_GL_UNIFORM_SKIP"); on = !(e && e[0] == '0'); }
+    return on;
+}
+
+/* 1 if this program already holds these bytes for id; otherwise records
+ * them as what it will hold and returns 0. */
+static int ush_same(int id, const void *v, size_t bytes)
+{
+    struct prog_ushadow *u = g_prog[g_cur_prog - 1].ush;
+    uint64_t bit = 1ull << id;
+    if (!u || !ush_on()) { g_ush_sent++; return 0; }
+    if (bytes > sizeof u->v[0]) {          /* not kept: forget any old record */
+        u->have &= ~bit;
+        g_ush_sent++;
+        return 0;
+    }
+    if ((u->have & bit) && !memcmp(u->v[id], v, bytes)) { g_ush_skipped++; return 1; }
+    memcpy(u->v[id], v, bytes);
+    u->have |= bit;
+    g_ush_sent++;
+    return 0;
+}
+
+/* For the GL profile: glUniform calls made, and skipped as unchanged. */
+void nv2a_gfx_gl_uniform_counts(unsigned long *sent, unsigned long *skipped);
+void nv2a_gfx_gl_uniform_counts(unsigned long *sent, unsigned long *skipped)
+{
+    *sent = g_ush_sent;
+    *skipped = g_ush_skipped;
+}
+
 static void glx_uniform_f(int id, const float *v, int n)
 {
     GLint loc;
+    size_t bytes;
     if (!prog_ok(g_cur_prog) || id < 0 || id >= NV2A_U_COUNT) return;
     loc = g_prog[g_cur_prog - 1].loc[id];
     if (loc < 0) return;
+    switch (nv2a_uniform_desc[id].type) {
+    case NV2A_UT_FLOAT: bytes = 4;  break;
+    case NV2A_UT_VEC2:  bytes = 8;  break;
+    case NV2A_UT_VEC3:  bytes = 12; break;
+    default:            bytes = 16; break;   /* VEC4, MAT2 */
+    }
+    if (n < 1) return;
+    if (ush_same(id, v, bytes * (size_t)n)) return;
     switch (nv2a_uniform_desc[id].type) {
     case NV2A_UT_FLOAT: glUniform1fv(loc, n, v); break;
     case NV2A_UT_VEC2:  glUniform2fv(loc, n, v); break;
@@ -910,7 +977,8 @@ static void glx_uniform_i(int id, int v)
     GLint loc;
     if (!prog_ok(g_cur_prog) || id < 0 || id >= NV2A_U_COUNT) return;
     loc = g_prog[g_cur_prog - 1].loc[id];
-    if (loc >= 0) glUniform1i(loc, v);
+    if (loc < 0 || ush_same(id, &v, sizeof v)) return;
+    glUniform1i(loc, v);
 }
 
 /* Part of c[]: the constants that changed since this program last had them,
