@@ -18,8 +18,8 @@
  * Back (Minus) itself and calls xbox_MenuSetOpen, the event path's own
  * Back handling is compiled out (the same press would toggle twice),
  * and the pad's navigation is fed in xbox_MenuFrame (switch_feed_nav),
- * which has the frame's last word on the face keys so the Nintendo
- * layout can swap them over the backend's own polling.
+ * which also turns the Nintendo layout into ImGui's own swap of the
+ * activate and cancel buttons.
  */
 #include "menu_sdl.h"
 #include "menu.h"
@@ -187,13 +187,11 @@ extern "C" int xbox_MenuInit(SDL_Window *window, void *gl_context, const char *a
     io.IniFilename = NULL;              /* nothing written beside the game */
     io.LogFilename = NULL;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
-    /* The queue is flattened, not trickled: on the Switch the feed
-     * re-asserts the face keys after the backend in the same frame
-     * (switch_feed_nav), and trickling puts a key's second change off
-     * to the next frame -- which left a held button reading as a
-     * fresh press on alternate frames, and the Nintendo layout row
-     * flicked on and off under one press. Flattened, a frame's last
-     * word on a key is its state, as the feed's design assumes. */
+    /* The queue is flattened, not trickled: on the Switch the d-pad
+     * feed adds its events after the backend's in the same frame
+     * (switch_feed_nav), and trickling would put a key's second change
+     * off to the next frame. Flattened, a frame's last word on a key
+     * is its state. */
     io.ConfigInputTrickleEventQueue = false;
     /* The window keeps its own rule for the pointer (hidden in full screen). */
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
@@ -283,21 +281,19 @@ extern "C" int nv_window_pref_nintendo_layout(void) __attribute__((weak));
 
 /* Pad navigation. The SDL backend polls the pad itself on every frame
  * (ImGui_ImplSDL2_NewFrame, called just before this) and asserts every
- * button as a level; that feed is the one of record, and ImGui takes a
- * frame's final word on a key -- a key is pressed for the frame its
- * state ends down in, however it got there. This feed adds the d-pad,
+ * button as a level, by Xbox position; that feed is the one of record
+ * for the face buttons, and the only one. This feed adds the d-pad,
  * shoulders and Start on their edges, as it always has, and the left
- * stick below; and because it runs after the backend in the same
- * frame, it has the last word on the four face keys, which is where
- * the Nintendo layout is applied: with the layout on, the face keys
- * are re-asserted swapped, every frame, over the backend's unswapped
- * levels. With it off, this feed says nothing about them.
+ * stick below.
  *
- * The layout can be flipped from this very menu, mid-press: the press
- * that flips it starts under one mapping and ends under the other.
- * While a flip is fresh, the face keys are asserted up until every
- * face button is physically up, so the held press does not land again
- * as its new meaning (the confirm press becoming a cancel).
+ * The Nintendo layout is ImGui's own: io.ConfigNavSwapGamepadButtons
+ * makes the right face button (printed A) activate and the bottom one
+ * (printed B) cancel, which is the whole of what the layout means in
+ * the menu. Nothing re-asserts the face keys over the backend's, so no
+ * key is ever reported down and up by two feeds in one frame. A flip
+ * under the player's finger needs no special case either: ImGui acts
+ * on a key's press, not on its level, so the button that flipped the
+ * layout is not read again in its new meaning while it stays held.
  * Player one's pad; the first frame the menu is open, and after a pad
  * change, the handle is found again. */
 static void switch_feed_nav(void)
@@ -316,6 +312,20 @@ static void switch_feed_nav(void)
     ImGuiIO &io = ImGui::GetIO();
     unsigned cur = 0;
     int i;
+    {
+        static int swap_was = -1;
+        bool swap = nv_window_pref_nintendo_layout
+                 && nv_window_pref_nintendo_layout();
+        io.ConfigNavSwapGamepadButtons = swap;
+        if ((int)swap != swap_was) {
+            /* One line per change: a row that flicks shows as two. */
+            fprintf(stderr, "[MENU] face buttons: %s (frame %d)\n",
+                    swap ? "Nintendo layout, A activates"
+                         : "Xbox layout, bottom button activates",
+                    ImGui::GetFrameCount());
+            swap_was = swap;
+        }
+    }
     if (!pad || !SDL_GameControllerGetAttached(pad)) {
         pad = NULL;
         for (i = 0; i < SDL_NumJoysticks(); i++)
@@ -328,31 +338,6 @@ static void switch_feed_nav(void)
         if ((cur ^ prev) & (1u << i)) io.AddKeyEvent(map[i].k, down != 0);
     }
     prev = cur;
-    {
-        static int swap_was = -1, swallow;
-        int swap = nv_window_pref_nintendo_layout
-                && nv_window_pref_nintendo_layout();
-        int a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) ? 1 : 0;
-        int b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) ? 1 : 0;
-        int x = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) ? 1 : 0;
-        int y = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) ? 1 : 0;
-        if (swap != swap_was) {
-            if (swap_was >= 0) swallow = 1;
-            swap_was = swap;
-        }
-        if (swallow) {
-            io.AddKeyEvent(ImGuiKey_GamepadFaceDown,  false);
-            io.AddKeyEvent(ImGuiKey_GamepadFaceRight, false);
-            io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  false);
-            io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    false);
-            if (!a && !b && !x && !y) swallow = 0;
-        } else if (swap) {   /* the pairs trade keys, as for the game */
-            io.AddKeyEvent(ImGuiKey_GamepadFaceDown,  b != 0);
-            io.AddKeyEvent(ImGuiKey_GamepadFaceRight, a != 0);
-            io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  y != 0);
-            io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    x != 0);
-        }
-    }
     {
         static const struct { SDL_GameControllerAxis a; ImGuiKey neg, pos; } ax[] = {
             { SDL_CONTROLLER_AXIS_LEFTX, ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight },
