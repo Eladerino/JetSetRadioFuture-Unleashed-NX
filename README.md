@@ -98,9 +98,11 @@ the run's `Logs/last-run.log` attached.
   page holds a live status readout and the engine's logging and
   diagnostic switches (the run log, the profiler, fast GPU, the
   shader cache and more); those are written to `options.txt` and
-  take effect at the next start. Most apply at once; choices are
-  remembered between runs, and `options.txt` still wins at startup
-  for anything it sets. File > About lists the build and the credits.
+  take effect at the next start. Every row says what it does in a
+  tooltip while it is highlighted, the menu bar shows the current
+  frame rate and how to close the menu, and choices are remembered
+  between runs: the menu keeps `options.txt` itself up to date for
+  the settings it names. File > About lists the build and the credits.
 - **Performance and overclocking:** the recommended settings are the
   shipped defaults (render scale 1x, SMAA on, MSAA off, anisotropic
   filtering 4x, shadow volumes drawn, the 60 fps cap). In crowded
