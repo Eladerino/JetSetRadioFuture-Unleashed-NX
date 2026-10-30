@@ -403,8 +403,12 @@ static void open_log(const char *data)
     char logs[1024], last[1100], prev[1100];
     const char *d = getenv("JSRF_LOG_DIRECT");
     snprintf(logs, sizeof logs, "%s/Logs", data);
-    mkdir_p(logs);
     snprintf(s_logs_dir, sizeof s_logs_dir, "%s", logs);
+    /* options.txt log=0: no log at all. Nothing is created or
+     * written for logging and stdio keeps its default destination,
+     * so output is discarded; a crash then leaves no log behind. */
+    { const char *l = getenv("JSRF_LOG"); if (l && !atoi(l)) return; }
+    mkdir_p(logs);
     snprintf(last, sizeof last, "%s/last-run.log", logs);
     snprintf(prev, sizeof prev, "%s/previous-run.log", logs);
     remove(prev);
@@ -488,6 +492,7 @@ static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "profile",      "RECOMP_GL_PROFILE",   1 },
     { "sample",       "JSRF_SAMPLE",         0 },
     { "log_direct",   "JSRF_LOG_DIRECT",     0 },
+    { "log",          "JSRF_LOG",            0 },
     { "fast_gpu",     "RECOMP_NV2A_FLUSH_ACK", 0 },
 };
 

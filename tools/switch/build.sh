@@ -277,6 +277,11 @@ EOF
             "# (turn into names with tools/switch/prof.sh)." \
             "sample=0" \
             "" \
+            "# Write the run's log (Logs/last-run.log). 0 = no log file" \
+            "# at all: logging writes nothing to the card, and a crash" \
+            "# leaves no log behind." \
+            "log=1" \
+            "" \
             "# 1 = write every log line to the card at once (slower). Only for" \
             "# chasing a freeze; normally the log is written every 0.25 s." \
             "log_direct=0" \
