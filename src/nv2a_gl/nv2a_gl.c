@@ -2132,37 +2132,44 @@ static const char *menu_status_text(void)
 {
     static char buf[256];
     static double last_t;
-    static uint32_t last_flips, last_draws, last_tris;
+    static uint32_t last_frames, last_flips, last_draws, last_tris;
     double now = prof_now(), dt = now - last_t;
     if (!last_t || dt < 0.5) {
-        last_t = now; last_flips = S.flips; last_draws = S.draws; last_tris = S.tris;
+        last_t = now; last_frames = S.frames; last_flips = S.flips;
+        last_draws = S.draws; last_tris = S.tris;
         return "Counting from now.\n\nOpen Status again in a few seconds and it "
                "will show the rates over the time between the two looks: "
                "frames, draws and triangles a second.";
     }
     snprintf(buf, sizeof buf,
-             "%.0f frames a second\n%u draws a second\n%.0f thousand triangles a second\n\n"
+             "%.0f frames a second\n%.0f passes a second\n%u draws a second\n%.0f thousand triangles a second\n\n"
              "Over the %.1f seconds since Status was last opened.",
-             (S.flips - last_flips) / dt, (unsigned)((S.draws - last_draws) / dt),
+             (S.frames - last_frames) / dt, (S.flips - last_flips) / dt,
+             (unsigned)((S.draws - last_draws) / dt),
              (S.tris - last_tris) / dt / 1000.0, dt);
-    last_t = now; last_flips = S.flips; last_draws = S.draws; last_tris = S.tris;
+    last_t = now; last_frames = S.frames; last_flips = S.flips;
+    last_draws = S.draws; last_tris = S.tris;
     return buf;
 }
 
 /* The menu bar's frame rate (menu.cpp asks for it by this name):
- * flips over the last half second or so, from the same counters
+ * frames over the last half second or so, from the same counters
  * Status reads, smoothed by only ever being measured over a whole
- * window. 0 until the first window has passed. */
+ * window. 0 until the first window has passed. Frames, not flips:
+ * S.flips counts render passes, and this title finishes about
+ * three of those per frame, so a rate taken from it reads roughly
+ * three times the real frame rate (as the first version of this
+ * did, and as Status did -- both fixed together). */
 double nv2a_menu_frame_rate(void)
 {
     static double last_t, rate;
-    static uint32_t last_flips;
+    static uint32_t last_frames;
     double now = prof_now();
-    if (!last_t) { last_t = now; last_flips = S.flips; return 0.0; }
+    if (!last_t) { last_t = now; last_frames = S.frames; return 0.0; }
     if (now - last_t >= 0.5) {
-        rate = (S.flips - last_flips) / (now - last_t);
+        rate = (S.frames - last_frames) / (now - last_t);
         last_t = now;
-        last_flips = S.flips;
+        last_frames = S.frames;
     }
     return rate;
 }
