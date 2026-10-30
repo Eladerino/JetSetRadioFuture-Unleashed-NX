@@ -216,7 +216,8 @@ typedef enum {
     NV2A_U_BUMPMAT0  = NV2A_U_TEXOFF0 + 4,    /* ..3 */
     NV2A_U_BUMPSCALE0 = NV2A_U_BUMPMAT0 + 4,  /* ..3 */
     NV2A_U_BUMPOFF0  = NV2A_U_BUMPSCALE0 + 4, /* ..3 */
-    NV2A_U_COUNT     = NV2A_U_BUMPOFF0 + 4
+    NV2A_U_PSHC      = NV2A_U_BUMPOFF0 + 4,   /* the combiner constants (nv2a_psh_consts.h) */
+    NV2A_U_COUNT
 } Nv2aUniformId;
 
 enum { NV2A_UT_FLOAT, NV2A_UT_VEC2, NV2A_UT_VEC3, NV2A_UT_VEC4,
