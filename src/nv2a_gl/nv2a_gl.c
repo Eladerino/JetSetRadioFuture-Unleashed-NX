@@ -5304,7 +5304,11 @@ static const char *vc_debug_switch(void)
         "TEXHASH_FULL", "CONTIG_ALL", "HEAP_FIRST", "STICKY_ATTRS",
         /* the frame dumps: taken at the flip, from the picture */
         "DUMP_FB", "DUMP_AFTER", "DUMP_EVERY", "DUMP_3D", "DUMP_TRIS",
-        "DUMP_CHARS", "DUMP_DEPTH", NULL
+        "DUMP_CHARS", "DUMP_DEPTH",
+        /* the Switch fork's switches, none of which reads vertices back:
+         * options.txt and the Developer page write CRC32HASH, and the
+         * merge census reads the cache's own buffers */
+        "CRC32HASH", "UNIFORM_SKIP", "MERGEPROBE", NULL
     };
     static char name[64];
     char **e;
