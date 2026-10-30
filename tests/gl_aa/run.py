@@ -12,7 +12,7 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[2]
 sources = ["tests/gl_aa/test_main.c", "src/nv2a_gl/nv2a_gfx_gl.c", "src/nv2a_gl/nv2a_smaa.c",
-           "src/nv2a_gl/nv2a_shader_cache.c", "src/nv2a_gl/nv2a_uniforms.c"]
+           "src/nv2a_gl/nv2a_shader_cache.c", "src/nv2a_gl/nv2a_uniforms.c", "src/nv2a_gl/nv2a_vsh.c"]
 cc = sys.argv[1] if len(sys.argv) > 1 else "cc"
 failed = 0
 with tempfile.TemporaryDirectory(prefix="gl-aa-") as directory:

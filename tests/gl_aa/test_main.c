@@ -32,6 +32,12 @@
 static const Nv2aGfx *G;
 static int failures;
 
+#if defined(NV2A_GLES)
+/* The backend finds glClipControlEXT through SDL, as on a phone; here, EGL. */
+void *SDL_GL_GetProcAddress(const char *proc);
+void *SDL_GL_GetProcAddress(const char *proc) { return (void *)eglGetProcAddress(proc); }
+#endif
+
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("FAIL: " __VA_ARGS__); printf("\n"); } \
                               else { printf("ok: " __VA_ARGS__); printf("\n"); } } while (0)
 
