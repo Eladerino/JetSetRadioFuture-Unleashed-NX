@@ -301,6 +301,20 @@ extern "C" void menu_build(int just_opened)
             ImGui::SetNavCursorVisibleAfterMove();
         }
         ImGui::PopItemFlag();
+        /* The way out, said on the bar's empty right side, in the
+         * disabled colour so it reads as a hint, not a row. */
+        {
+            const char *hint =
+#if defined(__SWITCH__)
+                "Press - again to close this menu";
+#else
+                "F1 or Back closes this menu";
+#endif
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth()
+                                 - ImGui::CalcTextSize(hint).x
+                                 - ImGui::GetStyle().WindowPadding.x);
+            ImGui::TextDisabled("%s", hint);
+        }
         ImGui::EndMainMenuBar();
     }
 
