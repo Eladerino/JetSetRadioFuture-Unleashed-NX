@@ -304,7 +304,7 @@ if(SWITCH)
     nx_generate_nacp(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jsrf_recomp.nacp"
         NAME "JSRF Unleashed NX"
-        AUTHOR "Eladerino"
+        AUTHOR "Eladerino & JuMatt"
         VERSION "${JSRF_DISPLAY_VERSION}")
     # An icon only when one is handed to the build from outside the
     # repo (JSRF_ICON, a 256x256 baseline JPEG): the icon is part of
