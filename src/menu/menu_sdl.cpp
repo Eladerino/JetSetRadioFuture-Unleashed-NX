@@ -17,8 +17,9 @@
  * input layer rather than delivered as events, so that layer watches
  * Back (Minus) itself and calls xbox_MenuSetOpen, the event path's own
  * Back handling is compiled out (the same press would toggle twice),
- * and the pad's navigation reaches ImGui by a polled feed in
- * xbox_MenuFrame instead of by events.
+ * and the pad's navigation is fed in xbox_MenuFrame (switch_feed_nav),
+ * which has the frame's last word on the face keys so the Nintendo
+ * layout can swap them over the backend's own polling.
  */
 #include "menu_sdl.h"
 #include "menu.h"
@@ -154,19 +155,8 @@ static void set_open(int on)
     ImGuiIO &io = ImGui::GetIO();
     if (on == g_open) return;
     if (on) {
-        /* Pads plugged in while the menu was shut were not seen: look again.
-         * On the Switch the pad reaches ImGui through the polled feed
-         * alone (switch_feed_nav), so the backend is told Manual, with no
-         * gamepads of its own: its polling reads the buttons unswapped
-         * and asserts them every frame, so with the Nintendo layout on
-         * the two feeds press the swapped and unswapped face keys in the
-         * same press -- an activate and a cancel together -- and no press
-         * ever lands clean. */
-#if defined(__SWITCH__)
-        ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_Manual);
-#else
+        /* Pads plugged in while the menu was shut were not seen: look again. */
         ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll);
-#endif
         g_just_opened = 1;
     } else {
         /* What was held when it shut is let go of, not remembered. */
@@ -283,11 +273,25 @@ static void scale_to_window(void)
  * the player who just turned the layout on. */
 extern "C" int nv_window_pref_nintendo_layout(void) __attribute__((weak));
 
-/* Pad navigation, fed from the polled controller: the input layer polls
- * the pad rather than taking its events, so the menu's navigation is fed
- * the same way, as ImGui key events on their edges, with the left stick
- * as analogue keys past a dead zone. Player one's pad; the first frame
- * the menu is open, and after a pad change, the handle is found again. */
+/* Pad navigation. The SDL backend polls the pad itself on every frame
+ * (ImGui_ImplSDL2_NewFrame, called just before this) and asserts every
+ * button as a level; that feed is the one of record, and ImGui takes a
+ * frame's final word on a key -- a key is pressed for the frame its
+ * state ends down in, however it got there. This feed adds the d-pad,
+ * shoulders and Start on their edges, as it always has, and the left
+ * stick below; and because it runs after the backend in the same
+ * frame, it has the last word on the four face keys, which is where
+ * the Nintendo layout is applied: with the layout on, the face keys
+ * are re-asserted swapped, every frame, over the backend's unswapped
+ * levels. With it off, this feed says nothing about them.
+ *
+ * The layout can be flipped from this very menu, mid-press: the press
+ * that flips it starts under one mapping and ends under the other.
+ * While a flip is fresh, the face keys are asserted up until every
+ * face button is physically up, so the held press does not land again
+ * as its new meaning (the confirm press becoming a cancel).
+ * Player one's pad; the first frame the menu is open, and after a pad
+ * change, the handle is found again. */
 static void switch_feed_nav(void)
 {
     static SDL_GameController *pad;
@@ -297,10 +301,6 @@ static void switch_feed_nav(void)
         { SDL_CONTROLLER_BUTTON_DPAD_DOWN,     ImGuiKey_GamepadDpadDown },
         { SDL_CONTROLLER_BUTTON_DPAD_LEFT,     ImGuiKey_GamepadDpadLeft },
         { SDL_CONTROLLER_BUTTON_DPAD_RIGHT,    ImGuiKey_GamepadDpadRight },
-        { SDL_CONTROLLER_BUTTON_A,             ImGuiKey_GamepadFaceDown },
-        { SDL_CONTROLLER_BUTTON_B,             ImGuiKey_GamepadFaceRight },
-        { SDL_CONTROLLER_BUTTON_X,             ImGuiKey_GamepadFaceLeft },
-        { SDL_CONTROLLER_BUTTON_Y,             ImGuiKey_GamepadFaceUp },
         { SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  ImGuiKey_GamepadL1 },
         { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, ImGuiKey_GamepadR1 },
         { SDL_CONTROLLER_BUTTON_START,         ImGuiKey_GamepadStart },
@@ -314,50 +314,37 @@ static void switch_feed_nav(void)
             if (SDL_IsGameController(i)) { pad = SDL_GameControllerOpen(i); if (pad) break; }
         if (!pad) { prev = 0; return; }
     }
+    for (i = 0; i < (int)(sizeof map / sizeof map[0]); i++) {
+        int down = SDL_GameControllerGetButton(pad, map[i].b) ? 1 : 0;
+        if (down) cur |= 1u << i;
+        if ((cur ^ prev) & (1u << i)) io.AddKeyEvent(map[i].k, down != 0);
+    }
+    prev = cur;
     {
-        /* The layout can be flipped from this very menu, mid-press: the
-         * press that flips it starts under one mapping and ends under
-         * the other. On a change, release every face key and swallow
-         * the face buttons until they are all up, so no key sticks
-         * down and the held press does not land again as its new
-         * meaning (the confirm press becoming a cancel). */
         static int swap_was = -1, swallow;
         int swap = nv_window_pref_nintendo_layout
                 && nv_window_pref_nintendo_layout();
+        int a = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) ? 1 : 0;
+        int b = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) ? 1 : 0;
+        int x = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X) ? 1 : 0;
+        int y = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) ? 1 : 0;
         if (swap != swap_was) {
-            if (swap_was >= 0) {
-                io.AddKeyEvent(ImGuiKey_GamepadFaceDown,  false);
-                io.AddKeyEvent(ImGuiKey_GamepadFaceRight, false);
-                io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  false);
-                io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    false);
-                prev = 0;
-                swallow = 1;
-            }
+            if (swap_was >= 0) swallow = 1;
             swap_was = swap;
         }
-        {
-            int rawface = 0;
-            for (i = 0; i < (int)(sizeof map / sizeof map[0]); i++) {
-                ImGuiKey k = map[i].k;
-                int down = SDL_GameControllerGetButton(pad, map[i].b) ? 1 : 0;
-                if (k == ImGuiKey_GamepadFaceDown || k == ImGuiKey_GamepadFaceRight
-                 || k == ImGuiKey_GamepadFaceLeft || k == ImGuiKey_GamepadFaceUp) {
-                    if (down) rawface = 1;
-                    if (swallow) down = 0;
-                    if (swap) {   /* the pairs trade keys, as for the game */
-                        if      (k == ImGuiKey_GamepadFaceDown)  k = ImGuiKey_GamepadFaceRight;
-                        else if (k == ImGuiKey_GamepadFaceRight) k = ImGuiKey_GamepadFaceDown;
-                        else if (k == ImGuiKey_GamepadFaceLeft)  k = ImGuiKey_GamepadFaceUp;
-                        else if (k == ImGuiKey_GamepadFaceUp)    k = ImGuiKey_GamepadFaceLeft;
-                    }
-                }
-                if (down) cur |= 1u << i;
-                if ((cur ^ prev) & (1u << i)) io.AddKeyEvent(k, down != 0);
-            }
-            if (swallow && !rawface) swallow = 0;
+        if (swallow) {
+            io.AddKeyEvent(ImGuiKey_GamepadFaceDown,  false);
+            io.AddKeyEvent(ImGuiKey_GamepadFaceRight, false);
+            io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  false);
+            io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    false);
+            if (!a && !b && !x && !y) swallow = 0;
+        } else if (swap) {   /* the pairs trade keys, as for the game */
+            io.AddKeyEvent(ImGuiKey_GamepadFaceDown,  b != 0);
+            io.AddKeyEvent(ImGuiKey_GamepadFaceRight, a != 0);
+            io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  y != 0);
+            io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    x != 0);
         }
     }
-    prev = cur;
     {
         static const struct { SDL_GameControllerAxis a; ImGuiKey neg, pos; } ax[] = {
             { SDL_CONTROLLER_AXIS_LEFTX, ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight },
