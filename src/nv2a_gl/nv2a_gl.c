@@ -6583,7 +6583,11 @@ static void do_draw_body(void)
      * and few, or wild and many. It is the same cheap question that found
      * the two viewports.
      */
+    /* The two once-per-new-value reports below hash on every draw only
+     * while they still have room to report: full, they could print
+     * nothing more, and the hashes were a cost on every draw of the run. */
     { static uint32_t seenz[24]; static int nseenz;
+      if (nseenz < 24) {
       uint32_t kz = fnv(&S.u.z_clip[0], sizeof S.u.z_clip)
                   ^ (uint32_t)(S.u.vp_scale[2] * 7.0f)
                   ^ ((uint32_t)(S.u.vp_off[2] * 13.0f) * 2654435761u);
@@ -6599,8 +6603,9 @@ static void do_draw_body(void)
                                                 : "falls back to the viewport",
                   S.depth_test, S.depth_func, S.depth_mask);
           fflush(stderr);
-      } }
+      } } }
     { static uint32_t seen[16]; static int nseen;
+      if (nseen < 16) {
       uint32_t k = fnv(&S.u.vp_scale[0], sizeof S.u.vp_scale)
                  ^ (fnv(&S.u.vp_off[0], sizeof S.u.vp_off) * 16777619u)
                  ^ (uint32_t)(S.xf_mode * 2654435761u);
@@ -6618,7 +6623,7 @@ static void do_draw_body(void)
               S.u.vp_scale[1] < 0.0f ? "y flips (normal)"
                                      : "Y DOES NOT FLIP <-- mirrored output");
           fflush(stderr);
-      } }
+      } } }
     /*
      * Which space the program left its position in.
      *
