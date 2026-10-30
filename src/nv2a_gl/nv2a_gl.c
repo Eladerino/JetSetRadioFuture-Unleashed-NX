@@ -5208,29 +5208,36 @@ static int vc_crc32_ok(void)
 }
 
 /* The same contract as vc_hash below (seed in, 64-bit value out, chaining
- * through the seed), folded by the CRC32 instructions at eight bytes an
- * instruction and finished with the multiply/xorshift avalanche the old
- * hash ended with, so bucket spread does not rest on CRC's linearity.
- * Compiled for +crc per-function so the rest of the file does not need
- * the whole build's -march raised for one hash. */
-__attribute__((target("arch=armv8-a+crc")))
+ * through the seed), folded by the CRC instructions at eight bytes an
+ * instruction. Two chains run side by side over the same words, one with
+ * each polynomial the instructions offer (CRC-32 and CRC-32C): one chain
+ * alone keeps only 32 bits of state, so two different spans would collide
+ * one time in four billion -- a stale vertex buffer or texture, kept
+ * because its rewrite hashed the same. The pair keeps 64, and costs no
+ * time, because the core runs the two independent chains in parallel.
+ * Finished with a 64-bit avalanche (a bijection, so none of the 64 bits is
+ * lost), so bucket spread does not rest on CRC's linearity. Compiled
+ * with +crc added to the build's own target, not in place of it. */
+__attribute__((target("+crc")))
 static uint64_t vc_hash_crc(const uint8_t *p, size_t n, uint64_t seed)
 {
-    uint32_t crc = __crc32d((uint32_t)seed, seed);
+    uint32_t a = __crc32d((uint32_t)seed, seed);
+    uint32_t b = __crc32cd((uint32_t)(seed >> 32), seed);
+    uint64_t h;
     size_t len = n;
     while (n >= 8) {
         uint64_t w;
         memcpy(&w, p, 8);
-        crc = __crc32d(crc, w);
+        a = __crc32d(a, w);
+        b = __crc32cd(b, w);
         p += 8; n -= 8;
     }
-    while (n) { crc = __crc32b(crc, *p++); n--; }
-    {
-        uint64_t h = (uint64_t)crc * 0xC2B2AE3D27D4EB4Full + (uint64_t)len;
-        h ^= h >> 33; h *= 0x165667B19E3779F9ull; h ^= h >> 29;
-        h *= 0xC2B2AE3D27D4EB4Full; h ^= h >> 32;
-        return h;
-    }
+    while (n) { a = __crc32b(a, *p); b = __crc32cb(b, *p); p++; n--; }
+    h = (((uint64_t)b << 32) | a) ^ ((uint64_t)len * 0x9E3779B97F4A7C15ull);
+    h ^= h >> 33; h *= 0xFF51AFD7ED558CCDull;
+    h ^= h >> 33; h *= 0xC4CEB9FE1A85EC53ull;
+    h ^= h >> 33;
+    return h;
 }
 #endif /* __aarch64__ */
 

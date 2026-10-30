@@ -62,8 +62,13 @@ Two renderer guards belong to the same story:
   content hash off the end of guest memory and faulted.
 - **Vertex cache hashing.** The cache's content hash (also the
   texture cache's verify hash) folds with the aarch64 CRC32
-  instructions where available; RECOMP_GL_CRC32HASH=0 restores the
+  instructions where available, two chains side by side (CRC-32 and
+  CRC-32C) for a 64-bit value; RECOMP_GL_CRC32HASH=0 restores the
   software hash. Values are compared only within a run.
+- **Unchanged uniforms.** The GL backend skips a small uniform (16
+  bytes or less) when the program already holds that exact value;
+  the GL profile prints how many calls were sent and skipped each
+  second. RECOMP_GL_UNIFORM_SKIP=0 sends every call.
 
 ## Measured state
 

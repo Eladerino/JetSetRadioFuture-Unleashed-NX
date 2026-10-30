@@ -46,6 +46,8 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 - The vertex and texture caches hash content with the aarch64
   CRC32 instructions where available
   (RECOMP_GL_CRC32HASH=0 reverts).
+- The GL backend skips small uniforms whose program already holds
+  the value (RECOMP_GL_UNIFORM_SKIP=0 reverts).
 - Performance on the reference clocks (CPU 1963 / GPU 1152 /
   mem 2133 MHz): light scenes at the 60 fps cap, typical gameplay
   40-60 fps, heavy districts around a 40 fps median.
