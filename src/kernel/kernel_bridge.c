@@ -6970,6 +6970,16 @@ void xbox_GuestCpuPreempt(uint32_t va)
         }
         return;
     }
+    /* The call site lets every back edge through while any thread is in a
+     * routine (g_xbox_guest_callback_depth is a count across threads, the
+     * call site cannot see whose), skipping its own tick then. This thread
+     * is not in one, so that tick is taken here instead: otherwise the body
+     * below -- a lock yield among it -- would run on every back edge for as
+     * long as another thread's routine lasts. */
+    if (__atomic_load_n(&g_xbox_guest_callback_depth, __ATOMIC_RELAXED) > 0) {
+        extern unsigned g_recomp_tick;
+        if ((++g_recomp_tick & 0xFFu) != 0u) return;
+    }
     /* Reached on the call site's tick, or on every back edge from inside
      * a callback (handled above). The watchdog's "latest loop back edge"
      * is sampled here, with the
