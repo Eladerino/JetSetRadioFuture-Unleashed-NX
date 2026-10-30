@@ -10,6 +10,74 @@ its version. Downloads are on the
 [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases)
 page.
 
+## 0.6.0 — 30 October 2026
+
+Faster where the game used to stall: the textures and shaders made while you
+play, and the work done for every drawing command. These are six of the speed
+fixes [spriteice](https://github.com/spriteice) found by measuring where the
+time goes on a ROG Xbox Ally X, ported here -- thank you, spriteice! Every
+platform is new in 0.6.0.
+
+- **Entering an area, on Windows and Linux.** A new area brings 50 to 110
+  textures in one frame, and each was decoded to plain pixels before the
+  graphics driver got it. Most of the game's textures are DXT (S3TC)
+  compressed, which every desktop graphics driver takes as it is: they now go
+  to it that way, their mipmaps included -- nothing to decode, and a quarter
+  to an eighth of the bytes to hand over. On spriteice's Ally X, a run's
+  textures took 82 to 89 ms to make instead of 576 to 600, and the frames
+  entering a level came in under 27 ms instead of 42 to 111. Apple's OpenGL
+  takes them too, but in testing two frames there stalled for 130 and 157 ms
+  where 0.5.10 took 27 and 38, so the Mac decodes them as before for now --
+  as Metal, phones, and computers drawing without a graphics card (Mesa's
+  llvmpipe and the like, where a texture decoded once draws faster) do.
+  Every texture that is still decoded is decoded by a loop of its own for
+  its format, texel for texel as before. `RECOMP_GL_DXT=0` decodes them all,
+  `RECOMP_GL_DXT=1` hands them over wherever the driver takes them.
+- **Fades no longer build shaders.** Each combiner stage reads two constant
+  colours, and they were written into the shader itself, so every shade of a
+  fade -- the spray can's effects, the sewer's splashes -- was a new shader,
+  built in the middle of a frame: up to three a frame, about 8 ms each, on
+  spriteice's machine. The shader now reads them as values it is handed
+  (uniforms), so a whole fade is one shader. Because the shaders' text
+  changed, the shader cache starts afresh once: the first start builds them
+  again, ahead of time -- in the background on Metal, on quiet frames on
+  OpenGL.
+- **Drawing commands.** More than half of what the game sends the GPU are
+  vertex indices, up to 2,047 in one command, and each went through three
+  function calls on its own before landing in a list: a whole run of them is
+  now appended in one go (1.4 ns an index instead of 11.5 in the engine's
+  test). On Windows and Linux, the check that a kept draw's vertices haven't
+  changed hashes them about twice as fast (SSE2, or AVX2 where the processor
+  has it).
+- **Linux: less time spinning.** To show a frame at exactly the right moment,
+  the engine sleeps until just before it and spins on the clock for the rest,
+  1.2 ms of a core every frame. On Linux it now sleeps to an exact moment and
+  spins only the last 0.3 ms, widening that by itself when a sleep runs late
+  (`RECOMP_PACE_SPIN_US=1200`: as before). Windows, macOS, iOS and Android are
+  unchanged.
+- **Smaller logs.** A diagnostic probe that wrote about 200 lines every five
+  seconds -- nearly half of every log -- is off unless `RECOMP_GL_TIMELINE=1`.
+- Tested on a Mac against 0.5.10, back to back on the same machine: the
+  Fortified Residential Zone four times on Metal (0.6.0, 0.5.10, 0.5.10,
+  0.6.0 -- 60 frames a second throughout, not one slow frame once the level
+  was on) and on OpenGL, Dogenzaka Hill on OpenGL with SMAA and MSAA 4x and on
+  Metal (the pictures alike), and Shibuya Terminal from an empty save folder
+  (the camera 0.109 to 0.110 degree at every one of 197 frames, the sound
+  never running dry, as in 0.5.10). Then the pictures side by side with
+  0.5.10's at the same moments of play in the Fortified Residential Zone, on
+  Metal and on OpenGL, and once with the DXT textures handed to the driver
+  as they are (the Windows and Linux way, on the Mac's OpenGL): the same,
+  shadows and all, the DXT ones within a level or two of a colour here and
+  there. Linux (Mesa's llvmpipe) and Windows (under Wine): the attract demo
+  against 0.5.10 on the same machine, the same frame rate. The Android and
+  iPhone builds were built and checked, not run. And the engine's new tests:
+  every texture format decoded texel for texel as before; DXT through a
+  driver within 1 or 2 of the old decoder, transparent texels exact; runs of
+  indices leaving the renderer byte for byte as one index at a time; the new
+  hash against the same steps in plain C; the shaders the same through new
+  constants, every constant read where it should be, and accepted by
+  glslangValidator.
+
 ## 0.5.10 — 29 October 2026
 
 A hang where the picture stopped for good, now and then, while the game waited
