@@ -5358,14 +5358,36 @@ static int vc_crc32_ok(void)
  * Finished with a 64-bit avalanche (a bijection, so none of the 64 bits is
  * lost), so bucket spread does not rest on CRC's linearity. Compiled
  * with +crc added to the build's own target, not in place of it. */
+/*
+ * Four chains, not two (2026-10-31). Each CRC instruction waits three cycles
+ * for the one before it in its chain, and the Cortex-A57 can start one every
+ * cycle: two chains over the same word kept it busy two cycles in three, 8
+ * bytes every 3 cycles. The even words now go to one pair of chains and the
+ * odd words to a second pair, so four are in flight and 16 bytes take about
+ * 4 cycles. In 99th Street this hash was the GPU thread's biggest single
+ * line, 4.4% of it. Each pair still keeps 64 bits over its half, and the two
+ * halves are folded together before the avalanche, so a change in either
+ * half changes the result as it did before.
+ */
 __attribute__((target("+crc")))
 static uint64_t vc_hash_crc(const uint8_t *p, size_t n, uint64_t seed)
 {
     uint32_t a = __crc32d((uint32_t)seed, seed);
     uint32_t b = __crc32cd((uint32_t)(seed >> 32), seed);
-    uint64_t h;
+    uint32_t c = ~a, d = ~b;
+    uint64_t h, h2;
     size_t len = n;
-    while (n >= 8) {
+    while (n >= 16) {
+        uint64_t w0, w1;
+        memcpy(&w0, p, 8);
+        memcpy(&w1, p + 8, 8);
+        a = __crc32d(a, w0);
+        b = __crc32cd(b, w0);
+        c = __crc32d(c, w1);
+        d = __crc32cd(d, w1);
+        p += 16; n -= 16;
+    }
+    if (n >= 8) {
         uint64_t w;
         memcpy(&w, p, 8);
         a = __crc32d(a, w);
@@ -5373,7 +5395,8 @@ static uint64_t vc_hash_crc(const uint8_t *p, size_t n, uint64_t seed)
         p += 8; n -= 8;
     }
     while (n) { a = __crc32b(a, *p); b = __crc32cb(b, *p); p++; n--; }
-    h = (((uint64_t)b << 32) | a) ^ ((uint64_t)len * 0x9E3779B97F4A7C15ull);
+    h2 = ((uint64_t)d << 32) | c;
+    h = (((uint64_t)b << 32) | a) ^ ((h2 << 29) | (h2 >> 35)) ^ ((uint64_t)len * 0x9E3779B97F4A7C15ull);
     h ^= h >> 33; h *= 0xFF51AFD7ED558CCDull;
     h ^= h >> 33; h *= 0xC4CEB9FE1A85EC53ull;
     h ^= h >> 33;
