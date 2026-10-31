@@ -4102,12 +4102,21 @@ static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h)
  * textures -- the case that matters most. */
 static uint32_t tex_sample(uint32_t color, const uint8_t *src, uint32_t bytes, int bias)
 {
-    uint32_t step = bytes > 4096 ? bytes / 64 : 64, hash, i;
-    /* RECOMP_GL_TEXHASH_FULL=1: hash every byte (slow; for testing
-     * whether a texture the CPU rewrote in place is being served stale). */
-    { static int full = -1;
-      if (full < 0) full = getenv("RECOMP_GL_TEXHASH_FULL") ? 1 : 0;
-      if (full) step = 1; }
+    /* RECOMP_GL_TEXSAMPLE=<n>: how many bytes the sample reads (64). Each
+     * is a cache line of its own, and a heavy JSRF scene looks a thousand
+     * textures up a frame: on the Switch the reads were 2.8% of the GPU
+     * thread (Oct 31 profile). Fewer bytes see less of a texture rewritten
+     * in place; the full comparison (tcache_verify) still sees all of it.
+     * RECOMP_GL_TEXHASH_FULL=1: hash every byte (slow; for testing whether
+     * a texture the CPU rewrote in place is being served stale). */
+    static uint32_t lines;
+    uint32_t step, hash, i;
+    if (!lines) {
+        const char *e = getenv("RECOMP_GL_TEXSAMPLE");
+        lines = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 64u;
+        if (getenv("RECOMP_GL_TEXHASH_FULL")) lines = 0xFFFFFFFFu;
+    }
+    step = lines == 0xFFFFFFFFu ? 1 : bytes > 64u * lines ? bytes / lines : 64;
     hash = color * 2654435761u;
     for (i = 0; i < bytes && step; i += step)
         hash = hash * 31u + src[i];
@@ -5308,7 +5317,10 @@ static const char *vc_debug_switch(void)
         /* the Switch fork's switches, none of which reads vertices back:
          * options.txt and the Developer page write CRC32HASH, and the
          * merge census reads the cache's own buffers */
-        "CRC32HASH", "UNIFORM_SKIP", "MERGEPROBE", NULL
+        "CRC32HASH", "UNIFORM_SKIP", "MERGEPROBE",
+        /* the texture cache's two knobs: how much it compares a frame, and
+         * how much of a texture each lookup reads */
+        "TEXCHECK_KB", "TEXSAMPLE", NULL
     };
     static char name[64];
     char **e;
