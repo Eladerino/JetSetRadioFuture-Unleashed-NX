@@ -544,7 +544,10 @@ static int ring_target_frames(void)
 
 /*
  * RECOMP_APU_PACE=1: one voice processor frame at a time (from spriteice's
- * JSRF-PC). Unset or 8: eight at a time, as before.
+ * JSRF-PC). 8: eight at a time, as before. Unset: 1 on the Switch (run 9:
+ * the restart spin went from 2.3% of the game thread to about 0.5%, and the
+ * sound played clean through 99th Street, Shibuya and Chuo Street), 8
+ * elsewhere until it has been played there.
  *
  * Why it matters. To restart a sound, DirectSound turns the voice off and
  * spins (sub_001A308E, called from sub_001A3E58) until a voice processor
@@ -571,8 +574,13 @@ static int pace_single(void)
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("RECOMP_APU_PACE");
+#if defined(__SWITCH__)
+        v = !e || !*e || atoi(e) != 8;
+#else
         v = e && atoi(e) == 1;
-        if (v) fprintf(stderr, "[APU] paced a frame at a time (RECOMP_APU_PACE=1)\n");
+#endif
+        fprintf(stderr, v ? "[APU] paced a frame at a time (RECOMP_APU_PACE=8 for eight)\n"
+                          : "[APU] paced eight frames at a time (RECOMP_APU_PACE=1 for one)\n");
     }
     return v;
 }
