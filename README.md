@@ -2,37 +2,15 @@
   <img src="docs/images/banner.png" width="640" alt="Jet Set Radio Future Unleashed">
 </p>
 
-# JSRF Unleashed
+# JSRF Unleashed NX: Jet Set Radio Future for Nintendo Switch
 
-**Jet Set Radio Future, running natively on Nintendo Switch, Mac, Windows, Linux, Android, iPhone and iPad.** Not an emulator — the
-game's own code, statically recompiled into C and built as a native
-application.
+**This is the Nintendo Switch port of JSRF Unleashed, created by JuMatt. The original project lives at https://github.com/JuMatt/JetSetRadioFuture-Unleashed. This repository is the Switch port of it, and everything here builds on his work.**
 
-> **This project is about one game.** It is not an Xbox emulator and it will
-> not run other Xbox titles. Everything here — the graphics translation, the
-> audio path, the file layout, the per-function fixes — is aimed at getting
-> *Jet Set Radio Future* right. If you want to run Xbox games in general, you
-> want [xemu](https://xemu.app); if you want to port a different Xbox title,
-> you want the [toolkit this is built on](docs/xboxrecomp-toolkit.md).
-
-**You need your own copy of the game.** The download is the engine only — no
-game files, no textures, no music, no video. It plays the files from a disc
-you own.
-
-## Nintendo Switch (this fork)
-
-This fork adds a Nintendo Switch target to the upstream project,
-[JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed):
-a homebrew `.nro` for a console running Atmosphère. Everything else in
-this README describes the upstream project and its downloads. The
-Switch port can be had two ways, a prebuilt download or a build from
-source; both need the files from your own copy of the game.
-
-Like the upstream project, this is an unofficial fan project: it is
-not affiliated with or endorsed by SEGA or Smilebit, *Jet Set Radio
-Future* is © SEGA, and the licences in this repository cover the code
-only. No game data is included or distributed; see
-[Legality](#legality).
+JSRF Unleashed NX runs the JSRF Unleashed recomp as a homebrew `.nro` on a
+modded Nintendo Switch running Atmosphère, launched through title takeover.
+It boots and plays on real hardware. It needs the files from your own copy of
+the game, the standalone US disc: no game data is included in this repository
+or in the release downloads.
 
 **It boots and plays.** Logos, title, saving and loading, character
 select and gameplay all work on real hardware. Frame rates in the
@@ -47,6 +25,21 @@ bugs. The port's status and open issues are kept in the
 tested in the [testing notes](docs/switch-testing-notes.md).
 Switch bugs are best reported as an issue in this repository, with
 the run's `Logs/last-run.log` attached.
+
+Like the upstream project, this is an unofficial fan project: it is
+not affiliated with or endorsed by SEGA or Smilebit, *Jet Set Radio
+Future* is © SEGA, and the licences in this repository cover the code
+only. No game data is included or distributed; see
+[Legal notice](#legal-notice).
+
+Full credits are in the [Credits](#credits) section below.
+
+## Nintendo Switch port
+
+The easy path is the release: download it, copy it to the SD card, add the
+files from your own copy of the game, and launch. The Switch port can be had
+two ways, a prebuilt download or a build from source; both need the files
+from your own copy of the game.
 
 - **Prebuilt:** download `jsrf-unleashed-switch.zip` from this
   repository's
@@ -139,7 +132,37 @@ code. Where the Switch build differs from the desktop defaults, the
 difference is a runtime option with the desktop behaviour one setting
 away.
 
----
+## Upstream project
+
+The folded sections below are the upstream project's own documentation
+(JSRF Unleashed by JuMatt), kept on this page for reference. The Switch port
+itself is covered above. Upstream's downloads are the Mac, Windows, Linux,
+Android and iOS builds; the Switch build is this fork's, in the section above.
+
+<details>
+<summary>Upstream project: about</summary>
+
+## About
+
+**Jet Set Radio Future, running natively on Nintendo Switch, Mac, Windows, Linux, Android, iPhone and iPad.** Not an emulator — the
+game's own code, statically recompiled into C and built as a native
+application.
+
+> **This project is about one game.** It is not an Xbox emulator and it will
+> not run other Xbox titles. Everything here — the graphics translation, the
+> audio path, the file layout, the per-function fixes — is aimed at getting
+> *Jet Set Radio Future* right. If you want to run Xbox games in general, you
+> want [xemu](https://xemu.app); if you want to port a different Xbox title,
+> you want the [toolkit this is built on](docs/xboxrecomp-toolkit.md).
+
+**You need your own copy of the game.** The download is the engine only — no
+game files, no textures, no music, no video. It plays the files from a disc
+you own.
+
+</details>
+
+<details>
+<summary>Upstream project: downloading and installing</summary>
 
 ## Download
 
@@ -341,6 +364,11 @@ the files before starting and says what they are if they are not the right
 ones. Make an image of your own disc (`.iso`), or extract it: you want the
 folder with `default.xbe`, `Media/` and the rest.
 
+</details>
+
+<details>
+<summary>Upstream project: playing</summary>
+
 ## Playing
 
 **Controller:** any pad macOS recognises — Xbox, DualSense, DualShock 4 and
@@ -384,6 +412,11 @@ iPhone and on Android.
   field of view, not stretched; the HUD and text keep their shape. The title
   screen stays 4:3.
 
+</details>
+
+<details>
+<summary>Upstream project: status</summary>
+
 ## Status
 
 Playable, early, and not yet played from start to finish.
@@ -405,6 +438,11 @@ Playable, early, and not yet played from start to finish.
 Found a bug? [Open an issue](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/issues)
 with your `last-run.log` and what you were doing.
 
+</details>
+
+<details>
+<summary>Upstream project: why static recompilation</summary>
+
 ## Why static recompilation
 
 The game's x86 machine code is translated, function by function, into C, which
@@ -421,6 +459,11 @@ What still has to be emulated is the *hardware*: the NV2A graphics processor,
 the MCPX audio processor, and the Xbox kernel the game calls into. Those parts
 come from the toolkit and from [xemu](https://xemu.app), whose NV2A and APU
 work this stands on.
+
+</details>
+
+<details>
+<summary>Upstream project: building from source</summary>
 
 ## Building from source
 
@@ -516,11 +559,35 @@ two tables of functions its discovery pass had missed (`recomp_seeded.c` and
 functions themselves, and a build whose generated code has neither file gets
 empty tables in their place.
 
-## AI assistance
+</details>
 
-This project is developed with help from AI coding tools. All code is reviewed and tested by the maintainer before it is committed.
+## Credits
 
-## Legality
+- **Original project:** JuMatt, creator of JSRF Unleashed, the project this
+  repository ports to the Switch. The original project lives at
+  [JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed);
+  this repository is the Switch port of it.
+- **Switch port (JSRF Unleashed NX):** Eladerino
+- [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) — the static
+  recompilation toolkit this is a port on top of. Its documentation is kept at
+  [docs/xboxrecomp-toolkit.md](docs/xboxrecomp-toolkit.md).
+- [xemu](https://xemu.app) — the NV2A and MCPX APU hardware models, without
+  which none of the graphics or audio would exist.
+- Dear ImGui — the library the in-game menu is drawn with.
+- [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
+  in-game menu's design and code were adapted from.
+- devkitPro and libnx — the homebrew toolchain and library the
+  Switch build is made with.
+- The title lettering in the banner is set in
+  [Nise JSRF](https://www.dafont.com/nisejsrf.font), a free font by Yoyo.
+- Smilebit and SEGA, who made the game.
+
+## License
+
+MIT for this project's own code; the MCPX audio-processor code extracted from
+xemu is LGPL-2.1-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Legal notice
 
 The releases contain the engine: the runtime (the kernel layer and the
 graphics and audio hardware models) and the game's own code, machine-translated
@@ -535,23 +602,6 @@ machine from your own disc. It is the same approach as
 affiliated with or endorsed by SEGA. If you represent a rights holder and have
 a concern, please open an issue.
 
-## Licence
+## AI assistance
 
-MIT for this project's own code; the MCPX audio-processor code extracted from
-xemu is LGPL-2.1-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
-
-## Credits
-
-- [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) — the static
-  recompilation toolkit this is a port on top of. Its documentation is kept at
-  [docs/xboxrecomp-toolkit.md](docs/xboxrecomp-toolkit.md).
-- [xemu](https://xemu.app) — the NV2A and MCPX APU hardware models, without
-  which none of the graphics or audio would exist.
-- Dear ImGui — the library the in-game menu is drawn with.
-- [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
-  in-game menu's design and code were adapted from.
-- devkitPro and libnx — the homebrew toolchain and library the
-  Switch build is made with.
-- The title lettering in the banner is set in
-  [Nise JSRF](https://www.dafont.com/nisejsrf.font), a free font by Yoyo.
-- Smilebit and SEGA, who made the game.
+This project is developed with help from AI coding tools. All code is reviewed and tested by the maintainer before it is committed.
