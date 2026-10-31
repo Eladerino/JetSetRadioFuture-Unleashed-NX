@@ -1553,18 +1553,24 @@ static void teleport_step(float *chw)
 /* JSRF_CANS="t:n" -- once, at time t, give the player n spray cans
  * (char +0xFA0; sub_0007FC90 checks it against the boost cost, sub_0007FC60
  * takes the cost away). Test-only: the boost dash needs ten.
- * Every frame: log the boost timer (char +0xE60, set from the character's
- * parameters when B starts a boost, sub_0009C6A5) starting and ending, and
- * with JSRF_BOOST_DUMP="shots,every,frames" capture a burst of frames and a
+ * Every frame (always, not only with these switches): log the boost timer
+ * (char +0xE60, set from the character's parameters when B starts a boost,
+ * sub_0009C6A5) starting and ending, with how long it lasted, and count the
+ * frames spent boosting for the profile's per-second line (nv2a_gl.c). With
+ * JSRF_BOOST_DUMP="shots,every,frames", capture a burst of frames and a
  * per-pass log when the first boost starts. */
 extern void nv2a_gl_dump_burst(int shots, int every);
 extern void nv2a_gl_trace_frames(int n);
 extern uint32_t nv2a_gl_flips(void);
+static unsigned s_boost_frames;
+unsigned xbox_boost_frames(void);
+unsigned xbox_boost_frames(void) { return s_boost_frames; }
 static void test_hooks_step(uint8_t *ch)
 {
     static int cans_state = -1; static double cans_t; static int cans_n;
     static int dump_state = -1; static int d_shots, d_every, d_frames;
     static uint32_t last_timer; static int boosts;
+    static double t0; static uint32_t flip0;
     uint32_t *cw = (uint32_t *)ch;
     uint32_t timer;
     if (cans_state < 0) {
@@ -1579,11 +1585,16 @@ static void test_hooks_step(uint8_t *ch)
         cw[0xFA0 / 4] = (uint32_t)cans_n;
     }
     timer = cw[0xE60 / 4];
+    if (timer) s_boost_frames++;
     if (timer != last_timer && (timer == 0 || last_timer == 0)) {
-        if (timer) boosts++;
-        fprintf(stderr, "[BOOST] t=%.2f flip %u boost %s: timer %u cans %d\n",
-                pad_now(), nv2a_gl_flips(), timer ? "starts" : "ends", timer,
-                (int)cw[0xFA0 / 4]);
+        if (timer) { boosts++; t0 = pad_now(); flip0 = nv2a_gl_flips(); }
+        if (timer)
+            fprintf(stderr, "[BOOST] t=%.2f flip %u boost %d starts: timer %u cans %d\n",
+                    pad_now(), nv2a_gl_flips(), boosts, timer, (int)cw[0xFA0 / 4]);
+        else
+            fprintf(stderr, "[BOOST] t=%.2f flip %u boost %d ends: %.2f s, %u flips, cans %d\n",
+                    pad_now(), nv2a_gl_flips(), boosts, pad_now() - t0,
+                    nv2a_gl_flips() - flip0, (int)cw[0xFA0 / 4]);
         if (timer && dump_state == 1) {
             dump_state = 2;
             nv2a_gl_dump_burst(d_shots, d_every);
@@ -4648,9 +4659,8 @@ void sub_000A5070(void)
     sub_000A5070_gen();
     if (cam >= 0x10000u && cam + 0x240u < lim)
         s_cam_mode_now = ((const uint32_t *)(m + cam))[0x208 / 4];
-    { static int hooks = -1;
-      if (hooks < 0) hooks = (getenv("JSRF_CANS") || getenv("JSRF_BOOST_DUMP")) ? 1 : 0;
-      if (hooks && cam >= 0x10000u && cam + 0x240u < lim) {
+    {
+      if (cam >= 0x10000u && cam + 0x240u < lim) {
           uint32_t who = ((const uint32_t *)(m + cam))[0x24 / 4];
           if (who >= 0x10000u && who + 0x1000u < lim)
               test_hooks_step((uint8_t *)(uintptr_t)(m + who));

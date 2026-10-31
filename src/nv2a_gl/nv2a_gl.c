@@ -119,6 +119,7 @@ extern void xbox_nv2a_vblank_service(void) __attribute__((weak));
  * line: -1 before the first one, and absent in the capture harness. */
 extern int  xbox_current_stage(void)     __attribute__((weak));
 extern const char *xbox_stage_name(int)  __attribute__((weak));
+extern unsigned xbox_boost_frames(void)  __attribute__((weak));   /* frames spent boosting */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t  xbox_ContiguousAllocatedBytes(void);
@@ -674,13 +675,20 @@ static void prof_report(void)
          * form that says whether the title or the port is the expensive one.
          * Frames are flips; passes are every render target the title finishes,
          * and this title finishes three of those per frame. */
-        { static uint32_t prev_frames, prev_flips;
+        { static uint32_t prev_frames, prev_flips; static unsigned prev_boost;
           double fps = (S.frames - prev_frames) / dt;
-          char area[48] = "";
+          char area[80] = "";
           int stage = xbox_current_stage ? xbox_current_stage() : -1;
+          unsigned boost = xbox_boost_frames ? xbox_boost_frames() : 0;
           if (stage >= 0)
               snprintf(area, sizeof area, " | Stg%02d %s", stage,
                        xbox_stage_name ? xbox_stage_name(stage) : "");
+          /* The boost dash draws extra passes: which seconds had one. */
+          if (boost != prev_boost) {
+              size_t n = strlen(area);
+              snprintf(area + n, sizeof area - n, " | boost %u frames", boost - prev_boost);
+          }
+          prev_boost = boost;
           fprintf(stderr,
             "[GLPROF]   %.1f fps, %.0f passes/s, %.0f draws and %.0f "
             "triangles per frame%s\n",
