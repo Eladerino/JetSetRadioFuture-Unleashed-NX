@@ -44,8 +44,17 @@
 #  include <GL/glext.h>
 #endif
 
+/* EXT_texture_compression_s3tc's formats (tex_new_dxt), for headers that
+ * lack them. */
+#ifndef GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+#  define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
+#  define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
+#  define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -56,7 +65,6 @@
 #endif
 
 #if defined(NV2A_GLES)
-#include <string.h>
 /* Whether the context has an extension (asked once per name by the caller). */
 static int gles_has_ext(const char *name)
 {
@@ -415,30 +423,111 @@ static int glx_target_read_depth(uint32_t h, uint32_t pw, uint32_t ph, float *ou
 
 /* ---- textures ------------------------------------------------------------ */
 
-static uint32_t glx_tex_new(uint32_t w, uint32_t h, const void *rgba,
-                            const Nv2aSampler *s)
+/* A renderer that draws on the processor: Mesa's llvmpipe and softpipe,
+ * SwiftShader, Apple's and Microsoft's software renderers. */
+static int glx_soft_renderer(const char *r)
+{
+    static const char *const soft[] = { "llvmpipe", "softpipe", "swiftshader", "software",
+                                        "basic render", NULL };
+    char lc[256];
+    size_t i;
+    int k;
+    if (!r) return 0;
+    for (i = 0; r[i] && i < sizeof lc - 1; i++)
+        lc[i] = (char)(r[i] >= 'A' && r[i] <= 'Z' ? r[i] - 'A' + 'a' : r[i]);
+    lc[i] = 0;
+    for (k = 0; soft[k]; k++)
+        if (strstr(lc, soft[k])) return 1;
+    return 0;
+}
+
+/* Whether the driver takes DXT1, 3 and 5 as they are: S3TC, an extension
+ * every desktop driver has and few phones do. Asked once.
+ *
+ * Not on a software renderer, which takes them but decompresses a block at
+ * every sample it reads: there a texture the front half decoded once draws
+ * faster. On llvmpipe the attract demo ran at 7.5 frames a second with them as
+ * they are and 10.5 with them decoded, as before.
+ *
+ * Nor, for now, on Apple's OpenGL (the Mac's second backend, after Metal): in
+ * the Fortified Residential Zone two frames where the level changes took 157
+ * and 130 ms with them as they are, against 38 and 27 decoded, the time going
+ * neither to textures nor to shaders. Until that is understood they are
+ * decoded there as before. RECOMP_GL_DXT=1 hands them over in both cases. */
+static int glx_s3tc(void)
+{
+    static int has = -1;
+    if (has < 0) {
+        const char *r = (const char *)glGetString(GL_RENDERER), *v = getenv("RECOMP_GL_DXT");
+#if defined(NV2A_GLES)
+        has = gles_has_ext("GL_EXT_texture_compression_s3tc");
+#else
+        GLint k, n = 0;
+        has = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+        for (k = 0; k < n && !has; k++) {
+            const char *e = (const char *)glGetStringi(GL_EXTENSIONS, (GLuint)k);
+            if (e && !strcmp(e, "GL_EXT_texture_compression_s3tc")) has = 1;
+        }
+#endif
+        if (has && glx_soft_renderer(r) && !(v && atoi(v) == 1)) {
+            has = 0;
+            fprintf(stderr, "  [GL] %s takes DXT textures but draws them faster decoded "
+                            "(RECOMP_GL_DXT=1: as they are)\n", r);
+        }
+#if defined(__APPLE__)
+        if (has && !(v && atoi(v) == 1)) {
+            has = 0;
+            fprintf(stderr, "  [GL] Apple's OpenGL: DXT textures decoded, as before "
+                            "(RECOMP_GL_DXT=1: as they are)\n");
+        }
+#endif
+    }
+    return has;
+}
+
+/* Level `l` of the bound texture, w x h: RGBA8 texels (`dxt` 0), or DXT1, 3
+ * or 5's blocks. The bytes it took. */
+static size_t glx_tex_level(GLint l, uint32_t w, uint32_t h, int dxt, const void *p)
+{
+    static const GLenum s3tc_of[6] = { 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 0,
+                                       GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 0,
+                                       GL_COMPRESSED_RGBA_S3TC_DXT5_EXT };
+    size_t n;
+    if (!dxt) {
+        glTexImage2D(GL_TEXTURE_2D, l, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, p);
+        return (size_t)w * h * 4;
+    }
+    n = (size_t)((w + 3) / 4) * ((h + 3) / 4) * (dxt == 1 ? 8 : 16);
+    glCompressedTexImage2D(GL_TEXTURE_2D, l, s3tc_of[dxt], (GLsizei)w, (GLsizei)h, 0,
+                           (GLsizei)n, p);
+    return n;
+}
+
+/* tex_new's and tex_new_dxt's texture: RGBA8 texels, or DXT blocks. */
+static uint32_t glx_tex_make(uint32_t w, uint32_t h, int dxt, const void *rgba,
+                             const Nv2aSampler *s)
 {
     static const GLint wrap_of[3] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT };
     GLuint t = 0;
     GLenum mn, mg;
+    size_t n;
 
     glGenTextures(1, &t);
     if (!t) return 0;
     scratch_bind(t);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    n = glx_tex_level(0, w, h, dxt, rgba);
     mg = s->mag_linear ? GL_LINEAR : GL_NEAREST;
     if (s->mip && s->levels > 1 && rgba) {
         /* The title's own chain, level after level as rgba holds it. */
-        const uint8_t *p = (const uint8_t *)rgba + (size_t)w * h * 4;
+        const uint8_t *p = (const uint8_t *)rgba + n;
         uint32_t l, wl = w, hl = h;
         for (l = 1; l < s->levels; l++) {
             wl = wl > 1 ? wl / 2 : 1;
             hl = hl > 1 ? hl / 2 : 1;
-            glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)wl, (GLsizei)hl, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, p);
-            p += (size_t)wl * hl * 4;
+            p += glx_tex_level((GLint)l, wl, hl, dxt, p);
         }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)s->levels - 1);
@@ -466,6 +555,24 @@ static uint32_t glx_tex_new(uint32_t w, uint32_t h, const void *rgba,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_of[s->wrap_s < 3 ? s->wrap_s : 0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_of[s->wrap_t < 3 ? s->wrap_t : 0]);
     return t;
+}
+
+static uint32_t glx_tex_new(uint32_t w, uint32_t h, const void *rgba,
+                            const Nv2aSampler *s)
+{
+    return glx_tex_make(w, h, 0, rgba, s);
+}
+
+/* DXT as the title stored it, where the driver takes S3TC (spriteice's).
+ * Not for a chain the driver would make itself from level 0: OpenGL ES makes
+ * none from a compressed one. */
+static uint32_t glx_tex_new_dxt(uint32_t w, uint32_t h, int dxt, const void *blocks,
+                                const Nv2aSampler *s)
+{
+    if (!glx_s3tc() || !blocks || (dxt != 1 && dxt != 3 && dxt != 5)
+     || (s->mip && s->levels < 2))
+        return 0;
+    return glx_tex_make(w, h, dxt, blocks, s);
 }
 
 static void glx_tex_free(uint32_t t)
@@ -1837,6 +1944,7 @@ static const Nv2aGfx g_gl = {
     glx_samples_max, glx_samples,
     glx_zrev,
     NULL,                       /* gpu_ms */
+    glx_tex_new_dxt,
 };
 
 const Nv2aGfx *nv2a_gfx_gl(void) { return &g_gl; }

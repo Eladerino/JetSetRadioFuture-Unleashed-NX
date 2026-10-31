@@ -10,6 +10,199 @@ its version. Downloads are on the
 [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases)
 page.
 
+## 0.6.0 — 30 October 2026
+
+Faster where the game used to stall: the textures and shaders made while you
+play, and the work done for every drawing command. These are six of the speed
+fixes [spriteice](https://github.com/spriteice) found by measuring where the
+time goes on a ROG Xbox Ally X, ported here -- thank you, spriteice! Every
+platform is new in 0.6.0.
+
+- **Entering an area, on Windows and Linux.** A new area brings 50 to 110
+  textures in one frame, and each was decoded to plain pixels before the
+  graphics driver got it. Most of the game's textures are DXT (S3TC)
+  compressed, which every desktop graphics driver takes as it is: they now go
+  to it that way, their mipmaps included -- nothing to decode, and a quarter
+  to an eighth of the bytes to hand over. On spriteice's Ally X, a run's
+  textures took 82 to 89 ms to make instead of 576 to 600, and the frames
+  entering a level came in under 27 ms instead of 42 to 111. Apple's OpenGL
+  takes them too, but in testing two frames there stalled for 130 and 157 ms
+  where 0.5.10 took 27 and 38, so the Mac decodes them as before for now --
+  as Metal, phones, and computers drawing without a graphics card (Mesa's
+  llvmpipe and the like, where a texture decoded once draws faster) do.
+  Every texture that is still decoded is decoded by a loop of its own for
+  its format, texel for texel as before. `RECOMP_GL_DXT=0` decodes them all,
+  `RECOMP_GL_DXT=1` hands them over wherever the driver takes them.
+- **Fades no longer build shaders.** Each combiner stage reads two constant
+  colours, and they were written into the shader itself, so every shade of a
+  fade -- the spray can's effects, the sewer's splashes -- was a new shader,
+  built in the middle of a frame: up to three a frame, about 8 ms each, on
+  spriteice's machine. The shader now reads them as values it is handed
+  (uniforms), so a whole fade is one shader. Because the shaders' text
+  changed, the shader cache starts afresh once: the first start builds them
+  again, ahead of time -- in the background on Metal, on quiet frames on
+  OpenGL.
+- **Drawing commands.** More than half of what the game sends the GPU are
+  vertex indices, up to 2,047 in one command, and each went through three
+  function calls on its own before landing in a list: a whole run of them is
+  now appended in one go (1.4 ns an index instead of 11.5 in the engine's
+  test). On Windows and Linux, the check that a kept draw's vertices haven't
+  changed hashes them about twice as fast (SSE2, or AVX2 where the processor
+  has it).
+- **Linux: less time spinning.** To show a frame at exactly the right moment,
+  the engine sleeps until just before it and spins on the clock for the rest,
+  1.2 ms of a core every frame. On Linux it now sleeps to an exact moment and
+  spins only the last 0.3 ms, widening that by itself when a sleep runs late
+  (`RECOMP_PACE_SPIN_US=1200`: as before). Windows, macOS, iOS and Android are
+  unchanged.
+- **Smaller logs.** A diagnostic probe that wrote about 200 lines every five
+  seconds -- nearly half of every log -- is off unless `RECOMP_GL_TIMELINE=1`.
+- Tested on a Mac against 0.5.10, back to back on the same machine: the
+  Fortified Residential Zone four times on Metal (0.6.0, 0.5.10, 0.5.10,
+  0.6.0 -- 60 frames a second throughout, not one slow frame once the level
+  was on) and on OpenGL, Dogenzaka Hill on OpenGL with SMAA and MSAA 4x and on
+  Metal (the pictures alike), and Shibuya Terminal from an empty save folder
+  (the camera 0.109 to 0.110 degree at every one of 197 frames, the sound
+  never running dry, as in 0.5.10). Then the pictures side by side with
+  0.5.10's at the same moments of play in the Fortified Residential Zone, on
+  Metal and on OpenGL, and once with the DXT textures handed to the driver
+  as they are (the Windows and Linux way, on the Mac's OpenGL): the same,
+  shadows and all, the DXT ones within a level or two of a colour here and
+  there. Linux (Mesa's llvmpipe) and Windows (under Wine): the attract demo
+  against 0.5.10 on the same machine, the same frame rate. The Android and
+  iPhone builds were built and checked, not run. And the engine's new tests:
+  every texture format decoded texel for texel as before; DXT through a
+  driver within 1 or 2 of the old decoder, transparent texels exact; runs of
+  indices leaving the renderer byte for byte as one index at a time; the new
+  hash against the same steps in plain C; the shaders the same through new
+  constants, every constant read where it should be, and accepted by
+  glslangValidator.
+
+## 0.5.10 — 29 October 2026
+
+A hang where the picture stopped for good, now and then, while the game waited
+for room for its drawing commands is fixed. [Marice](https://github.com/Marice)
+found where to look (pull request #46, merged here with his two fixes) --
+thank you, Marice! Every platform is new in 0.5.10.
+
+- **A hang where the picture stopped for good.** When the game needs a lot of
+  room in the GPU's command buffer, it asks the GPU to call it back once it has
+  caught up (a software method, an interrupt) and sleeps until then. The
+  engine's GPU thread clears that interrupt's status whenever no callback is in
+  flight, but it asked whether one was in flight first and cleared after, in two
+  steps: a callback raised between the two had its status wiped. The game's
+  handler then found nothing, never answered, no callback was ever raised
+  again, and the game slept for good (its main thread waiting at 0x0019151B in
+  the log). The GPU thread now reads the status first, asks after, and clears
+  only what it read; and the keeper thread, which ends the vertical blank every
+  millisecond, leaves the callback's bit in PMC_INTR_0 to the thread that owns
+  it, where it could otherwise wipe a new callback's in a much rarer way.
+  `RECOMP_PGRAPH_ACK=1`: as before.
+- **Marice's fixes (#46).** The GPU's interrupt status bits are set and
+  cleared atomically everywhere: three threads write them, and since 0.5.9 the
+  keeper does so every millisecond, so a plain read-modify-write on one could
+  undo another's. And a callback whose interrupt bit went missing is raised
+  again after three ticks, with a line in the log -- a safety net that should
+  now never be needed (`RECOMP_SWM_RESCUE=0` turns it off).
+- Tested on a Mac, against 0.5.9 back to back on the same machine: the
+  Fortified Residential Zone four times (0.5.10, 0.5.9, 0.5.9, 0.5.10 -- 60
+  frames a second throughout, not one slow frame once the level was on, 9 to
+  19 callbacks delivered in each), Dogenzaka Hill on OpenGL with SMAA and MSAA
+  4x, and Shibuya Terminal from an empty save folder (the camera at a third of
+  the stick: 0.109 to 0.110 degree at every one of 197 frames; the sound never
+  running dry) -- the same as 0.5.9. Then a test build that holds the GPU
+  thread in that gap on purpose: the old way, the callback raised in the gap
+  was wiped every time, and without Marice's safety net the game stopped for
+  good at the first one, its main thread waiting at 0x0019151B; 0.5.10's way,
+  callbacks raised in the gap were kept, and 13 and 25 were delivered in two
+  runs without one going missing. Linux (Mesa) and Windows (under Wine), each
+  against 0.5.9 on the same machine: the attract demo, the frame rate and the
+  vertical blank the same within a few per cent either way; F7 and the
+  portable switch. The Android and iPhone builds were built and checked, not
+  run.
+
+## 0.5.9 — 27 October 2026
+
+The camera on the right stick turns smoothly, a hang a few seconds into a level
+is gone, and the sound chip and the renderer keep closer to the console's
+timing. The sound, OpenGL, half-pixel and depth changes come from what
+**spriteice** found while working on his own PC port of the game -- thank you,
+[spriteice](https://github.com/spriteice)! Every platform is new in 0.5.9.
+
+- **The camera on the right stick turns smoothly.** It turned by the clock,
+  while the game moves by its frames, so a slow pan came out in uneven steps
+  whenever the frames were not exactly evenly spaced -- "like a really bad
+  V-Sync", a player wrote, with the stick a third of the way and the skater
+  standing still, while the game's own first-person look panned smoothly. It
+  turns by the game's frames now, as the game's camera does: at Shibuya
+  Terminal, the same 0.11 degree every frame. And the stick's response is
+  softer: a third of the way turns the camera about 7 degrees a second (it
+  was under 1), all the way still 150. `JSRF_RCAM_CLOCK=1`: by the clock, as
+  before. Thanks to the player who reported it!
+- **A hang a few seconds into a level.** CRI's sound library guards its data
+  with a lock of its own: whoever takes it is raised to the highest priority
+  and the library's server thread is stopped, and on the way out the server
+  is started again and the priority put back -- on the console nothing else
+  runs in between. Here, stopping or starting another thread let any other
+  thread run, and the server could take the same lock right then: the game's
+  main thread was left at the highest priority with nothing left to release,
+  and went round the library's release loop for ever while every other thread
+  waited. The picture stopped a few seconds after a level appeared (`[STALL]`
+  in the log). A thread at the highest priority now goes through those two
+  calls without letting anything else run, as on the console.
+  `RECOMP_TC_HANDOFF=1`: as before.
+- **The sound chip, a frame at a time.** The APU was run eight of its frames
+  at a time and then rested 5 ms. What the game asks of it -- a voice started
+  or stopped -- is answered between frames, so DirectSound could wait up to
+  5 ms each time, again and again in a crowd that keeps restarting voices
+  (Shibuya Terminal). Each frame is now made at its own moment, every 0.67 ms
+  as on the console, kept level with the sound device frame by frame.
+  `RECOMP_APU_PACE=8`: as before. And the game's vertical-blank handler,
+  which holds back every other game thread while it waits, is now ended
+  within a millisecond every frame, not only while the renderer is busy
+  (`RECOMP_ACK_KEEPER=2`: as before).
+- **OpenGL waits less on its driver.** The renderer asked the driver for
+  errors after every draw, which makes a driver working on a thread of its
+  own (Mesa's, AMD's, NVIDIA's) catch up with the game first -- hundreds of
+  times a frame. Once a frame now (`RECOMP_GL_ERRORS_PER_DRAW=1`: after every
+  draw, to find one). On every platform, the commands the game sends the GPU
+  are sorted a little quicker, and the clock is read once a frame instead of
+  several times a draw.
+- **Half a pixel.** The console's driver moves fixed-function draws -- the
+  city's scenery, the menus -- half a pixel right and down for its
+  rasteriser. The engine kept that, while taking it off the vertex programs'
+  draws (the characters, the traffic), so the two did not quite line up.
+  Both go without it now. `RECOMP_GL_FF_NUDGE=1`: as before.
+- **Depth.** With depth reversed (Metal, and OpenGL where the driver allows
+  it), the vertex programs' depth was worked out as one less the depth,
+  which keeps at the far end only the steps a 24-bit depth buffer has. It is
+  worked out as the far end less the depth now, with all the precision the
+  32-bit buffer has there. And polygon offset, which the engine ignored, is
+  applied when the game asks for it (`RECOMP_GL_NOPOLYOFFSET=1`: as before).
+- AMD graphics on Linux (Mesa's radeonsi driver): the vertex programs without
+  0.5.7's invariant position, which has been found to do more harm than good
+  there (not tested here: no such GPU). The log says so;
+  `RECOMP_GL_INVARIANT=1` keeps it.
+- Tested on a Mac, Metal and OpenGL: Shibuya Terminal from an empty save
+  folder (the camera at a third of the stick with the skater standing still:
+  0.109 to 0.110 degree at every one of 197 frames; the sound chip at 1,500
+  frames a second, the sound's output never running dry; 60 frames a
+  second), and loaded there 23 more times with and without the hang's fix,
+  eight of them with its window held open longer on purpose. The hang came
+  once, without the fix, in thirteen loads -- too rare for the eleven loads
+  with the fix to say much; the fix rests on the log, which shows exactly
+  where the game was stuck. The Garage with and without the half-pixel
+  change (as sharp either way). Then the release build on the title, on
+  Dogenzaka Hill with SMAA and MSAA 4x (Metal and OpenGL), in the Fortified
+  Residential Zone and at Shibuya Terminal. Linux (Mesa): the attract demo,
+  and 0.5.9 against 0.5.8's sound chip and vertical-blank timing on that
+  slow software renderer -- 7.8 frames a second against 7.2, the game's
+  vertical-blank handler 24.8 times a second against 22.7, its main thread
+  waiting less than half as long for the others; F7 and the portable switch.
+  Windows (under Wine): the title as an upgrade from 0.5.8, F7 and the
+  Controls menu. The Android and iPhone builds were built and checked, not
+  run.
+
 ## 0.5.8 — 26 October 2026
 
 The stutter of a first visit, the sound that stuttered with it, a camera on the

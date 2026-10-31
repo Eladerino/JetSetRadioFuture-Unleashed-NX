@@ -216,7 +216,8 @@ typedef enum {
     NV2A_U_BUMPMAT0  = NV2A_U_TEXOFF0 + 4,    /* ..3 */
     NV2A_U_BUMPSCALE0 = NV2A_U_BUMPMAT0 + 4,  /* ..3 */
     NV2A_U_BUMPOFF0  = NV2A_U_BUMPSCALE0 + 4, /* ..3 */
-    NV2A_U_COUNT     = NV2A_U_BUMPOFF0 + 4
+    NV2A_U_PSHC      = NV2A_U_BUMPOFF0 + 4,   /* the combiner constants (nv2a_psh_consts.h) */
+    NV2A_U_COUNT
 } Nv2aUniformId;
 
 enum { NV2A_UT_FLOAT, NV2A_UT_VEC2, NV2A_UT_VEC3, NV2A_UT_VEC4,
@@ -418,6 +419,15 @@ typedef struct Nv2aGfx {
      * it (every frame's buffers in flight, none to record into). NULL where
      * the backend cannot say. */
     void     (*gpu_ms)(double *busy, double *waited);
+
+    /* A DXT1, DXT3 or DXT5 texture (`dxt` 1, 3 or 5) as the title stored
+     * it: w x h texels in 4x4 blocks, and with `s->levels` the rest of the
+     * chain, each level's blocks after the last's. Sampled as tex_new's.
+     * 0 where the device does not take them as they are, and the front half
+     * decodes them for tex_new instead. NULL where the backend has none
+     * (Metal, today). */
+    uint32_t (*tex_new_dxt)(uint32_t w, uint32_t h, int dxt, const void *blocks,
+                            const Nv2aSampler *s);
 } Nv2aGfx;
 
 /* The implementations. Each returns NULL where it cannot run (no Metal

@@ -47,6 +47,10 @@ extern void nv2a_pb_exec_report(void);
 static int s_exec_enabled = -1;
 static int s_scan_enabled = -1;
 
+/* The index methods: two 16-bit indices a word, or one 32-bit index. */
+#define NV097_ARRAY_ELEMENT16 0x1800u
+#define NV097_ARRAY_ELEMENT32 0x1808u
+
 /* An index from (subchannel, method) straight to the inventory slot.
  *
  * This function used to walk the inventory looking for the pair, and it runs

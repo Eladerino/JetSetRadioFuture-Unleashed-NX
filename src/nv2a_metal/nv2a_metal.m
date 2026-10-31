@@ -2207,6 +2207,7 @@ static const Nv2aGfx g_metal = {
     mtl_samples_max, mtl_samples,
     mtl_zrev,
     mtl_gpu_ms,
+    NULL,                       /* tex_new_dxt: DXT decoded in the front half */
 };
 
 const Nv2aGfx *nv2a_gfx_metal(void) { return &g_metal; }

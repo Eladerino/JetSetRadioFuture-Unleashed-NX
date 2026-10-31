@@ -27,6 +27,33 @@
       },
       "versions": [
         {
+          "version": "0.6.0",
+          "buildVersion": "0.6.0",
+          "date": "2026-10-30T22:37:20Z",
+          "localizedDescription": "Faster where the game used to stall: entering an area, fades, and the work done for every drawing command -- six of the speed fixes spriteice found.",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.6.0/JSRF-Unleashed-iOS.ipa",
+          "size": 13384491,
+          "minOSVersion": "15.0"
+        },
+        {
+          "version": "0.5.10",
+          "buildVersion": "0.5.10",
+          "date": "2026-10-29T12:38:51Z",
+          "localizedDescription": "A hang where the picture stopped for good, now and then, while the game waited for room for its drawing commands is fixed.",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.10/JSRF-Unleashed-iOS.ipa",
+          "size": 13382510,
+          "minOSVersion": "15.0"
+        },
+        {
+          "version": "0.5.9",
+          "buildVersion": "0.5.9",
+          "date": "2026-10-27T10:49:02Z",
+          "localizedDescription": "The camera on the right stick turns smoothly, the sound chip runs a frame at a time as on the console, and a hang a few seconds into a level is fixed.",
+          "downloadURL": "https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/download/v0.5.9/JSRF-Unleashed-iOS.ipa",
+          "size": 13382507,
+          "minOSVersion": "15.0"
+        },
+        {
           "version": "0.5.8",
           "buildVersion": "0.5.8",
           "date": "2026-10-26T19:54:06Z",

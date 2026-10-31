@@ -725,6 +725,25 @@ static void framebuffer_probe_tick(void)
     fflush(stderr);
 }
 
+/* How the GPU's PGRAPH interrupt status is shared with the timer thread, which
+ * raises the software methods (kernel_pgraph_tick) and runs the title's
+ * handler for them (its DPC): set once, before the ack thread and the keeper
+ * start (xbox_Nv2aAckStart). g_pgraph_owned: the title's handler acknowledges
+ * PGRAPH itself (nv2a_title_acks_pgraph), so PMC_INTR_0's PGRAPH bit is the
+ * timer thread's alone. g_pgraph_as_before: RECOMP_PGRAPH_ACK=1, both
+ * registers acknowledged as before 0.5.10. */
+static int g_pgraph_init, g_pgraph_owned, g_pgraph_as_before;
+static void pgraph_ack_init(void)
+{
+    extern int nv2a_title_acks_pgraph(void);
+    const char *e;
+    if (g_pgraph_init) return;
+    e = getenv("RECOMP_PGRAPH_ACK");
+    g_pgraph_as_before = e && atoi(e) == 1;
+    g_pgraph_owned = nv2a_title_acks_pgraph() && !g_pgraph_as_before;
+    g_pgraph_init = 1;
+}
+
 /* The vertical-blank interrupt, acknowledged the way the hardware does.
  *
  * This was the whole of the music fault. The runtime raises a vblank sixty
@@ -780,6 +799,7 @@ static int vblank_intr_tick(volatile uint32_t *regs)
     volatile uint32_t *pmc   = (volatile uint32_t *)((char *)regs + 0x000100);
     uint32_t v = *pcrtc;
 
+    if (!g_pgraph_init) pgraph_ack_init();
     if (v & NV2A_VBLANK_PENDING_TAG)
         return 0;                     /* raised, not yet acknowledged */
 
@@ -799,7 +819,14 @@ static int vblank_intr_tick(volatile uint32_t *regs)
         uint32_t m = *pmc;
         if (m && !(*pcrtc & NV2A_VBLANK_PENDING_TAG)) {
             extern int xbox_nv2a_swm_in_flight(void);
-            uint32_t want = xbox_nv2a_swm_in_flight() ? (m & (1u << 12)) : 0u;
+            /* PGRAPH's bit is left as it was found when it is the timer
+             * thread's (g_pgraph_owned): the handler's wrapper clears it
+             * there. Cleared here whenever no software method was in flight,
+             * it could be the next one's: one finished and the next raised
+             * between that question and this swap -- a thread held up at the
+             * wrong instruction -- and the swap still found the value it had
+             * read, and wiped the new bit. */
+            uint32_t want = (g_pgraph_owned || xbox_nv2a_swm_in_flight()) ? (m & (1u << 12)) : 0u;
             if (want != m) (void)__sync_bool_compare_and_swap((uint32_t *)pmc, m, want);
         }
     }
@@ -1245,6 +1272,11 @@ static void xbox_Nv2aAckStart(void)
 #if defined(_WIN32) && defined(XBOXRECOMP_WIN_GL)
     nv2a_kick_open();
 #endif
+    pgraph_ack_init();
+    if (g_pgraph_as_before) {
+        fprintf(stderr, "  [NV2A] RECOMP_PGRAPH_ACK=1: PGRAPH's interrupt status acknowledged as before 0.5.10\n");
+        fflush(stderr);
+    }
     g_nv2a_ack_thread = CreateThread(NULL, 0, nv2a_ack_thread,
                                      g_nv2a_memory, 0, NULL);
     if (g_nv2a_ack_thread) {
