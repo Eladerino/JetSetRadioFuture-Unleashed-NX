@@ -743,6 +743,9 @@ static int      g_failed;
  * (nv2a_metal.m). Chosen once, in gfx_init(). */
 static const Nv2aGfx *G;
 static int g_is_gl;        /* G is OpenGL: the GL-only diagnostics may run */
+/* ...and they may call OpenGL from this thread: not once the device runs on
+ * a thread of its own (RECOMP_GL_THREAD=1, nv2a_gfx_thread.c). */
+static int g_gl_here;
 #ifdef NV2A_GL_HAVE_GL
 /* GL errors reported so far (eight at most), and whether they are asked for
  * after every draw (RECOMP_GL_ERRORS_PER_DRAW=1) or once a frame. */
@@ -756,6 +759,13 @@ static int gl_err_per_draw(void)
 }
 #endif
 unsigned nv2a_gfx_gl_fbo(uint32_t rt);   /* nv2a_gfx_gl.c */
+/* nv2a_gfx_thread.c: the device on a thread of its own */
+const Nv2aGfx *nv2a_gfx_thread_start(const Nv2aGfx *real, void (*release)(void),
+                                     int (*take)(void));
+int      nv2a_gfx_thread_on(void);
+uint32_t nv2a_gfx_thread_real_target(uint32_t rt);
+void     nv2a_gfx_thread_run(void (*fn)(const void *arg), const void *arg, uint32_t bytes);
+void     nv2a_gfx_thread_frame(void);
 #if defined(NV2A_GL_USE_CGL)
 static CGLContextObj g_cgl_ctx;
 #elif defined(NV2A_GL_USE_SDL)
@@ -2618,6 +2628,34 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
           fprintf(stderr, "[WIN] presented #%d: %dx%d frame into %dx%d (%dx%d)\n",
                   said, sw, sh, ww, wh, dw, dh);
       } }
+}
+
+/* The device on a thread of its own (RECOMP_GL_THREAD=1, nv2a_gfx_thread.c):
+ * the context is handed to that thread at the start, and the window's
+ * present, and the frame's question about GL errors, are run there, in
+ * their place among the frame's calls. */
+static void sdl_present_on_device(const void *arg)
+{
+    const uint32_t *a = (const uint32_t *)arg;
+    sdl_present(nv2a_gfx_gl_fbo(nv2a_gfx_thread_real_target(a[0])), (int)a[1], (int)a[2]);
+}
+static void sdl_ctx_release(void) { SDL_GL_MakeCurrent(g_window, NULL); }
+static int sdl_ctx_take(void)
+{
+    if (SDL_GL_MakeCurrent(g_window, g_sdl_ctx) == 0) return 1;
+    fprintf(stderr, "  [GL] the context would not move: %s\n", SDL_GetError());
+    return 0;
+}
+static void gl_err_on_device(const void *arg)
+{
+    const uint32_t *a = (const uint32_t *)arg;
+    GLenum e;
+    if (g_gl_err_reports >= 8) return;
+    e = glGetError();
+    if (e != GL_NO_ERROR) {
+        fprintf(stderr, "  [GL] glGetError 0x%04X during frame %u (%u draws)\n", e, a[0], a[1]);
+        g_gl_err_reports++;
+    }
 }
 
 /* ---- the presenter: frames reach the screen from a thread of their own ---
@@ -5531,7 +5569,9 @@ static const char *vc_debug_switch(void)
         /* the timeline probe: a draw's number, surface and vertex count */
         "TIMELINE",
         /* DXT textures decoded rather than handed over as they are */
-        "DXT", NULL
+        "DXT",
+        /* the device on a thread of its own, and which core it takes */
+        "THREAD", "THREAD_CORE", NULL
     };
     static char name[64];
     char **e;
@@ -6607,7 +6647,7 @@ static void do_draw_body(void)
             uint32_t j;
             shown++;
 #ifdef NV2A_GL_HAVE_GL
-            if (g_is_gl) {
+            if (g_gl_here) {
                 GLint fb = 0, vp4[4] = {0,0,0,0}, cp = 0, va = 0;
                 glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fb);
                 glGetIntegerv(GL_VIEWPORT, vp4);
@@ -8505,7 +8545,7 @@ static void do_draw_body(void)
       /* (OpenGL only: an occlusion query is a GL object, and the probe sets
        * GL state behind the device's back and puts it back afterwards.) */
 #ifdef NV2A_GL_HAVE_GL
-      if (g_is_gl && probe_this && !curtain_skip && !g_surf_lost && slot >= 0) {
+      if (g_gl_here && probe_this && !curtain_skip && !g_surf_lost && slot >= 0) {
           GLuint qo = 0;
           glGenQueries(1, &qo);
           if (qo) {
@@ -9963,7 +10003,7 @@ static void do_draw_body(void)
      * RECOMP_GL_ERRORS_PER_DRAW=1 asks after every draw again, to name the
      * one that broke. */
 #ifdef NV2A_GL_HAVE_GL
-    if (g_is_gl && g_gl_err_reports < 8 && gl_err_per_draw()) {
+    if (g_gl_here && g_gl_err_reports < 8 && gl_err_per_draw()) {
         GLenum e = glGetError();
         if (e != GL_NO_ERROR) {
             fprintf(stderr, "  [GL] glGetError 0x%04X after draw "
@@ -11061,7 +11101,7 @@ static void present(int is_frame)
     if (!g_ready || !g_fbo_w || !g_fbo_h || !S.color_offset) return;
 #ifdef NV2A_GL_HAVE_GL
     /* The frame's GL errors, asked once (see after the draw). */
-    if (is_frame && g_is_gl && g_gl_err_reports < 8 && !gl_err_per_draw()) {
+    if (is_frame && g_gl_here && g_gl_err_reports < 8 && !gl_err_per_draw()) {
         GLenum e = glGetError();
         if (e != GL_NO_ERROR) {
             fprintf(stderr, "  [GL] glGetError 0x%04X during frame %u (%u draws; "
@@ -11070,6 +11110,13 @@ static void present(int is_frame)
             g_gl_err_reports++;
         }
     }
+#if defined(NV2A_GL_USE_SDL)
+    /* On the device's thread, asked there, in its place among the calls. */
+    if (is_frame && !g_gl_here && g_is_gl && nv2a_gfx_thread_on()) {
+        uint32_t a[2] = { S.frames, S.since_present };
+        nv2a_gfx_thread_run(gl_err_on_device, a, sizeof a);
+    }
+#endif
 #endif
     if (is_frame) { S.frames++; g_frame_clock = mono_now();
                     prof_report(); tcache_sweep(); tcache_verify();
@@ -11165,6 +11212,12 @@ static void present(int is_frame)
         }
 #elif defined(NV2A_GL_USE_SDL)
         if (g_window) {
+            if (nv2a_gfx_thread_on()) {
+                /* The window's present is the device thread's: the blit,
+                 * the menu and the swap, after the frame's draws. */
+                uint32_t a[3] = { prt, pw, ph };
+                nv2a_gfx_thread_run(sdl_present_on_device, a, sizeof a);
+            } else
 #if defined(NV2A_SDL_PRESENTER)
             if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
             else
@@ -11176,6 +11229,10 @@ static void present(int is_frame)
         /* The device's end of the frame: Metal shows it in the window's
          * layer, and either way the frame's work is handed to the GPU. */
         G->present(prt, pw, ph);
+#if defined(NV2A_GL_USE_SDL)
+        /* No more than a frame ahead of the device's thread. */
+        if (nv2a_gfx_thread_on()) nv2a_gfx_thread_frame();
+#endif
 #if defined(NV2A_GL_USE_CGL)
         if (g_windowed && nv_window_should_close()) {
             fprintf(stderr, "  [GL] window closed; stopping\n");
@@ -13135,6 +13192,20 @@ static int gfx_init(uint32_t w, uint32_t h)
     shader_cache_start();
 #if defined(NV2A_GL_USE_SDL)
     sdl_menu_update();                /* the menu's anti-aliasing, now known */
+    g_gl_here = g_is_gl;
+    if (g_window && g_is_gl) {
+#if defined(NV2A_SDL_PRESENTER)
+        if (g_presenter == 1) { if (getenv("RECOMP_GL_THREAD") && getenv("RECOMP_GL_THREAD")[0] == '1')
+            fprintf(stderr, "  [GL] no device thread with the presenter thread (RECOMP_GL_PRESENTER=0 for it)\n"); }
+        else
+#endif
+        {
+            const Nv2aGfx *t = nv2a_gfx_thread_start(G, sdl_ctx_release, sdl_ctx_take);
+            if (t != G) { G = t; g_gl_here = 0; }
+        }
+    }
+#else
+    g_gl_here = g_is_gl;
 #endif
     return 1;
 }

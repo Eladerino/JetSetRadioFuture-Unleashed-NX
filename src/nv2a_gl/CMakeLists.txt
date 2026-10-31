@@ -31,6 +31,7 @@ set(NV2A_GL_SOURCES
     nv2a_uniforms.c
     nv2a_gl.c
     nv2a_gfx_gl.c
+    nv2a_gfx_thread.c
     nv2a_shader_cache.c
     nv2a_smaa.c                 # SMAA's sources and look-up textures (smaa/)
 )

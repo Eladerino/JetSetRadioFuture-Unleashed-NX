@@ -575,6 +575,21 @@ static uint32_t glx_tex_new_dxt(uint32_t w, uint32_t h, int dxt, const void *blo
     return glx_tex_make(w, h, dxt, blocks, s);
 }
 
+/* Whether tex_new_dxt would take these, without making anything: for the
+ * threaded device, which answers on the caller's thread. The S3TC check
+ * reads the context's extensions once, so the first call is made where the
+ * context is current. */
+int nv2a_gfx_gl_dxt_ok(int dxt, const void *blocks, const Nv2aSampler *s);
+int nv2a_gfx_gl_dxt_ok(int dxt, const void *blocks, const Nv2aSampler *s)
+{
+    return !(!glx_s3tc() || !blocks || (dxt != 1 && dxt != 3 && dxt != 5)
+             || (s->mip && s->levels < 2));
+}
+
+/* How many kept vertex buffers vbuf_new hands out before it says no
+ * (MAX_VBUFS, below), for the threaded device, which counts them itself. */
+int nv2a_gfx_gl_vbufs_max(void);
+
 static void glx_tex_free(uint32_t t)
 {
     GLuint n = t;
@@ -995,6 +1010,21 @@ static void glx_prog_free(uint32_t h)
 static int glx_prog_uses(uint32_t h, int id)
 {
     return prog_ok(h) && id >= 0 && id < NV2A_U_COUNT && g_prog[h - 1].loc[id] >= 0;
+}
+
+/* For the threaded device (nv2a_gfx_thread.c), on the thread that owns the
+ * context: which uniforms a program reads (bit per Nv2aUniformId) and the
+ * length of its constant array, what prog_uses and uniform_f_part ask. */
+int nv2a_gfx_gl_prog_info(uint32_t h, uint64_t *uses, int *csize);
+int nv2a_gfx_gl_prog_info(uint32_t h, uint64_t *uses, int *csize)
+{
+    int id;
+    *uses = 0; *csize = 0;
+    if (!prog_ok(h)) return 0;
+    for (id = 0; id < NV2A_U_COUNT; id++)
+        if (g_prog[h - 1].loc[id] >= 0) *uses |= 1ull << id;
+    *csize = g_prog[h - 1].csize;
+    return 1;
 }
 
 static void glx_prog_use(uint32_t h)
@@ -1464,6 +1494,7 @@ static void glx_vertices(const float *v, uint32_t nverts, uint32_t stride_floats
  * never disturbs the vertex array a draw is about to use.
  */
 #define MAX_VBUFS 16384
+int nv2a_gfx_gl_vbufs_max(void) { return MAX_VBUFS; }
 static struct {
     GLuint   vao, vbo, ibo;
     uint32_t layout;

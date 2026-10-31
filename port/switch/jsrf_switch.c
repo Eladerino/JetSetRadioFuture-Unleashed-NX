@@ -720,6 +720,30 @@ void sw_thread_spread(const char *what, unsigned id)
             what, id, mask, ideal, R_SUCCEEDED(rc) ? "" : " (refused)");
 }
 
+/* The same for a thread that wants one core in particular (the GL device's
+ * own thread, nv2a_gfx_thread.c): `core` if this title may run there, else
+ * the next in turn. RECOMP_GL_THREAD_CORE stands over the device's choice. */
+void sw_thread_pin(const char *what, unsigned id, int core);
+void sw_thread_pin(const char *what, unsigned id, int core)
+{
+    u32 mask = app_core_mask();
+    const char *e = getenv("RECOMP_GL_THREAD_CORE");
+    Result rc;
+    if (e && *e >= '0' && *e <= '2') core = *e - '0';
+    if (core < 0 || core > 2 || !(mask & (1u << core))) { sw_thread_spread(what, id); return; }
+    {
+        int k = __atomic_fetch_add(&s_nthreads, 1, __ATOMIC_RELAXED);
+        if (k < MAX_PROF_THREADS) {
+            s_threads[k].id = id;
+            snprintf(s_threads[k].what, sizeof s_threads[k].what, "%s", what);
+            __atomic_store_n(&s_threads[k].h, threadGetCurHandle(), __ATOMIC_RELEASE);
+        }
+    }
+    rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+    fprintf(stderr, "[SWITCH] thread %s %u: core %d only%s\n",
+            what, id, core, R_SUCCEEDED(rc) ? "" : " (refused)");
+}
+
 /* Every two seconds, how busy each core was, and now and then the clocks
  * (a profile's overclock applies to a title, and this says whether it
  * did). The kernel reports a core's idle time only to a thread running
