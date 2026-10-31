@@ -981,6 +981,16 @@ static void pb_eager_poll(void)
     __atomic_store_n(get, p, __ATOMIC_RELEASE);
 }
 
+/* JSRF_FENCE_LOG (port/recomp_manual.c): how far the ring has been copied
+ * for the walk -- the eager copy's PUT with RECOMP_PB_EAGER, otherwise the
+ * PUT of the last snapshot -- and whether eager GET is running. Read from
+ * the game thread without a lock: a log, not a decision. */
+void xbox_nv2a_copy_state(uint32_t *copied, int *eager)
+{
+    *eager = s_pb_eager == 2;
+    *copied = *eager ? s_pb_take_put : s_pb_snap_put;
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;

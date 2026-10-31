@@ -2341,6 +2341,105 @@ void sub_00194210(void)
  * branch, which waits for GET -- and GET moves at every pass of the GPU
  * thread. */
 extern void sub_001910E0_gen(void);
+
+/* JSRF_FENCE_LOG=1 (test only): what D3D's waits for the GPU compare.
+ *
+ * sub_00191440 waits for the fence word to reach a number. Short of it, it
+ * finds where that fence sits in the ring and asks here how far the GPU
+ * still has to read to get there (called from 0x00191489, with the fence's
+ * place in edx); under 32 KB it spins on the word, from there it sleeps on
+ * a NOP(5). The word is written only when the walk executes the fence's
+ * release (nv2a_pb_exec.c), and the walk runs behind the copy of the ring
+ * it reads from. If the fences D3D waits on are mostly ones already copied
+ * but not yet walked, D3D could be told about them at the copy, not at the
+ * walk; this says whether they are, and by how much, once a second:
+ *   waits     calls from 0x00191489 (and 0x001914C6, the second look)
+ *   told      the distance D3D was told: under 4 KB / 32 KB / more
+ *   copied    of the fences waited on, how many lie in the part already
+ *             copied but not walked, and how far past the walk on average
+ *   lag       fence numbers handed out (dev+0x30) less the fence word
+ *   fences    releases executed, and the last one's place
+ * and the raw values of the first eight waits, to check the units. */
+extern volatile uint32_t g_pb_fence_word, g_pb_fence_val, g_pb_fence_at;
+extern volatile unsigned long g_pb_fence_n;
+extern void xbox_nv2a_copy_state(uint32_t *copied, int *eager);
+
+/* Bytes from b forward to a around the ring (phys 0x1000-0x80000 in JSRF),
+ * both taken as physical (the low 28 bits); all ones if either is outside. */
+static uint32_t ring_fwd(uint32_t a, uint32_t b)
+{
+    const uint32_t lo = 0x1000u, hi = 0x80000u;
+    a &= 0x0FFFFFFFu; b &= 0x0FFFFFFFu;
+    if (a < lo || a > hi || b < lo || b > hi) return 0xFFFFFFFFu;
+    return a >= b ? a - b : (hi - b) + (a - lo);
+}
+
+static void fence_log(uint32_t from, uint32_t ecx, uint32_t at, uint32_t dist)
+{
+    static int on = -1;
+    static unsigned long waits, second_looks, other, d4k, d32k, dbig, copied,
+                         unknown, lag_n, shown, last_fences;
+    static uint64_t past_sum, lag_sum;
+    static uint32_t dist_max, lag_max;
+    static double next, last;
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    uint32_t copy, newest, word, val, walk, dev;
+    int eager;
+    double now;
+
+    if (on < 0) {
+        const char *e = getenv("JSRF_FENCE_LOG");
+        on = (e && e[0] == '1') ? 1 : 0;
+        if (on) fprintf(stderr, "  [FENCE] logging D3D's waits for the GPU once a second (JSRF_FENCE_LOG)\n");
+    }
+    if (!on) return;
+    if (from == 0x001914C6u) { second_looks++; return; }
+    if (from != 0x00191489u) { other++; return; }
+    dev = *(volatile uint32_t *)(m + 0x0019DCE0u);      /* D3D's device */
+    if (dev < 0x1000u || dev >= (64u << 20)) return;
+
+    waits++;
+    if (dist < 0x1000u) d4k++; else if (dist < 0x8000u) d32k++; else dbig++;
+    if (dist > dist_max) dist_max = dist;
+
+    xbox_nv2a_copy_state(&copy, &eager);
+    walk = g_pb_fence_at;
+    newest = *(volatile uint32_t *)(m + dev + 0x30u);
+    word = *(volatile uint32_t *)(m + dev + 0x34u);
+    val = (word >= 0x1000u && word < (64u << 20)) ? *(volatile uint32_t *)(m + word) : 0;
+    {
+        uint32_t span = ring_fwd(copy, walk), past = ring_fwd(at, walk);
+        if (span == 0xFFFFFFFFu || past == 0xFFFFFFFFu) unknown++;
+        else if (past <= span) { copied++; past_sum += past; }
+    }
+    lag_sum += newest - val; lag_n++;
+    if (newest - val > lag_max) lag_max = newest - val;
+
+    if (shown < 8) {
+        shown++;
+        fprintf(stderr, "  [FENCE] wait #%lu: fence at 0x%08X, told %u bytes; walk's last fence at 0x%08X "
+                "(value %u, word 0x%08X); copied to 0x%08X%s; dev 0x%08X (ecx 0x%08X) +0x30=%u +0x34=0x%08X -> %u; "
+                "DMA_PUT=0x%08X DMA_GET=0x%08X\n",
+                shown, at, dist, walk, g_pb_fence_val, g_pb_fence_word, copy, eager ? " (eager)" : "",
+                dev, ecx, newest, word, val,
+                *(volatile uint32_t *)(m + 0xFD800040u), *(volatile uint32_t *)(m + 0xFD800044u));
+    }
+    now = jsrf_now();
+    if (now >= next) {
+        unsigned long fences = g_pb_fence_n;
+        fprintf(stderr, "  [FENCE] %.1f s: %lu waits (%lu second looks, %lu other); told <4 KB %lu, "
+                "<32 KB %lu, more %lu (most %u); copied but not walked %lu of %lu (%.0f bytes past the walk), "
+                "%lu unplaced; lag %.1f fences (most %u); %lu fences executed, last at 0x%08X\n",
+                last ? now - last : 0.0, waits, second_looks, other, d4k, d32k, dbig, dist_max,
+                copied, waits, copied ? (double)past_sum / copied : 0.0, unknown,
+                lag_n ? (double)lag_sum / lag_n : 0.0, lag_max, fences - last_fences, g_pb_fence_at);
+        fflush(stderr);
+        last_fences = fences;
+        waits = second_looks = other = d4k = d32k = dbig = copied = unknown = lag_n = 0;
+        dist_max = lag_max = 0; past_sum = lag_sum = 0;
+        last = now; next = now + 1.0;
+    }
+}
 extern void xbox_nv2a_swm_stats(unsigned long *, unsigned long *);
 extern int xbox_nv2a_swm_in_flight(void);
 void sub_001910E0(void)
@@ -2359,7 +2458,9 @@ void sub_001910E0(void)
         const char *e = getenv("JSRF_SPIN_LOG");
         spin_log = (e && e[0] == '1') ? 1 : 0;
     }
+    uint32_t at_dev = g_ecx, at_fence = g_edx;   /* JSRF_FENCE_LOG */
     sub_001910E0_gen();
+    fence_log(from, at_dev, at_fence, g_eax);
     /* JSRF_SPIN_LOG=1 (options.txt, with fast_gpu=1): once a second while
      * the make-space caller keeps asking, say what it is actually told --
      * the real distance before any clamp, the DMA pointers it is supposedly

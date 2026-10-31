@@ -42,6 +42,8 @@ static uint32_t s_tot_words, s_tot_unknown, s_tot_jumps, s_tot_segments;
 /* Executing is opt-in separately from surveying: a survey is read-only, while
  * the executor writes to guest memory. */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+/* The ring address of the semaphore release being executed. */
+uint32_t g_pb_cmd_va;
 extern int nv2a_pb_exec_indices(uint32_t subch, uint32_t method, const uint32_t *w, uint32_t n);
 extern void nv2a_pb_exec_report(void);
 static int s_exec_enabled = -1;
@@ -650,8 +652,11 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                 /* Same walk, two consumers: the survey counts, the executor
                  * acts. Keeping them on one decode means they can never
                  * disagree about what the stream said. */
-                if (s_exec_enabled)
+                if (s_exec_enabled) {
+                    /* where a fence's release sits (JSRF_FENCE_LOG) */
+                    if (m == 0x1D70u) g_pb_cmd_va = va;
                     nv2a_pb_exec_method(subch, m, pb_word(mem, va));
+                }
                 va += 4;
                 words++;
             }

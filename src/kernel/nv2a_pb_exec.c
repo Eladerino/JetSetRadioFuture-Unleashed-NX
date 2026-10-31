@@ -1414,6 +1414,10 @@ out:
  * the offsets and values so the block can be identified.
  */
 static uint32_t s_sem_offset, s_sem_handle, s_sem_base;
+/* The last fence executed: the word it wrote, the value, where its release
+ * sat in the ring, and how many so far (JSRF_FENCE_LOG). */
+volatile uint32_t g_pb_fence_word, g_pb_fence_val, g_pb_fence_at;
+volatile unsigned long g_pb_fence_n;
 static int s_sem_base_known;
 
 /* The physical base of a DMA object, by its handle, through the RAMHT the
@@ -1499,6 +1503,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 va = dma_resolve(s_sem_base + s_sem_offset);
                 if (va >= 0x1000u && va + 4 <= 0xFFFFFFFCu)
                     *(volatile uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + va) = param;
+                /* JSRF_FENCE_LOG (port/recomp_manual.c) reads these. */
+                { extern uint32_t g_pb_cmd_va;
+                  g_pb_fence_word = va; g_pb_fence_val = param; g_pb_fence_at = g_pb_cmd_va;
+                  __atomic_store_n(&g_pb_fence_n, g_pb_fence_n + 1, __ATOMIC_RELEASE); }
             }
         }
     }
