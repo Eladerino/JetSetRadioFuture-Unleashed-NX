@@ -951,8 +951,15 @@ static void prof_dump(u64 base)
                 ProfSlot x = top[j]; top[j] = top[j - 1]; top[j - 1] = x;
             }
         }
-        fprintf(stderr, "[SWPROF] thread %s %u: %u samples\n",
-                s_threads[t].what, s_threads[t].id, total);
+        { extern int xbox_current_stage(void);
+          extern const char *xbox_stage_name(int);
+          int stage = xbox_current_stage();
+          if (stage >= 0)
+              fprintf(stderr, "[SWPROF] thread %s %u: %u samples, in Stg%02d %s\n",
+                      s_threads[t].what, s_threads[t].id, total, stage, xbox_stage_name(stage));
+          else
+              fprintf(stderr, "[SWPROF] thread %s %u: %u samples\n",
+                      s_threads[t].what, s_threads[t].id, total); }
         for (i = 0; i < nt2; i++) {
             u64 pc = top[i].pc;
             if (pc >= base && pc < base + 0x10000000ull)

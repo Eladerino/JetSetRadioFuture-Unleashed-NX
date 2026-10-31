@@ -1343,8 +1343,47 @@ void sub_00144F60(void)
 /* arm the .data write trap when the title music file is opened */
 static double pad_now(void);
 static unsigned s_game_frames;   /* sound-manager updates: one per game frame */
+
+/* ---- areas ----------------------------------------------------------------
+ * Which stage is loaded, so a run's numbers can be read by place. Every stage
+ * load opens Media\Stage\StgNN_.bin (the copy cached on Z: first, then the
+ * disc's on D:), and a new NN prints one [AREA] line with the wall clock, the
+ * game's frame count and the flip count. The renderer's once-a-second frame
+ * rate line and the Switch profiler's ten-second reports carry the same tag.
+ * Names for the stages seen so far, from Brandon's run 9 route (99th Street,
+ * the garage, Shibuya, Chuo Street, back to 99th); the rest go by number. */
+uint32_t nv2a_gl_flips(void);
+static int s_stage = -1;
+int xbox_current_stage(void) { return s_stage; }
+const char *xbox_stage_name(int n)
+{
+    switch (n) {
+    case 0:  return "garage";
+    case 10: return "Shibuya";
+    case 11: return "Chuo Street";
+    case 30: return "99th Street";
+    default: return "not named yet";
+    }
+}
+static void stage_note(const char *path)
+{
+    static const char key[] = "\\Media\\Stage\\Stg";
+    const char *p = strstr(path, key);
+    int n;
+    if (!p) return;
+    p += sizeof key - 1;
+    if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9' || strcmp(p + 2, "_.bin") != 0)
+        return;
+    n = (p[0] - '0') * 10 + (p[1] - '0');
+    if (n == s_stage) return;
+    fprintf(stderr, "[AREA] t=%.1f Stg%02d (%s), game frame %u, flip %u\n",
+            pad_now(), n, xbox_stage_name(n), s_game_frames, (unsigned)nv2a_gl_flips());
+    s_stage = n;
+}
+
 void xbox_file_open_hook(const char *path)
 {
+    stage_note(path);
     extern void jsrf_protect_data_arm(void);
     const char *t = getenv("JSRF_PROTECT_AT");
     if (t && strstr(path, t)) jsrf_protect_data_arm();

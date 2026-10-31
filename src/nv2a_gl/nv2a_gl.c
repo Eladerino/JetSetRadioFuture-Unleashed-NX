@@ -115,6 +115,10 @@ extern int  xbox_guest_lock_drop(void)   __attribute__((weak));
 extern unsigned long g_vblank_count      __attribute__((weak));
 extern void xbox_guest_lock_retake(int)  __attribute__((weak));
 extern void xbox_nv2a_vblank_service(void) __attribute__((weak));
+/* The stage the title has loaded (port/recomp_manual.c), for the frame rate
+ * line: -1 before the first one, and absent in the capture harness. */
+extern int  xbox_current_stage(void)     __attribute__((weak));
+extern const char *xbox_stage_name(int)  __attribute__((weak));
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t  xbox_ContiguousAllocatedBytes(void);
@@ -672,12 +676,17 @@ static void prof_report(void)
          * and this title finishes three of those per frame. */
         { static uint32_t prev_frames, prev_flips;
           double fps = (S.frames - prev_frames) / dt;
+          char area[48] = "";
+          int stage = xbox_current_stage ? xbox_current_stage() : -1;
+          if (stage >= 0)
+              snprintf(area, sizeof area, " | Stg%02d %s", stage,
+                       xbox_stage_name ? xbox_stage_name(stage) : "");
           fprintf(stderr,
             "[GLPROF]   %.1f fps, %.0f passes/s, %.0f draws and %.0f "
-            "triangles per frame\n",
+            "triangles per frame%s\n",
             fps, (S.flips - prev_flips) / dt,
             fps > 0 ? (g_prof.n_draws - prev.n_draws) / dt / fps : 0.0,
-            fps > 0 ? (double)(S.tris - prev_tris_p) / dt / fps : 0.0);
+            fps > 0 ? (double)(S.tris - prev_tris_p) / dt / fps : 0.0, area);
           prev_frames = S.frames; prev_flips = S.flips; prev_tris_p = S.tris; }
         fprintf(stderr,
             "[GLPROF]   per second: %lu KB of vertices, %lu constant vec4s, "
