@@ -144,18 +144,18 @@ Android and iOS builds; the Switch build is this fork's, in the section above.
 
 ## About
 
-**Jet Set Radio Future, running natively on Nintendo Switch, Mac, Windows, Linux, Android, iPhone and iPad.** Not an emulator: the
+**Jet Set Radio Future, running natively on Nintendo Switch, Mac, Windows, Linux, Android, iPhone and iPad.** Not an emulator — the
 game's own code, statically recompiled into C and built as a native
 application.
 
 > **This project is about one game.** It is not an Xbox emulator and it will
-> not run other Xbox titles. Everything here, the graphics translation, the
-> audio path, the file layout, the per-function fixes, is aimed at getting
+> not run other Xbox titles. Everything here — the graphics translation, the
+> audio path, the file layout, the per-function fixes — is aimed at getting
 > *Jet Set Radio Future* right. If you want to run Xbox games in general, you
 > want [xemu](https://xemu.app); if you want to port a different Xbox title,
 > you want the [toolkit this is built on](docs/xboxrecomp-toolkit.md).
 
-**You need your own copy of the game.** The download is the engine only: no
+**You need your own copy of the game.** The download is the engine only — no
 game files, no textures, no music, no video. It plays the files from a disc
 you own.
 
@@ -169,25 +169,25 @@ you own.
 | Platform | Download |
 |---|---|
 | macOS 12 or later, Apple Silicon (M1 or later) | [JSRF-Unleashed-macOS-arm64.zip](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-macOS-arm64.zip) |
-| Linux, x86_64 (glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 36 and newer) | [JSRF-Unleashed-linux-x86_64.tar.gz](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-linux-x86_64.tar.gz), less tested than the Mac build |
-| iPhone and iPad, iOS 15 or later (iPhone XS or newer recommended) | [JSRF-Unleashed-iOS.ipa](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-iOS.ipa), less tested on iPads |
-| Windows 10 or 11, 64-bit | [JSRF-Unleashed-windows-x86_64.zip](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-windows-x86_64.zip), tested under Wine |
-| Android 10 or later, 64-bit, OpenGL ES 3.0 | [JSRF-Unleashed-android-arm64.apk](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-android-arm64.apk), tested in the Android emulator |
-| Nintendo Switch, Atmosphère (this fork) | [jsrf-unleashed-switch.zip](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest/download/jsrf-unleashed-switch.zip): the `.nro`, the settings file and an empty `game/` folder; see [Nintendo Switch (this fork)](#nintendo-switch-port) above |
+| Linux, x86_64 (glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 36 and newer) | [JSRF-Unleashed-linux-x86_64.tar.gz](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-linux-x86_64.tar.gz) — less tested than the Mac build |
+| iPhone and iPad, iOS 15 or later (iPhone XS or newer recommended) | [JSRF-Unleashed-iOS.ipa](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-iOS.ipa) — less tested on iPads |
+| Windows 10 or 11, 64-bit | [JSRF-Unleashed-windows-x86_64.zip](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-windows-x86_64.zip) — tested under Wine |
+| Android 10 or later, 64-bit, OpenGL ES 3.0 | [JSRF-Unleashed-android-arm64.apk](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-android-arm64.apk) — tested in the Android emulator |
+| Nintendo Switch, Atmosphère (this fork) | [jsrf-unleashed-switch.zip](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest/download/jsrf-unleashed-switch.zip) — the `.nro`, the settings file and an empty `game/` folder; see [Nintendo Switch (this fork)](#nintendo-switch-this-fork) above |
 
 Every version is on the [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases) page; what changed is in the [changelog](CHANGELOG.md).
 
 ### Installing on macOS
 
 1. Unzip, and move **JSRF Unleashed** to Applications (or wherever you like).
-2. Open it. The app is not notarised by Apple (that needs a paid developer
-   account), so the first time, macOS says it cannot check it. Click
+2. Open it. The app is not notarised by Apple — that needs a paid developer
+   account — so the first time, macOS says it cannot check it. Click
    **Done**, open **System Settings › Privacy & Security**, find
    *"JSRF Unleashed" was blocked* and click **Open Anyway**. (On macOS 13 or
    earlier, right-click the app and choose **Open** instead.) This is needed
    once.
 3. It asks where your game is: pick the folder that contains `default.xbe`,
-   or a disc image (`.iso`), which it unpacks once by itself, nothing else to
+   or a disc image (`.iso`), which it unpacks once by itself — nothing else to
    install. You can also drop either onto the app. It remembers the choice,
    and if the files are not the right ones (another build of the game,
    another game's disc, a zip), it says what they are.
@@ -195,7 +195,7 @@ Every version is on the [Releases](https://github.com/JuMatt/JetSetRadioFuture-U
 Saves are kept in the game folder, in `UDATA` (where an Xbox keeps them), so
 copy that folder to back them up, and keep it if you replace the game files.
 Each run writes `last-run.log` into the game folder (with a few older ones in
-`logs/`). Attach it when you report a bug.
+`logs/`) — attach it when you report a bug.
 
 ### Installing on Windows
 
@@ -205,7 +205,7 @@ Each run writes `last-run.log` into the game folder (with a few older ones in
    year), so the first time Windows may say it protected your PC: click
    **More info**, then **Run anyway**.
 3. The first time, it asks where to keep its settings, cache, logs and
-   unpacked disc images: in its own folder (**portable**: the whole folder can
+   unpacked disc images: in its own folder (**portable** — the whole folder can
    then move, to another computer or onto a USB drive or SSD) or in
    `%LOCALAPPDATA%\JSRF Unleashed`. Then where your game is: pick the folder
    that contains `default.xbe`, or the folder with your disc image (`.iso`) in
@@ -334,8 +334,8 @@ somewhere first. Each run's log is
 
 It needs Android 10 or later on a 64-bit phone or tablet with OpenGL ES 3.0
 (any from the last several years). So far it has been run in the Android
-emulator only, unpacking a disc image, boot, title, attract demo, the
-on-screen controls, not on a phone yet: reports are welcome.
+emulator only — unpacking a disc image, boot, title, attract demo, the
+on-screen controls — not on a phone yet: reports are welcome.
 
 ### Installing on Linux
 
@@ -355,7 +355,7 @@ or both) and **F7** turns the right-stick camera (below) off and on.
 
 ### Your game files
 
-You need the **standalone USA (NTSC-U) disc** of *Jet Set Radio Future*: the
+You need the **standalone USA (NTSC-U) disc** of *Jet Set Radio Future* — the
 game code inside the app is translated from that disc's executable, address
 for address, so other builds of the game will not work: the European and
 Japanese releases, and the **Sega GT 2002 + JSRF combo disc** (the one that
@@ -371,7 +371,7 @@ folder with `default.xbe`, `Media/` and the rest.
 
 ## Playing
 
-**Controller:** any pad macOS recognises: Xbox, DualSense, DualShock 4 and
+**Controller:** any pad macOS recognises — Xbox, DualSense, DualShock 4 and
 others, over Bluetooth or USB. On Windows, Linux and Android, any pad SDL
 knows.
 
@@ -381,9 +381,9 @@ knows.
 | Key | Does | Key | Does |
 |---|---|---|---|
 | W A S D | move (left stick), menus | Arrow keys | camera (right stick) |
-| Space or J | A: jump | K | B |
+| Space or J | A — jump | K | B |
 | H | X | L | Y |
-| E | R trigger: talk, spray | Q | L trigger |
+| E | R trigger — talk, spray | Q | L trigger |
 | R | Black | F | White |
 | Return | Start | Esc | Back |
 | C / V | left / right stick click | | |
@@ -391,7 +391,7 @@ knows.
 **Controls › Keyboard…** in the menu bar shows the same list.
 
 **The camera on the right stick** (on by default, on every platform): the
-right stick, or the arrow keys, turns the camera around the skater and
+right stick — or the arrow keys — turns the camera around the skater and
 tilts it, and it eases back behind them when you let go; the L trigger still
 puts it straight behind at once, as in the original game. Turn it off for the
 original camera: **Controls › Camera on the Right Stick** on the Mac, **F7**
@@ -399,16 +399,16 @@ original camera: **Controls › Camera on the Right Stick** on the Mac, **F7**
 iPhone and on Android.
 
 **Video menu:**
-- **Resolution**: the internal resolution, 1× to 6× (2× by default; 6×,
+- **Resolution** — the internal resolution, 1× to 6× (2× by default; 6×,
   3840×2880, is for a 4K screen). The game restarts to apply it.
-- **Anti-aliasing**: smooths the jagged edges, two ways that can be used
+- **Anti-aliasing** — smooths the jagged edges, two ways that can be used
   together. **SMAA** is a quick pass over each finished frame, on or off at
   once. **MSAA** 2×, 4× or 8× draws every edge with that many samples a
   pixel: cleaner, and more work for the GPU; on Metal the game restarts to
   apply it. Both are off by default.
-- **Renderer**: Metal (the default) or OpenGL. The game restarts to apply it.
-- **Full Screen**: Ctrl ⌘ F.
-- **Widescreen (16:9)**: ⇧ ⌘ W. The game is shown at 16:9 with a wider
+- **Renderer** — Metal (the default) or OpenGL. The game restarts to apply it.
+- **Full Screen** — Ctrl ⌘ F.
+- **Widescreen (16:9)** — ⇧ ⌘ W. The game is shown at 16:9 with a wider
   field of view, not stretched; the HUD and text keep their shape. The title
   screen stays 4:3.
 
@@ -424,7 +424,7 @@ Playable, early, and not yet played from start to finish.
 | | |
 |---|---|
 | Title, menus, new game, saving and loading | works |
-| New Game through the tutorial, the DJ K scene and Dogenzaka Hill | works, the part played and tested most |
+| New Game through the tutorial, the DJ K scene and Dogenzaka Hill | works — the part played and tested most |
 | Skating, grinding, tricks, graffiti, the pause map | works |
 | Music, sound effects, voices | works |
 | Widescreen 16:9 (and the whole screen, on iPhone) | works in game; the title screen stays 4:3 |
@@ -432,7 +432,7 @@ Playable, early, and not yet played from start to finish.
 | Windows build | tested under Wine |
 | iPhone / iPad build | plays on iPhone; less tested on iPads |
 | Android build | boots to the title and the attract demo in the Android emulator; not yet tried on a phone |
-| Later areas | little tested: expect bugs |
+| Later areas | little tested — expect bugs |
 | Known issues | an occasional "disc error" screen during a load |
 
 Found a bug? [Open an issue](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/issues)
@@ -452,7 +452,7 @@ JIT at runtime. Two things follow from that:
 - **It is fast.** The game's logic runs as native code, at native speed.
 - **It can ship where JITs cannot.** iOS forbids runtime code generation, which
   is why there is no real Xbox emulator on an iPhone. A statically recompiled
-  binary has nothing to generate, which is why there can be an iPhone build
+  binary has nothing to generate — which is why there can be an iPhone build
   at all.
 
 What still has to be emulated is the *hardware*: the NV2A graphics processor,
@@ -467,8 +467,8 @@ work this stands on.
 
 ## Building from source
 
-The generated code, over a million lines of C translated from the game's
-executable, is not in this repository and will not be: it is derived from
+The generated code — over a million lines of C translated from the game's
+executable — is not in this repository and will not be: it is derived from
 SEGA's binary. You make it on your own machine, from your own `default.xbe`
 (the standalone USA disc's, as for the downloads), with the tools in
 [`tools/`](tools), then build the engine around it. The tools run wherever
@@ -568,15 +568,15 @@ empty tables in their place.
   [JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed);
   this repository is the Switch port of it.
 - **Switch port (JSRF Unleashed NX):** Eladerino
-- [xboxrecomp](https://github.com/sp00nznet/xboxrecomp): the static
+- [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) — the static
   recompilation toolkit this is a port on top of. Its documentation is kept at
   [docs/xboxrecomp-toolkit.md](docs/xboxrecomp-toolkit.md).
-- [xemu](https://xemu.app): the NV2A and MCPX APU hardware models, without
+- [xemu](https://xemu.app) — the NV2A and MCPX APU hardware models, without
   which none of the graphics or audio would exist.
-- Dear ImGui: the library the in-game menu is drawn with.
-- [JSRF-PC](https://github.com/spriteice/JSRF-PC): the fork the
+- Dear ImGui — the library the in-game menu is drawn with.
+- [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
   in-game menu's design and code were adapted from.
-- devkitPro and libnx: the homebrew toolchain and library the
+- devkitPro and libnx — the homebrew toolchain and library the
   Switch build is made with.
 - The title lettering in the banner is set in
   [Nise JSRF](https://www.dafont.com/nisejsrf.font), a free font by Yoyo.
@@ -591,8 +591,8 @@ xemu is LGPL-2.1-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 The releases contain the engine: the runtime (the kernel layer and the
 graphics and audio hardware models) and the game's own code, machine-translated
-to native code. They contain **no game data**, no textures, models, music,
-video or text, and do nothing without the files from your own copy of the
+to native code. They contain **no game data** — no textures, models, music,
+video or text — and do nothing without the files from your own copy of the
 game. This repository holds no game code at all; that is generated on your
 machine from your own disc. It is the same approach as
 [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) and
