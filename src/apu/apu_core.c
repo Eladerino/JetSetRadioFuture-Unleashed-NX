@@ -542,9 +542,58 @@ static int ring_target_frames(void)
     return t;
 }
 
+/*
+ * RECOMP_APU_PACE=1: one voice processor frame at a time (from spriteice's
+ * JSRF-PC). Unset or 8: eight at a time, as before.
+ *
+ * Why it matters. To restart a sound, DirectSound turns the voice off and
+ * spins (sub_001A308E, called from sub_001A3E58) until a voice processor
+ * frame has found the voice idle and the APU interrupt has retired it. Made
+ * eight at a time against the output ring, the frames come in one burst at
+ * each pull of the device -- on the Switch every 2048 frames, 43 ms -- so a
+ * restart waits for the next burst, about 20 ms on average where the console
+ * takes under one. Runs 6 and 8 spent 2-3% of the game thread in that spin,
+ * up to 8-10% in some ten-second windows.
+ *
+ * Why upstream 0.5.9's version starved here (reverted in 22c94a5): it kept
+ * the ring plus the unplayed part of the last pull at the 40 ms target, so
+ * at each pull the ring held 40 ms for a 43 ms pull, short every time. This
+ * keeps the ring itself, less what the device has played of its last pull,
+ * at the target: just before a pull the ring holds the target plus a whole
+ * pull, whatever the pull's size, and frames are made as the device plays,
+ * one or two a millisecond.
+ */
+#define FRAMES_PER_MS           48
+#define VP_FRAMES_PER_EP_FRAME  8
+
+static int pace_single(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("RECOMP_APU_PACE");
+        v = e && atoi(e) == 1;
+        if (v) fprintf(stderr, "[APU] paced a frame at a time (RECOMP_APU_PACE=1)\n");
+    }
+    return v;
+}
+
+/* What the device has yet to play of what this thread has made, in frames:
+ * the ring, the frames made since the last eight were handed over
+ * (mcpx_apu_monitor_frame), less what the device has played of its last
+ * pull, which it takes all at once and plays at 48 frames a millisecond. */
+static int ring_ahead(MCPXAPUState *d, int ms_since_pull)
+{
+    int played = ms_since_pull * FRAMES_PER_MS;
+    int pull = xa2_get_buffer_size();
+    if (pull > 0 && played > pull) played = pull;
+    return xa2_ring_level()
+         + (int)(d->ep_frame_div % VP_FRAMES_PER_EP_FRAME) * NUM_SAMPLES_PER_FRAME - played;
+}
+
 static void throttle(MCPXAPUState *d)
 {
-    if (d->ep_frame_div % 8) {
+    const int single = pace_single();
+    if (!single && d->ep_frame_div % 8) {
         return;
     }
 
@@ -553,12 +602,15 @@ static void throttle(MCPXAPUState *d)
     if (ring_target_frames() > 0 && xa2_ring_level() >= 0) {
         for (;;) {
             int since;
-            if (xa2_ring_level() < ring_target_frames()) break;   /* room: produce */
+            if ((single ? ring_ahead(d, 0) : xa2_ring_level())
+                    < ring_target_frames()) break;                /* room: produce */
             if (d->pause_requested) break;
             since = xa2_ms_since_pull();
             /* Nothing is pulling (the device stopped): fall back to the
              * wall clock rather than stop the title's audio time. */
             if (since < 0 || since > 60) goto wall_clock;
+            /* ... or room once the device has played part of its pull */
+            if (single && ring_ahead(d, since) < ring_target_frames()) break;
             qemu_cond_timedwait(&d->cond, &d->lock, 1);
         }
         d->next_frame_time_us = 0;
@@ -568,28 +620,42 @@ static void throttle(MCPXAPUState *d)
 
 wall_clock:
 
-    if (d->next_frame_time_us == 0 ||
-        now_us - d->next_frame_time_us > EP_FRAME_US) {
-        /* RECOMP_APU_STATS: how often the thread fell behind and gave up
-         * the time it had lost (each is up to 8 frames never produced). */
-        extern int g_apu_throttle_resets; extern int64_t g_apu_throttle_lost_us;
-        if (d->next_frame_time_us) {
-            g_apu_throttle_resets++;
-            g_apu_throttle_lost_us += now_us - d->next_frame_time_us;
-        }
-        d->next_frame_time_us = now_us;
-    }
+    {
+        int64_t due;
+        /* One at a time: this frame's eighth of the encode frame. Eight at
+         * a time: all eight at its start. */
+        int j = single ? (int)(d->ep_frame_div % VP_FRAMES_PER_EP_FRAME) : 0;
 
-    while (!d->pause_requested) {
-        now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-        int64_t remaining_ms = (d->next_frame_time_us - now_us) / 1000;
-        if (remaining_ms > 0) {
-            qemu_cond_timedwait(&d->cond, &d->lock, (int)remaining_ms);
+        if (j == 0) {
+            if (d->next_frame_time_us == 0 ||
+                now_us - d->next_frame_time_us > EP_FRAME_US) {
+                /* RECOMP_APU_STATS: how often the thread fell behind and gave
+                 * up the time it had lost (each is up to 8 frames never
+                 * produced). */
+                extern int g_apu_throttle_resets; extern int64_t g_apu_throttle_lost_us;
+                if (d->next_frame_time_us) {
+                    g_apu_throttle_resets++;
+                    g_apu_throttle_lost_us += now_us - d->next_frame_time_us;
+                }
+                d->next_frame_time_us = now_us;
+            }
+            due = d->next_frame_time_us;
+            d->next_frame_time_us += EP_FRAME_US;
         } else {
-            break;
+            due = d->next_frame_time_us - EP_FRAME_US
+                + j * EP_FRAME_US / VP_FRAMES_PER_EP_FRAME;
+        }
+
+        while (!d->pause_requested) {
+            now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+            int64_t remaining_ms = (due - now_us) / 1000;
+            if (remaining_ms > 0) {
+                qemu_cond_timedwait(&d->cond, &d->lock, (int)remaining_ms);
+            } else {
+                break;
+            }
         }
     }
-    d->next_frame_time_us += EP_FRAME_US;
 
     d->sleep_acc_us += (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us);
 }
