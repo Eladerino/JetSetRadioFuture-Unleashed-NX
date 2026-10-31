@@ -612,16 +612,17 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
             uint32_t subch  = (w >> 13) & 7u;
             uint32_t method =  w & 0x1FFCu;
             int noninc = (w & 0xE0000000u) == 0x40000000u;
+            static int bulk = -1;
+            const uint32_t *params = NULL;
+            if (bulk < 0) { const char *e = getenv("RECOMP_PB_BULK");
+                            bulk = e ? atoi(e) != 0 : 1; }
 
             /* Index runs whole (nv2a_pb_exec_indices): they are most of
              * the words in a frame. RECOMP_PB_BULK=0 goes word by word. */
             if (noninc && s_exec_enabled && !s_scan_enabled && subch == 0
                 && (method == 0x1800 || method == 0x1808) && count) {
-                static int bulk = -1;
                 static uint32_t buf[0x800];
                 uint32_t n = count;
-                if (bulk < 0) { const char *e = getenv("RECOMP_PB_BULK");
-                                bulk = e ? atoi(e) != 0 : 1; }
                 if (n > (end_va - va) / 4) n = (end_va - va) / 4;
                 if (bulk && n) {
                     /* A run inside one window is handed over where it lies
@@ -644,6 +645,24 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                     }
                 }
             }
+            /* The other commands' parameters: found once for the command
+             * where it lies in one window (or live, with no copy), instead
+             * of a window lookup for every word -- in 99th Street pb_word
+             * was over 2% of the GPU thread. The copy moves only between
+             * commands, as for the index runs above. A command that
+             * straddles windows or runs past the end goes word by word, and
+             * so does everything with RECOMP_PB_BULK=0. */
+            if (bulk && s_exec_enabled && count) {
+                uint32_t n = count;
+                if (n > (end_va - va) / 4) n = (end_va - va) / 4;
+                if (n && !s_nwin)
+                    params = (const uint32_t *)(mem + va);
+                else if (n) {
+                    int wi = pb_win(va, n * 4);
+                    if (wi >= 0)
+                        params = (const uint32_t *)(s_snap + s_win[wi].off + (va - s_win[wi].lo));
+                }
+            }
             for (uint32_t i = 0; i < count && va < end_va; i++) {
                 uint32_t m = noninc ? method : method + i * 4;
                 /* The inventory is only ever printed under RECOMP_PB_SCAN, so
@@ -655,7 +674,7 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                 if (s_exec_enabled) {
                     /* where a fence's release sits (JSRF_FENCE_LOG) */
                     if (m == 0x1D70u) g_pb_cmd_va = va;
-                    nv2a_pb_exec_method(subch, m, pb_word(mem, va));
+                    nv2a_pb_exec_method(subch, m, params ? params[i] : pb_word(mem, va));
                 }
                 va += 4;
                 words++;
