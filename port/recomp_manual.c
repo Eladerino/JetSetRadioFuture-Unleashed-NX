@@ -1361,6 +1361,7 @@ const char *xbox_stage_name(int n)
     case 0:  return "garage";
     case 10: return "Shibuya";
     case 11: return "Chuo Street";
+    case 12: return "Dogenzaka";
     case 30: return "99th Street";
     default: return "not named yet";
     }
