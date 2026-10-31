@@ -288,13 +288,31 @@ void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
     }
 }
 
+/* The window holding all of [va, va + bytes), or -1. The windows never
+ * overlap (snap_ensure copies only what none covers), so any one that
+ * holds the range is the one. The window the last lookup found is tried
+ * first: a walk reads its words in order, and almost every word comes
+ * from the window the one before it did, where a scan from the first
+ * window cost a compare per window on every word of the frame. */
+static int s_win_last;
+static inline int pb_win(uint32_t va, uint32_t bytes)
+{
+    int i = s_win_last;
+    if (i < s_nwin && va >= s_win[i].lo && va - s_win[i].lo + bytes <= s_win[i].hi - s_win[i].lo)
+        return i;
+    for (i = 0; i < s_nwin; i++)
+        if (va >= s_win[i].lo && va - s_win[i].lo + bytes <= s_win[i].hi - s_win[i].lo)
+            return s_win_last = i;
+    return -1;
+}
+
 static inline uint32_t pb_word(const uint8_t *mem, uint32_t va)
 {
     int i;
     if (!s_nwin) return *(const uint32_t *)(mem + va);
-    for (i = 0; i < s_nwin; i++)
-        if (va >= s_win[i].lo && va < s_win[i].hi - 3)
-            return *(const uint32_t *)(s_snap + s_win[i].off + (va - s_win[i].lo));
+    i = pb_win(va, 4);
+    if (i >= 0)
+        return *(const uint32_t *)(s_snap + s_win[i].off + (va - s_win[i].lo));
     return *(const uint32_t *)(mem + va);
 }
 static int s_in_sub;
@@ -399,8 +417,20 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                                 bulk = e ? atoi(e) != 0 : 1; }
                 if (n > (end_va - va) / 4) n = (end_va - va) / 4;
                 if (bulk && n) {
-                    for (uint32_t i = 0; i < n; i++) buf[i] = pb_word(mem, va + i * 4);
-                    if (nv2a_pb_exec_indices(subch, method, buf, n)) {
+                    /* A run inside one window is handed over where it lies
+                     * in the copy, which nothing changes until the next
+                     * pass; with no copy at all it is read live in one go,
+                     * as pb_word would; a run that straddles windows (or
+                     * leaves them) is gathered word by word. */
+                    const uint32_t *run = buf;
+                    int wi = s_nwin ? pb_win(va, n * 4) : -1;
+                    if (wi >= 0)
+                        run = (const uint32_t *)(s_snap + s_win[wi].off + (va - s_win[wi].lo));
+                    else if (!s_nwin)
+                        memcpy(buf, mem + va, (size_t)n * 4);
+                    else
+                        for (uint32_t i = 0; i < n; i++) buf[i] = pb_word(mem, va + i * 4);
+                    if (nv2a_pb_exec_indices(subch, method, run, n)) {
                         va += n * 4;
                         words += n;
                         continue;
