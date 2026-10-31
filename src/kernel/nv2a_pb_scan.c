@@ -197,10 +197,12 @@ static uint32_t s_tot_calls, s_tot_returns;
  * The escrow is one consistent moment per range, under the same fence
  * discipline the walk's data reads already rely on.
  */
-#define SNAP_MAX_WIN 16
+#define SNAP_MAX_WIN 128
+/* The most the eager copies (below) may hold at once. */
+#define SNAP_EAGER_CAP (32u << 20)
 static uint8_t *s_snap;
 static size_t   s_snap_cap;
-static struct { uint32_t lo, hi; size_t off; } s_win[SNAP_MAX_WIN];
+static struct { uint32_t lo, hi; size_t off; uint32_t tag; } s_win[SNAP_MAX_WIN];
 static int      s_nwin;
 /* Set by nv2a_pb_snapshot_take: the ack loop is taking the pre-GET copy
  * this pass, so on-demand windows belong to the same moment and the
@@ -208,19 +210,34 @@ static int      s_nwin;
  * (the flush-ack thread off), and then the walk reads live throughout,
  * exactly as it did before the copy existed. */
 static int      s_snap_live;
+/* Which copy each window belongs to, and which one the walk is reading.
+ * With RECOMP_PB_EAGER the ack loop takes further copies while the walk
+ * runs (nv2a_pb_snapshot_more), each under a tag of its own, and they can
+ * hold the same ring addresses a lap apart: the walk of one copy reads only
+ * the windows with its tag. Without it every window is tag 0. */
+static uint32_t s_cur_tag;
 
-static void snap_add(uint32_t lo, uint32_t hi)
+/* Copy [lo, hi) into a new window. 0 when it could not be added (the table
+ * is full, the eager cap is reached, no memory); nothing to copy is not a
+ * failure. */
+static int snap_add(uint32_t lo, uint32_t hi, uint32_t tag)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     size_t off = s_nwin ? s_win[s_nwin - 1].off + (s_win[s_nwin - 1].hi - s_win[s_nwin - 1].lo) : 0;
     size_t n;
     if (hi > (0x80000000u | (64u << 20))) hi = 0x80000000u | (64u << 20);
-    if (s_nwin >= SNAP_MAX_WIN || hi <= lo) return;
+    if (hi <= lo) return 1;
+    if (s_nwin >= SNAP_MAX_WIN) return 0;
     n = hi - lo;
+    if (tag && off + n > SNAP_EAGER_CAP) return 0;
     if (off + n > s_snap_cap) {
         size_t cap = (off + n + 0xFFFFu) & ~(size_t)0xFFFFu;
-        uint8_t *b = (uint8_t *)realloc(s_snap, cap);
-        if (!b) return;
+        uint8_t *b;
+        /* Eager copies arrive a few kilobytes at a time: grow by doubling
+         * rather than reallocating the whole copy for each one. */
+        if (tag && cap < 2 * s_snap_cap) cap = 2 * s_snap_cap;
+        b = (uint8_t *)realloc(s_snap, cap);
+        if (!b) return 0;
         s_snap = b;
         s_snap_cap = cap;
     }
@@ -228,7 +245,9 @@ static void snap_add(uint32_t lo, uint32_t hi)
     s_win[s_nwin].lo = lo;
     s_win[s_nwin].hi = hi;
     s_win[s_nwin].off = off;
+    s_win[s_nwin].tag = tag;
     s_nwin++;
+    return 1;
 }
 
 /* Copy whatever of [lo, hi) the current windows do not already cover,
@@ -249,6 +268,7 @@ static void snap_ensure(uint32_t lo, uint32_t hi)
         uint32_t covered_to = 0, next_lo = hi;
         int i, before;
         for (i = 0; i < s_nwin; i++) {
+            if (s_win[i].tag != s_cur_tag) continue;
             if (cur >= s_win[i].lo && cur < s_win[i].hi) { covered_to = s_win[i].hi; break; }
             if (s_win[i].lo > cur && s_win[i].lo < next_lo) next_lo = s_win[i].lo;
         }
@@ -256,26 +276,23 @@ static void snap_ensure(uint32_t lo, uint32_t hi)
         if (next_lo - cur > budget) next_lo = cur + (uint32_t)budget;
         if (next_lo <= cur) return;
         before = s_nwin;
-        snap_add(cur, next_lo);
+        snap_add(cur, next_lo, s_cur_tag);
         if (s_nwin == before) return;   /* table full or copy refused */
         budget -= next_lo - cur;
         cur = next_lo;
     }
 }
 
-/* last_put and put as the ack loop reads them (physical). Mirrors the
- * ranges its walk will cover. */
-void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put);
-void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
+/* The windows for [last_put, put), as the ack loop reads them (physical),
+ * under `tag`. Mirrors the ranges its walk will cover. */
+static int snap_take(uint32_t last_put, uint32_t put, uint32_t tag)
 {
     uint32_t from = 0x80000000u | (last_put & 0x0FFFFFFFu);
     uint32_t to   = 0x80000000u | (put & 0x0FFFFFFFu);
-    s_snap_live = 1;
-    s_nwin = 0;
-    if (!last_put || put == last_put) return;
-    if (to > from) {
-        snap_add(from, to - from > 0x400000u ? from + 0x400000u : to);
-    } else {
+    if (!last_put || put == last_put) return 1;
+    if (to > from)
+        return snap_add(from, to - from > 0x400000u ? from + 0x400000u : to, tag);
+    {
         /* The same reach as the ack loop's walk of a wrap: up to 1 MB of
          * tail to find the jump, and the head after it. They were 128 KB
          * and 256 KB, so a longer tail was read live -- after GET had
@@ -283,14 +300,57 @@ void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
          * character select drawing from rewritten words (an attribute
          * stride of 4521728, a walk off the end of RAM). */
         uint32_t back = (put & 0x0FFFFFFFu) < 0x100000u ? (put & 0x0FFFFFFFu) : 0x100000u;
-        snap_add(from, from + 0x100000u);
-        snap_add(to - back, to);
+        int ok = snap_add(from, from + 0x100000u, tag);
+        return snap_add(to - back, to, tag) && ok;
     }
 }
 
-/* The window holding all of [va, va + bytes), or -1. The windows never
- * overlap (snap_ensure copies only what none covers), so any one that
- * holds the range is the one. The window the last lookup found is tried
+void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put);
+void nv2a_pb_snapshot_take(uint32_t last_put, uint32_t put)
+{
+    s_snap_live = 1;
+    s_nwin = 0;
+    (void)snap_take(last_put, put, 0);
+}
+
+/* RECOMP_PB_EAGER (xbox_memory_layout.c): copy [last_put, put) as copy
+ * `tag`, after the copies already held, or in place of them with `reset`
+ * (everything taken so far has been walked). 0 when it does not fit, and
+ * then none of it is kept and GET must not move past it. */
+int nv2a_pb_snapshot_more(uint32_t last_put, uint32_t put, uint32_t tag, int reset);
+int nv2a_pb_snapshot_more(uint32_t last_put, uint32_t put, uint32_t tag, int reset)
+{
+    int before;
+    if (reset) s_nwin = 0;
+    s_snap_live = 1;
+    before = s_nwin;
+    if (!snap_take(last_put, put, tag)) {
+        s_nwin = before;
+        return 0;
+    }
+    return 1;
+}
+
+/* The copy the walk reads from now on (its windows, and those it adds for
+ * calls). */
+void nv2a_pb_walk_tag(uint32_t tag);
+void nv2a_pb_walk_tag(uint32_t tag)
+{
+    s_cur_tag = tag;
+}
+
+/* Called by the walk every few thousand words when set (RECOMP_PB_EAGER). */
+static void (*s_pb_poll)(void);
+void nv2a_pb_set_poll(void (*fn)(void));
+void nv2a_pb_set_poll(void (*fn)(void))
+{
+    s_pb_poll = fn;
+}
+
+/* The window holding all of [va, va + bytes), or -1. The windows of one
+ * copy never overlap (snap_ensure copies only what none covers), so any one
+ * with the walk's tag that holds the range is the one. The window the last
+ * lookup found is tried
  * first: a walk reads its words in order, and almost every word comes
  * from the window the one before it did, where a scan from the first
  * window cost a compare per window on every word of the frame. */
@@ -298,10 +358,12 @@ static int s_win_last;
 static inline int pb_win(uint32_t va, uint32_t bytes)
 {
     int i = s_win_last;
-    if (i < s_nwin && va >= s_win[i].lo && va - s_win[i].lo + bytes <= s_win[i].hi - s_win[i].lo)
+    if (i < s_nwin && s_win[i].tag == s_cur_tag
+     && va >= s_win[i].lo && va - s_win[i].lo + bytes <= s_win[i].hi - s_win[i].lo)
         return i;
     for (i = 0; i < s_nwin; i++)
-        if (va >= s_win[i].lo && va - s_win[i].lo + bytes <= s_win[i].hi - s_win[i].lo)
+        if (s_win[i].tag == s_cur_tag
+         && va >= s_win[i].lo && va - s_win[i].lo + bytes <= s_win[i].hi - s_win[i].lo)
             return s_win_last = i;
     return -1;
 }
@@ -322,7 +384,7 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     uint32_t va = start_va;
-    uint32_t words = 0, jumps = 0, unknown = 0, jump_to = 0;
+    uint32_t words = 0, jumps = 0, unknown = 0, jump_to = 0, polled = 0;
 
     /* Both read once. This runs on every pushbuffer segment the title submits
      * -- thousands a second -- and getenv walks the environment doing a string
@@ -363,7 +425,16 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
         snap_ensure(start_va, end_va);
 
     while (va < end_va && words < 0x100000u) {
-        uint32_t w = pb_word(mem, va);
+        uint32_t w;
+        /* RECOMP_PB_EAGER: let the ack loop copy what the title has handed
+         * over since, and move GET. Only here, between commands, because
+         * the copy may move in memory when it grows: nothing holds a
+         * pointer into it from one command to the next. */
+        if (s_pb_poll && words - polled >= 8192u) {
+            polled = words;
+            s_pb_poll();
+        }
+        w = pb_word(mem, va);
         va += 4;
         words++;
 
@@ -418,8 +489,8 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                 if (n > (end_va - va) / 4) n = (end_va - va) / 4;
                 if (bulk && n) {
                     /* A run inside one window is handed over where it lies
-                     * in the copy, which nothing changes until the next
-                     * pass; with no copy at all it is read live in one go,
+                     * in the copy, which grows (and may move) only between
+                     * commands; with no copy at all it is read live in one go,
                      * as pb_word would; a run that straddles windows (or
                      * leaves them) is gathered word by word. */
                     const uint32_t *run = buf;

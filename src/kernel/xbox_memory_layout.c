@@ -890,9 +890,76 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
     return 0;
 }
 
+/* GET as soon as the ring is copied (RECOMP_PB_EAGER=1, with the flush-ack
+ * thread; off by default while it is tried).
+ *
+ * GET tells D3D how much of the ring it may write again, and it moved once
+ * per lap of the loop below: copy what the title has handed over, publish
+ * GET, walk the copy. A heavy pass takes about 15 ms to walk on the Switch,
+ * and whatever the title kicks off meanwhile waits for the next lap: in the
+ * Oct 31 Shibuya run the game thread spent about 13% of its heavy frames in
+ * D3D's make-space wait (sub_00191440) while this thread spent about 18%
+ * waiting for the game. With this on, the walk asks every few thousand
+ * words whether PUT has moved (nv2a_pb_set_poll); if it has, what is new is
+ * copied at once under a tag of its own, GET follows, and the copy waits in
+ * line to be walked after the one in hand. The ring is free once it is
+ * copied, which is what the copy is for.
+ *
+ * What the commands point at -- vertex buffers, textures -- is still read
+ * when the walk gets there, so the title can now be further ahead of the
+ * walk than one pass. Its dynamic buffers wait on the semaphores the
+ * executor writes in order (fence_mirrors_tick), which this does not move.
+ * The copies are let go once everything taken has been walked; with
+ * PB_RANGES copies in line or the cap in nv2a_pb_scan.c reached, GET waits
+ * as it did before. */
+extern int  nv2a_pb_snapshot_more(uint32_t, uint32_t, uint32_t, int);
+extern void nv2a_pb_walk_tag(uint32_t);
+extern void nv2a_pb_set_poll(void (*)(void));
+#define PB_RANGES 64u
+static int s_pb_eager;
+static volatile uint32_t *s_pb_regs;
+static uint32_t s_pb_take_put;              /* the PUT the copies reach */
+static struct { uint32_t from, to, tag; } s_pb_rng[PB_RANGES];
+static uint32_t s_pb_rng_in, s_pb_rng_out, s_pb_rng_tag;
+static unsigned long s_pb_eager_takes, s_pb_eager_refused;
+
+/* Copy [s_pb_take_put, put) and queue it. 0 if it did not fit. */
+static int pb_eager_take(uint32_t put, int reset)
+{
+    uint32_t tag;
+    if (s_pb_rng_in - s_pb_rng_out >= PB_RANGES) { s_pb_eager_refused++; return 0; }
+    tag = ++s_pb_rng_tag ? s_pb_rng_tag : ++s_pb_rng_tag;      /* never 0 */
+    if (!nv2a_pb_snapshot_more(s_pb_take_put, put, tag, reset)) { s_pb_eager_refused++; return 0; }
+    s_pb_rng[s_pb_rng_in % PB_RANGES].from = s_pb_take_put;
+    s_pb_rng[s_pb_rng_in % PB_RANGES].to   = put;
+    s_pb_rng[s_pb_rng_in % PB_RANGES].tag  = tag;
+    s_pb_rng_in++;
+    s_pb_take_put = put;
+    s_pb_eager_takes++;
+    return 1;
+}
+
+/* From inside the walk: anything new since the last copy is copied and
+ * acknowledged now. The acquire orders the title's commands before the PUT
+ * that covers them; the release keeps the copy ahead of the GET that frees
+ * the ring for writing. */
+static void pb_eager_poll(void)
+{
+    volatile uint32_t *put = (volatile uint32_t *)((char *)s_pb_regs + NV2A_USER_DMA_PUT);
+    volatile uint32_t *get = (volatile uint32_t *)((char *)s_pb_regs + NV2A_USER_DMA_GET);
+    uint32_t p = __atomic_load_n(put, __ATOMIC_ACQUIRE);
+    if (p == s_pb_take_put || !pb_eager_take(p, 0)) return;
+    __atomic_store_n(get, p, __ATOMIC_RELEASE);
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    {
+        const char *e = getenv("RECOMP_PB_EAGER");
+        s_pb_eager = e && atoi(e) > 0;
+        s_pb_regs = regs;
+    }
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
         s_ack_top_ms = (long long)GetTickCount64();
         vblank_intr_tick(regs);
@@ -925,13 +992,30 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             /* With the flush-ack thread on, copy what is about to be
              * acknowledged before GET says so (nv2a_pb_scan.c), and walk
              * exactly that much below. */
-            if (s_flush_ack > 0 && s_nv2a_trace) {
-                extern void nv2a_pb_snapshot_take(uint32_t, uint32_t);
-                nv2a_pb_snapshot_take(s_pb_last_put, p);
-                s_pb_snap_put = p;
-            }
-            if (*get != p) {
-                *get = p;
+            if (s_flush_ack > 0 && s_nv2a_trace && s_pb_eager) {
+                /* RECOMP_PB_EAGER: queue a copy of what is new (in place of
+                 * the old copies once all of them have been walked), and
+                 * let GET go only as far as the copies do. */
+                if (s_pb_eager == 1) {
+                    s_pb_eager = 2;
+                    s_pb_take_put = s_pb_last_put;
+                    nv2a_pb_set_poll(pb_eager_poll);
+                    fprintf(stderr, "  [NV2A] GET moves as the ring is copied (RECOMP_PB_EAGER)\n");
+                }
+                p = __atomic_load_n(put, __ATOMIC_ACQUIRE);
+                if (p != s_pb_take_put && !pb_eager_take(p, s_pb_rng_in == s_pb_rng_out))
+                    p = s_pb_take_put;
+                if (*get != p)
+                    __atomic_store_n(get, p, __ATOMIC_RELEASE);
+            } else {
+                if (s_flush_ack > 0 && s_nv2a_trace) {
+                    extern void nv2a_pb_snapshot_take(uint32_t, uint32_t);
+                    nv2a_pb_snapshot_take(s_pb_last_put, p);
+                    s_pb_snap_put = p;
+                }
+                if (*get != p) {
+                    *get = p;
+                }
             }
         }
         fence_mirrors_tick();
@@ -952,8 +1036,34 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              * is being drawn and the missing piece is upstream of the GPU. */
             static DWORD  last_put_ms;
             DWORD now_ms = GetTickCount();
-            uint32_t put = s_flush_ack > 0 ? s_pb_snap_put
-                         : *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+            uint32_t put;
+            if (s_pb_eager == 2 && s_pb_rng_out != s_pb_rng_in) {
+                /* RECOMP_PB_EAGER: the oldest copy in line, read through
+                 * its own windows. One a lap, so the work above still runs
+                 * between them. */
+                uint32_t k = s_pb_rng_out++ % PB_RANGES;
+                nv2a_pb_walk_tag(s_pb_rng[k].tag);
+                s_pb_last_put = s_pb_rng[k].from;
+                s_pb_snap_put = s_pb_rng[k].to;
+                {
+                    static DWORD shown;
+                    static uint32_t deepest;
+                    static unsigned long takes0, refused0;
+                    uint32_t depth = s_pb_rng_in - s_pb_rng_out + 1;
+                    if (depth > deepest) deepest = depth;
+                    if (now_ms - shown >= 10000) {
+                        fprintf(stderr, "  [NV2A] eager GET: %lu copies taken, %lu held back "
+                                "(queue or copy full), deepest line %u in the last 10 s\n",
+                                s_pb_eager_takes - takes0, s_pb_eager_refused - refused0, deepest);
+                        shown = now_ms;
+                        takes0 = s_pb_eager_takes;
+                        refused0 = s_pb_eager_refused;
+                        deepest = 0;
+                    }
+                }
+            }
+            put = s_flush_ack > 0 ? s_pb_snap_put
+                : *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             if (put != s_pb_last_put || (now_ms - last_put_ms) > 2000) {
                 int idle = put == s_pb_last_put, reported = 0;
                 /* Survey the segment the title just submitted, once. */
@@ -1089,7 +1199,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 #if !defined(_WIN32) || defined(XBOXRECOMP_WIN_GL)
             if (us > 0) {
                 if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-                if (s_kick_on && s_hurry) sched_yield();
+                /* RECOMP_PB_EAGER: copies still in line are walked next
+                 * lap, not after a wait. */
+                if (s_pb_eager == 2 && s_pb_rng_out != s_pb_rng_in) ;
+                else if (s_kick_on && s_hurry) sched_yield();
                 else if (s_kick_on) nv2a_ack_wait(us);
                 else { struct timespec ts = { 0, (long)us * 1000L }; nanosleep(&ts, NULL); }
             }
