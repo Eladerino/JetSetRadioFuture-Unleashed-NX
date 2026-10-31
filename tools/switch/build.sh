@@ -29,6 +29,12 @@
 #                      icon in the homebrew menu. Kept outside the repo
 #                      on purpose: the icon ships inside the .nro, so
 #                      releases use devkitPro's default icon.
+#   JSRF_GEN_OPT=...   compile options added for the generated code only,
+#                      after devkitPro's own (-O2): JSRF_GEN_OPT=-O3 to try
+#                      the wider optimisation on the game's code. Unset
+#                      means none, every time: it is not remembered from
+#                      an earlier build. Changing it recompiles all of the
+#                      generated code (SKIP_RECOMP=1 still applies).
 #   EXPORT_DIR  a folder the finished .nro is also copied to, for dragging
 #              onto the SD card (default under WSL: Downloads\jsrf-unleashed-switch
 #              in your Windows profile; "none" turns it off). Only the .nro
@@ -178,6 +184,7 @@ say "building the Switch engine (-j$JOBS)"
 cmake -S port -B "$WORK_DIR/build-switch" \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DJSRF_GEN_OPT="${JSRF_GEN_OPT:-}" \
     ${JSRF_ICON:+-DJSRF_ICON="$JSRF_ICON"}
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"
 

@@ -131,6 +131,15 @@ endif()
 # of the frame, and its optimisation flags come from the toolchain file.
 string(TOUPPER "${CMAKE_BUILD_TYPE}" JSRF_BT)
 message(STATUS "C flags: ${CMAKE_C_FLAGS} | ${CMAKE_BUILD_TYPE}: ${CMAKE_C_FLAGS_${JSRF_BT}}")
+# JSRF_GEN_OPT: options for the generated code only, after the flags above,
+# so a later -O wins: -O3 to try the compiler's wider inlining and
+# vectorising on the game's own code (devkitPro's Release is -O2). Empty by
+# default, and tools/switch/build.sh sets it each time from the environment
+# so a value never lingers in the cache from an earlier build.
+set(JSRF_GEN_OPT "" CACHE STRING "Compile options added for the generated code (e.g. -O3)")
+if(JSRF_GEN_OPT)
+    message(STATUS "generated code also gets: ${JSRF_GEN_OPT}")
+endif()
 
 # The runtime: everything in this repository outside port/ and launcher/.
 add_subdirectory("${JSRF_REPO}" "${CMAKE_BINARY_DIR}/xboxrecomp")
@@ -152,6 +161,10 @@ if(JSRF_TABLES_NONE)
     list(APPEND JSRF_GEN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/recomp_tables_none.c")
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/recomp_tables_none.c"
         PROPERTIES COMPILE_DEFINITIONS "${JSRF_TABLES_NONE}")
+endif()
+if(JSRF_GEN_OPT)
+    separate_arguments(JSRF_GEN_OPT_LIST NATIVE_COMMAND "${JSRF_GEN_OPT}")
+    set_source_files_properties(${JSRF_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${JSRF_GEN_OPT_LIST}")
 endif()
 
 if(ANDROID)
