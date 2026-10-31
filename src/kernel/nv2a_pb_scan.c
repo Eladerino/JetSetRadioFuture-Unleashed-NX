@@ -202,7 +202,10 @@ static uint32_t s_tot_calls, s_tot_returns;
 #define SNAP_EAGER_CAP (32u << 20)
 static uint8_t *s_snap;
 static size_t   s_snap_cap;
-static struct { uint32_t lo, hi; size_t off; uint32_t tag; } s_win[SNAP_MAX_WIN];
+static struct {
+    uint32_t lo, hi; size_t off; uint32_t tag;
+    int jump;       /* ends with the jump that ends the ring (pb_tail_end) */
+} s_win[SNAP_MAX_WIN];
 static int      s_nwin;
 /* Set by nv2a_pb_snapshot_take: the ack loop is taking the pre-GET copy
  * this pass, so on-demand windows belong to the same moment and the
@@ -246,8 +249,57 @@ static int snap_add(uint32_t lo, uint32_t hi, uint32_t tag)
     s_win[s_nwin].hi = hi;
     s_win[s_nwin].off = off;
     s_win[s_nwin].tag = tag;
+    s_win[s_nwin].jump = 0;
     s_nwin++;
     return 1;
+}
+
+/* Where the ring's tail ends: the word after the jump the title wrote
+ * when it wrapped, found by the walk's own decode (headers skipped by
+ * their count, a call or return stepped over, a word that is none of
+ * those stepped over) over the live ring, from `from` up to `limit`. 0 if
+ * no jump is there.
+ *
+ * The tail was copied blind, a megabyte from the old PUT, because the
+ * walk needs to reach the jump wherever it is (the ring is 512 KB, and
+ * where the title wraps moves). The jump is a few kilobytes in, so the
+ * copy was nearly all memory past the ring, taken once or twice a frame:
+ * about 2% of the GPU thread in memcpy in the Oct 31 Shibuya run, and
+ * half of the L2 cache turned over each time. Read before GET moves,
+ * like the copy itself, the live words are the ones the walk would see.
+ * RECOMP_PB_TAILSCAN=0 copies the megabyte as before. */
+static uint32_t pb_tail_end(uint32_t from, uint32_t limit)
+{
+    static int on = -1;
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t va = from;
+    if (on < 0) { const char *e = getenv("RECOMP_PB_TAILSCAN");
+                  on = e ? atoi(e) != 0 : 1; }
+    if (!on) return 0;
+    if (limit > 0x84000000u) limit = 0x84000000u;
+    while (va < limit) {
+        uint32_t w = *(const uint32_t *)(mem + va);
+        va += 4;
+        if ((w & 3u) == 1u || (w & 0xE0000003u) == 0x20000000u) return va;
+        if ((w & 3u) == 2u || (w & 0xFFFF0003u) == 0x00020000u) continue;
+        if ((w & 0x00030003u) == 0u) {
+            uint32_t count = (w >> 18) & 0x7FFu;
+            va += count * 4;
+        }
+    }
+    return 0;
+}
+
+/* The walk of [va, end) stops at the jump a tail window ends with, so the
+ * range past it is never read: end, brought in to the window's end. */
+static uint32_t snap_tail_clamp(uint32_t va, uint32_t end)
+{
+    int i;
+    for (i = 0; i < s_nwin; i++)
+        if (s_win[i].jump && s_win[i].tag == s_cur_tag
+         && va >= s_win[i].lo && va < s_win[i].hi && end > s_win[i].hi)
+            return s_win[i].hi;
+    return end;
 }
 
 /* Copy whatever of [lo, hi) the current windows do not already cover,
@@ -300,7 +352,10 @@ static int snap_take(uint32_t last_put, uint32_t put, uint32_t tag)
          * character select drawing from rewritten words (an attribute
          * stride of 4521728, a walk off the end of RAM). */
         uint32_t back = (put & 0x0FFFFFFFu) < 0x100000u ? (put & 0x0FFFFFFFu) : 0x100000u;
-        int ok = snap_add(from, from + 0x100000u, tag);
+        uint32_t end = pb_tail_end(from, from + 0x100000u);
+        int before = s_nwin;
+        int ok = snap_add(from, end ? end : from + 0x100000u, tag);
+        if (end && s_nwin == before + 1) s_win[before].jump = 1;
         return snap_add(to - back, to, tag) && ok;
     }
 }
@@ -421,8 +476,10 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
     /* The submitted span is already in the copy (nv2a_pb_snapshot_take);
      * a call target or a jump's landing past the head window may not be.
      * Cover the range this walk is about to read before it reads it. */
-    if (start_va >= 0x80000000u && end_va > start_va)
+    if (start_va >= 0x80000000u && end_va > start_va) {
+        end_va = snap_tail_clamp(start_va, end_va);
         snap_ensure(start_va, end_va);
+    }
 
     while (va < end_va && words < 0x100000u) {
         uint32_t w;
