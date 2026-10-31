@@ -569,6 +569,7 @@ empty tables in their place.
   [JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed);
   this repository is the Switch port of it.
 - **Switch port (JSRF Unleashed NX):** Eladerino
+- **Brazilian Portuguese translation:** Hise
 - [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) — the static
   recompilation toolkit this is a port on top of. Its documentation is kept at
   [docs/xboxrecomp-toolkit.md](docs/xboxrecomp-toolkit.md).
