@@ -288,6 +288,18 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 #else
                 fprintf(stderr, "[MANUAL] generated code: plain guest memory, %s\n", how);
 #endif
+                /* port/CMakeLists.txt: on only in a Debug build unless asked for */
+                fprintf(stderr, "[MANUAL] call-site diagnostics: ABI check %s, indirect-call record %s\n",
+#ifdef RECOMP_ABI_CHECK
+                        "compiled in",
+#else
+                        "left out",
+#endif
+#ifdef RECOMP_ICALL_FEEDBACK
+                        "compiled in");
+#else
+                        "left out");
+#endif
             }
             fflush(stderr);
         }

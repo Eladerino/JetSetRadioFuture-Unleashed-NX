@@ -41,11 +41,32 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_compile_definitions(
-    RECOMP_ICALL_FEEDBACK
-    RECOMP_ABI_CHECK
     WIN32_LEAN_AND_MEAN
     NOMINMAX
 )
+
+# Two diagnostics the generated code can carry at every call site.
+# RECOMP_ABI_CHECK compares ebx, esi and edi around every call (and with
+# RECOMP_ABI_RESTORE=1 at run time puts them back); RECOMP_ICALL_FEEDBACK
+# records each indirect call's targets for tools/recomp (icall_targets.dump at
+# exit). Compiled in, they cost code at every call whether or not anything
+# turns them on at run time: spriteice's JSRF-PC measured 46.0 MB of code with
+# them and 36.2 MB without. So a Debug build carries them and any other build
+# does not, unless asked for here (-DJSRF_ABI_CHECK=ON, -DJSRF_ICALL_FEEDBACK=ON).
+# Changing either recompiles every generated file.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_jsrf_diagnostics ON)
+else()
+    set(_jsrf_diagnostics OFF)
+endif()
+option(JSRF_ABI_CHECK "Check callee-saved registers around every call" ${_jsrf_diagnostics})
+option(JSRF_ICALL_FEEDBACK "Record indirect-call targets for tools/recomp" ${_jsrf_diagnostics})
+if(JSRF_ABI_CHECK)
+    add_compile_definitions(RECOMP_ABI_CHECK)
+endif()
+if(JSRF_ICALL_FEEDBACK)
+    add_compile_definitions(RECOMP_ICALL_FEEDBACK)
+endif()
 
 get_filename_component(JSRF_REPO "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
