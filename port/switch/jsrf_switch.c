@@ -720,6 +720,18 @@ void sw_thread_spread(const char *what, unsigned id)
             what, id, mask, ideal, R_SUCCEEDED(rc) ? "" : " (refused)");
 }
 
+/* One priority step above where it was made (a lower number on Horizon):
+ * a thread that must run the moment it is woken, the NV2A flush ack. */
+void sw_thread_raise(const char *what);
+void sw_thread_raise(const char *what)
+{
+    s32 prio = 0;
+    Result rc = svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (R_SUCCEEDED(rc)) rc = svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)(prio - 1));
+    fprintf(stderr, "[SWITCH] thread %s: priority %d -> %d%s\n",
+            what, (int)prio, (int)prio - 1, R_SUCCEEDED(rc) ? "" : " (refused)");
+}
+
 /* The same for a thread that wants one core in particular (the GL device's
  * own thread, nv2a_gfx_thread.c): `core` if this title may run there, else
  * the next in turn. RECOMP_GL_THREAD_CORE stands over the device's choice. */

@@ -263,9 +263,19 @@ static void nv2a_flush_wake(void)
     pthread_cond_signal(&s_flush_cv);
     pthread_mutex_unlock(&s_flush_mu);
 }
+/* On the Switch, a thread at the same priority is not preempted: the flush
+ * ack waited for whatever held its core to block. Since the GL device got a
+ * thread of its own on core 0 (run 11), KickOff's spin went from nothing to
+ * about 5% of the game thread in heavy scenes. One step above the others,
+ * the ack thread runs the moment KickOff wakes it. RECOMP_NV2A_ACK_PRIO=0
+ * leaves it where it was. (port/switch) */
+extern void sw_thread_raise(const char *what) __attribute__((weak));
 static DWORD WINAPI nv2a_flush_ack_thread(LPVOID param)
 {
     volatile uint32_t *r = (volatile uint32_t *)((char *)param + 0x100410);
+    unsigned spins = 0;
+    { const char *e = getenv("RECOMP_NV2A_ACK_PRIO");
+      if (sw_thread_raise && !(e && e[0] == '0')) sw_thread_raise("flush ack"); }
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
         pthread_mutex_lock(&s_flush_mu);
         if (!s_hurry) {
@@ -277,7 +287,11 @@ static DWORD WINAPI nv2a_flush_ack_thread(LPVOID param)
         }
         pthread_mutex_unlock(&s_flush_mu);
         while (s_hurry) {
-            if (*r & 0x00010000u) __atomic_fetch_and(r, ~0x00010000u, __ATOMIC_SEQ_CST);
+            if (*r & 0x00010000u) { __atomic_fetch_and(r, ~0x00010000u, __ATOMIC_SEQ_CST); spins = 0; }
+            /* Above the others, a yield gives them nothing: a KickOff that
+             * stays in long (its thread taken off its core) gets the core
+             * back for them now and then. */
+            else if (++spins >= 4096) { spins = 0; usleep(50); }
             else sched_yield();
         }
     }
