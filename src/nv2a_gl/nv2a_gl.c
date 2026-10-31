@@ -10629,8 +10629,16 @@ static void frame_pace(void)
                 g_pace_st.restarts++;
                 /* Genuinely behind -- the emulation could not keep up. Start
                  * again from here rather than sprinting to catch up on frames
-                 * whose moment has passed. */
-                deadline = now + period;
+                 * whose moment has passed.
+                 *
+                 * Here means now: deadline is this frame's moment, and the
+                 * next call adds the period before it compares. It was set to
+                 * now + period, which the next call made two periods, so the
+                 * frame after every restart was held to 33 ms. A scene that
+                 * runs below the cap restarts every ten to twenty frames, and
+                 * on the Switch that was 4% of the renderer's time in heavy
+                 * scenes spent asleep here, at 41 fps. */
+                deadline = now;
             } else if (now < deadline) {
                 int held = xbox_guest_lock_drop ? xbox_guest_lock_drop() : 0;
                 double spin = deadline - 0.0012;
