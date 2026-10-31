@@ -495,6 +495,7 @@ static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "log",          "JSRF_LOG",            0 },
     { "fast_gpu",     "RECOMP_NV2A_FLUSH_ACK", 0 },
     { "nintendo_layout", "RECOMP_NINTENDO_LAYOUT", 0 },
+    { "show_fps",     "RECOMP_SHOW_FPS",     0 },
 };
 
 /* What the options files said, for the log (which is not open yet here). */

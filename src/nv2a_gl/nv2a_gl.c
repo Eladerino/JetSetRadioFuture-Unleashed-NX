@@ -1620,6 +1620,35 @@ static void nv_window_set_nintendo_layout(int on)
             on ? "on" : "off");
 }
 
+/* The frame rate in the top-left corner (the menu's Display page): game
+ * frames a second over the last half second, drawn by the menu's ImGui
+ * over the fitted frame. Off by default, and off it costs one flag test a
+ * swap. RECOMP_SHOW_FPS stands over the settings file's show_fps=, as
+ * nintendo_layout= does. */
+static volatile int g_show_fps = -1;
+int nv_window_pref_show_fps(void);
+int nv_window_pref_show_fps(void)
+{
+    if (g_show_fps < 0) {
+        const char *e = getenv("RECOMP_SHOW_FPS");
+        g_show_fps = e ? atoi(e) != 0 : sdl_cfg_get("show_fps", 0) != 0;
+    }
+    return g_show_fps;
+}
+static void nv_window_set_show_fps(int on)
+{
+    g_show_fps = on ? 1 : 0;
+    sdl_cfg_set("show_fps", g_show_fps);
+#if defined(__SWITCH__)
+    switch_options_set("show_fps", g_show_fps, 0);
+#endif
+    fprintf(stderr, "[WIN] frame rate in the corner: %s\n", on ? "on" : "off");
+}
+static void sdl_toggle_show_fps(void)
+{
+    nv_window_set_show_fps(!nv_window_pref_show_fps());
+}
+
 /* Vsync: wait for the display's refresh at the swap. Off by default --
  * the frame is paced by the emulated vblank instead (see gl_init).
  * RECOMP_VSYNC stands over the settings file's vsync=, as elsewhere;
@@ -2247,6 +2276,11 @@ static void sdl_menu_register(void)
           .tip = "Waits for the display's refresh before showing each "
                  "frame. On is steadier; off can tear, and the frame "
                  "is paced by the game's own vblank either way." },
+        { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Show frame rate",
+          .state = nv_window_pref_show_fps, .run = sdl_toggle_show_fps,
+          .tip = "Frames a second in the top-left corner, updated twice "
+                 "a second. Hidden while this menu is open." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "Widescreen (16:9)",
           .state = nv2a_widescreen, .run = sdl_toggle_widescreen,
@@ -2550,6 +2584,22 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
                       (ww - dw) / 2, (wh - dh) / 2, (ww - dw) / 2 + dw, (wh - dh) / 2 + dh,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
 #if defined(XBOXRECOMP_MENU)
+    /* The frame rate in the corner: game frames over the last half
+     * second, as text only when it changes. */
+    { static int was_on;
+      static double t0; static uint32_t f0;
+      int on = nv_window_pref_show_fps();
+      if (on) {
+          double now = mono_now();
+          if (!was_on || t0 == 0.0) { t0 = now; f0 = S.frames; }
+          else if (now - t0 >= 0.5) {
+              char line[24];
+              snprintf(line, sizeof line, "%.0f fps", (S.frames - f0) / (now - t0));
+              xbox_MenuCorner(line);
+              t0 = now; f0 = S.frames;
+          }
+      } else if (was_on) xbox_MenuCorner(NULL);
+      was_on = on; }
     /* The menu over the fitted frame, in the window's framebuffer,
      * before the swap. Both calls are a flag test while it is shut. */
     xbox_MenuFrame();

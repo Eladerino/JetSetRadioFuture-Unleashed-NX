@@ -37,6 +37,11 @@ void xbox_MenuDraw(void);
  * xbox_MenuFrame until total is 0. */
 void xbox_MenuBusy(const char *what, int done, int total);
 
+/* A line of text in the top-left corner over the game, on the GL thread
+ * that swaps (the frame rate, when that is switched on); NULL or "" takes
+ * it away. Copied: the caller's buffer need not last. */
+void xbox_MenuCorner(const char *text);
+
 /* 1 while the menu has the controls, 0 while it is shut, -1 when there is
  * none (Dear ImGui did not start). Any thread. */
 int  xbox_MenuIsOpen(void);

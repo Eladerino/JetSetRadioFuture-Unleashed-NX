@@ -108,6 +108,8 @@ void menu_build(int just_opened);
  * before the first frame). Between ImGui::NewFrame() and ImGui::Render(), with
  * the menu or without it. It takes no input. */
 void menu_build_busy(const char *what, int done, int total);
+/* The frame rate box in the top-left corner (xbox_MenuCorner). */
+void menu_build_corner(const char *text);
 
 #ifdef __cplusplus
 }

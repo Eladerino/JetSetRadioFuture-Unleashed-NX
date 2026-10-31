@@ -339,6 +339,10 @@ EOF
             "# The same choice is in the in-game menu, under Controller." \
             "nintendo_layout=0" \
             "" \
+            "# 1 = the frame rate in the top-left corner. The same choice" \
+            "# is in the in-game menu, under Display." \
+            "show_fps=0" \
+            "" \
             "# Any other engine variable can go here too as NAME=value" \
             "# (RECOMP_... or JSRF_...)." > "$EXPORT_DIR/options.txt"
     fi

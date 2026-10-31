@@ -364,6 +364,20 @@ extern "C" void menu_build(int just_opened)
     }
 }
 
+/* The frame rate box: small, in the top-left corner, see-through, and
+ * never taking input or focus from the game or the menu. */
+extern "C" void menu_build_corner(const char *text)
+{
+    const ImGuiStyle &st = ImGui::GetStyle();
+    ImGui::SetNextWindowPos(ImVec2(st.WindowPadding.x, st.WindowPadding.y), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.45f);
+    if (ImGui::Begin("##corner", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize))
+        ImGui::TextUnformatted(text);
+    ImGui::End();
+}
+
 extern "C" void menu_build_busy(const char *what, int done, int total)
 {
     const ImGuiIO &io = ImGui::GetIO();

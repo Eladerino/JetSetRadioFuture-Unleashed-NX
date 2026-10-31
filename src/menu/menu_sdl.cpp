@@ -53,6 +53,8 @@ static const char  *g_about_gpu, *g_about_gl;
 static const char  *g_busy_what;
 static int          g_busy_done;
 static volatile int g_busy_total;
+/* xbox_MenuCorner's line, set and built on the thread that swaps. */
+static char         g_corner[48];
 
 /* ---- File: About, Restart, Exit ----------------------------------------- */
 
@@ -355,7 +357,7 @@ static void switch_feed_nav(void)
 
 extern "C" void xbox_MenuFrame(void)
 {
-    if (!g_ready || (!g_open && !g_busy_total)) return;
+    if (!g_ready || (!g_open && !g_busy_total && !g_corner[0])) return;
     SDL_LockMutex(g_mu);
     /* Full screen hides the pointer (nv2a_gl.c), and the menu can switch it:
      * ImGui draws its own then, which shows only once a mouse moves. */
@@ -369,6 +371,7 @@ extern "C" void xbox_MenuFrame(void)
     if (g_open) menu_build(g_just_opened);
     g_just_opened = 0;
     if (g_busy_total) menu_build_busy(g_busy_what, g_busy_done, g_busy_total);
+    if (g_corner[0] && !g_open) menu_build_corner(g_corner);   /* not over the menu bar */
     ImGui::Render();
     SDL_UnlockMutex(g_mu);
 }
@@ -376,7 +379,7 @@ extern "C" void xbox_MenuFrame(void)
 extern "C" void xbox_MenuDraw(void)
 {
     ImDrawData *dd;
-    if (!g_ready || (!g_open && !g_busy_total)) return;
+    if (!g_ready || (!g_open && !g_busy_total && !g_corner[0])) return;
     SDL_LockMutex(g_mu);
     dd = ImGui::GetDrawData();
     if (dd) {
@@ -394,6 +397,14 @@ extern "C" void xbox_MenuBusy(const char *what, int done, int total)
     g_busy_what = what;
     g_busy_done = done;
     g_busy_total = total;
+}
+
+extern "C" void xbox_MenuCorner(const char *text)
+{
+    if (!g_mu) return;
+    SDL_LockMutex(g_mu);
+    snprintf(g_corner, sizeof g_corner, "%s", text ? text : "");
+    SDL_UnlockMutex(g_mu);
 }
 
 extern "C" int xbox_MenuIsOpen(void)
