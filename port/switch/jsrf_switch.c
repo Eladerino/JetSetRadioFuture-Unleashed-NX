@@ -912,19 +912,40 @@ static void stack_dump(int t, u64 base, u32 total)
 static ProfSlot *s_run[RUN_THREADS];
 static u32 s_run_total[RUN_THREADS], s_run_lost[RUN_THREADS];
 
+/* The game thread's samples once more, by area (the stage file last
+ * loaded, recomp_manual.c): what it does in a crowd (99th Street) beside
+ * what it does where there is none (the garage) names the work that grows
+ * with the people on screen. In prof-pcs.txt as threads "engine 0@StgNN". */
+#define STAGE_TABS 64
+static ProfSlot *s_stage_run[STAGE_TABS];
+static u32 s_stage_total[STAGE_TABS], s_stage_lost[STAGE_TABS];
+extern int xbox_current_stage(void);
+
+static int slot_add(ProfSlot *tab, u64 pc)
+{
+    u32 i = (u32)((pc >> 2) * 2654435761u) & (RUN_SLOTS - 1), k;
+    for (k = 0; k < 64; k++, i = (i + 1) & (RUN_SLOTS - 1)) {
+        if (tab[i].pc == pc) { tab[i].n++; return 1; }
+        if (!tab[i].pc) { tab[i].pc = pc; tab[i].n = 1; return 1; }
+    }
+    return 0;
+}
+
 static void run_add(int t, u64 pc)
 {
     ProfSlot *tab;
-    u32 i, k;
     if (t >= RUN_THREADS) return;
     if (!(tab = s_run[t]) && !(tab = s_run[t] = calloc(RUN_SLOTS, sizeof *tab))) return;
     s_run_total[t]++;
-    i = (u32)((pc >> 2) * 2654435761u) & (RUN_SLOTS - 1);
-    for (k = 0; k < 64; k++, i = (i + 1) & (RUN_SLOTS - 1)) {
-        if (tab[i].pc == pc) { tab[i].n++; return; }
-        if (!tab[i].pc) { tab[i].pc = pc; tab[i].n = 1; return; }
+    if (!slot_add(tab, pc)) s_run_lost[t]++;
+    if (!strcmp(s_threads[t].what, "engine")) {
+        int st = xbox_current_stage();
+        if (st >= 0 && st < STAGE_TABS
+         && (s_stage_run[st] || (s_stage_run[st] = calloc(RUN_SLOTS, sizeof(ProfSlot))))) {
+            s_stage_total[st]++;
+            if (!slot_add(s_stage_run[st], pc)) s_stage_lost[st]++;
+        }
     }
-    s_run_lost[t]++;
 }
 
 static void run_dump(u64 base)
@@ -944,6 +965,20 @@ static void run_dump(u64 base)
         if (!tab || s_run_total[t] < 50) continue;
         fprintf(f, "T %s %u %u %u\n", s_threads[t].what, s_threads[t].id,
                 s_run_total[t], s_run_lost[t]);
+        for (i = 0; i < RUN_SLOTS; i++) {
+            if (!tab[i].n) continue;
+            if (tab[i].pc >= base && tab[i].pc < base + 0x10000000ull)
+                fprintf(f, "%llx %u\n", (unsigned long long)(tab[i].pc - base), tab[i].n);
+            else
+                outside += tab[i].n;
+        }
+        if (outside) fprintf(f, "outside %u\n", outside);
+    }
+    for (t = 0; t < STAGE_TABS; t++) {
+        const ProfSlot *tab = s_stage_run[t];
+        u32 i, outside = 0;
+        if (!tab || s_stage_total[t] < 50) continue;
+        fprintf(f, "T engine 0@Stg%02d %u %u\n", t, s_stage_total[t], s_stage_lost[t]);
         for (i = 0; i < RUN_SLOTS; i++) {
             if (!tab[i].n) continue;
             if (tab[i].pc >= base && tab[i].pc < base + 0x10000000ull)
