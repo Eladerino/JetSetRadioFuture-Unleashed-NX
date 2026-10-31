@@ -1460,10 +1460,19 @@ static unsigned long g_swm_count[17];
 /* A non-incrementing run of index words, handed over whole when only the
  * OpenGL backend wants them (no software rasteriser kept alongside): see
  * nv2a_gl_indices. Returns 0 when the caller must go word by word. */
+/* Whether the OpenGL backend is on, asked once: the per-method paths below
+ * used to call nv2a_gl_enabled() in the other file on every method. */
+static int s_gl_on = -1;
+static inline int gl_on(void)
+{
+    if (s_gl_on < 0) s_gl_on = nv2a_gl_enabled() ? 1 : 0;
+    return s_gl_on;
+}
+
 int nv2a_pb_exec_indices(uint32_t subch, uint32_t method, const uint32_t *w, uint32_t n)
 {
     static int keep_soft = -1;
-    if (subch != 0 || (method != 0x1800 && method != 0x1808) || !nv2a_gl_enabled())
+    if (subch != 0 || (method != 0x1800 && method != 0x1808) || !gl_on())
         return 0;
     if (keep_soft < 0) keep_soft = getenv("RECOMP_PB_SOFT") ? 1 : 0;
     if (keep_soft) return 0;
@@ -1515,7 +1524,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      * viewport, depth). Deliberately before the subchannel check: it needs the
      * stream as the title wrote it, not the subset that can be rasterised in
      * software. Returns immediately unless RECOMP_GL is set. */
-    if (nv2a_gl_enabled() && subch == 0) {
+    if (gl_on() && subch == 0) {
         nv2a_gl_method(method, param);
         /*
          * With GL rendering, everything below this line is dead weight.

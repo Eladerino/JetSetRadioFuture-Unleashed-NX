@@ -1138,6 +1138,10 @@ int nv2a_gl_enabled(void)
     if (g_on < 0) g_on = getenv("RECOMP_GL") ? 1 : 0;
     return g_on;
 }
+/* The same answer without the call, for the paths that ask once per
+ * pushbuffer method (millions a second in 99th Street, where the call alone
+ * was over 1% of the GPU thread). RECOMP_GL never changes after start. */
+#define GL_ON() (g_on >= 0 ? g_on : nv2a_gl_enabled())
 
 static int verbose(void)
 {
@@ -11843,7 +11847,7 @@ void nv2a_gl_indices(uint32_t method, const uint32_t *p, uint32_t n)
 {
     uint32_t room, i;
     nv2a_gl_method(method, p[0]);
-    if (n < 2 || !nv2a_gl_enabled() || g_failed) return;
+    if (n < 2 || !GL_ON() || g_failed) return;
     p++;
     n--;
     if (method == M_ARRAY_ELEMENT16) {
@@ -11863,9 +11867,16 @@ void nv2a_gl_indices(uint32_t method, const uint32_t *p, uint32_t n)
 
 void nv2a_gl_method(uint32_t method, uint32_t param)
 {
-    if (!nv2a_gl_enabled() || g_failed) return;
-    methval_note(method, param);
-    methtrace_note(method, param);
+    static int meth_debug = -1;
+    if (!GL_ON() || g_failed) return;
+    /* Both are off unless asked for; one flag for the pair keeps two calls
+     * and their checks off every method. */
+    if (meth_debug < 0)
+        meth_debug = getenv("RECOMP_GL_METHVAL") || getenv("RECOMP_GL_METHTRACE");
+    if (meth_debug) {
+        methval_note(method, param);
+        methtrace_note(method, param);
+    }
 
     if (!S.const_attr_init) {
         int i;
