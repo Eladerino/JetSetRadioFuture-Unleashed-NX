@@ -899,37 +899,39 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
  * and whatever the title kicks off meanwhile waits for the next lap: in the
  * Oct 31 Shibuya run the game thread spent about 13% of its heavy frames in
  * D3D's make-space wait (sub_00191440) while this thread spent about 18%
- * waiting for the game. With this on, the walk asks every few thousand
- * words whether PUT has moved (nv2a_pb_set_poll); if it has, what is new is
- * copied at once under a tag of its own, GET follows, and the copy waits in
- * line to be walked after the one in hand. The ring is free once it is
- * copied, which is what the copy is for.
+ * waiting for the game. With this on, the walk asks every thousand words
+ * whether PUT has moved (nv2a_pb_set_poll); if it has, what is new is
+ * copied at once under a number of its own, GET follows, and the copy waits
+ * in line to be walked after the one in hand (adjoining copies as one
+ * span). The ring is free once it is copied, which is what the copy is for.
  *
  * What the commands point at -- vertex buffers, textures -- is still read
  * when the walk gets there, so the title can now be further ahead of the
  * walk than one pass. Its dynamic buffers wait on the semaphores the
  * executor writes in order (fence_mirrors_tick), which this does not move.
- * The copies are let go once everything taken has been walked; with
- * PB_RANGES copies in line or the cap in nv2a_pb_scan.c reached, GET waits
- * as it did before. */
+ * A copy is let go once it has been walked; with PB_RANGES copies in line
+ * or the buffer in nv2a_pb_scan.c full, GET waits as it did before. */
 extern int  nv2a_pb_snapshot_more(uint32_t, uint32_t, uint32_t, int);
-extern void nv2a_pb_walk_tag(uint32_t);
+extern void nv2a_pb_walk_tags(uint32_t, uint32_t);
 extern void nv2a_pb_set_poll(void (*)(void));
-#define PB_RANGES 64u
+#define PB_RANGES 1024u
 static int s_pb_eager;
 static volatile uint32_t *s_pb_regs;
 static uint32_t s_pb_take_put;              /* the PUT the copies reach */
 static struct { uint32_t from, to, tag; } s_pb_rng[PB_RANGES];
 static uint32_t s_pb_rng_in, s_pb_rng_out, s_pb_rng_tag;
-static unsigned long s_pb_eager_takes, s_pb_eager_refused;
+static unsigned long s_pb_eager_takes, s_pb_eager_refused, s_pb_eager_walks;
 
 /* Copy [s_pb_take_put, put) and queue it. 0 if it did not fit. */
 static int pb_eager_take(uint32_t put, int reset)
 {
-    uint32_t tag;
+    /* Numbered in turn, and a number is used only by a copy that is kept:
+     * the copies held side by side in a window must follow one another
+     * (nv2a_pb_scan.c, snap_add). Never 0, which is the copy without this. */
+    uint32_t tag = s_pb_rng_tag + 1 ? s_pb_rng_tag + 1 : 1;
     if (s_pb_rng_in - s_pb_rng_out >= PB_RANGES) { s_pb_eager_refused++; return 0; }
-    tag = ++s_pb_rng_tag ? s_pb_rng_tag : ++s_pb_rng_tag;      /* never 0 */
     if (!nv2a_pb_snapshot_more(s_pb_take_put, put, tag, reset)) { s_pb_eager_refused++; return 0; }
+    s_pb_rng_tag = tag;
     s_pb_rng[s_pb_rng_in % PB_RANGES].from = s_pb_take_put;
     s_pb_rng[s_pb_rng_in % PB_RANGES].to   = put;
     s_pb_rng[s_pb_rng_in % PB_RANGES].tag  = tag;
@@ -1038,26 +1040,47 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             DWORD now_ms = GetTickCount();
             uint32_t put;
             if (s_pb_eager == 2 && s_pb_rng_out != s_pb_rng_in) {
-                /* RECOMP_PB_EAGER: the oldest copy in line, read through
-                 * its own windows. One a lap, so the work above still runs
-                 * between them. */
-                uint32_t k = s_pb_rng_out++ % PB_RANGES;
-                nv2a_pb_walk_tag(s_pb_rng[k].tag);
-                s_pb_last_put = s_pb_rng[k].from;
-                s_pb_snap_put = s_pb_rng[k].to;
+                /* RECOMP_PB_EAGER: the copies in line, oldest first, read
+                 * through their own windows. The copies come every thousand
+                 * words of walking, so those that follow on from one
+                 * another in the ring are walked as one span, up to a wrap
+                 * (walked on its own, as the code below expects: the tail
+                 * to its jump, then the head). One span a lap, so the work
+                 * above still runs between them. */
+                uint32_t k = s_pb_rng_out % PB_RANGES;
+                uint32_t from = s_pb_rng[k].from, to = s_pb_rng[k].to;
+                uint32_t tag_lo = s_pb_rng[k].tag, tag_hi = tag_lo;
+                uint32_t depth = s_pb_rng_in - s_pb_rng_out;
+                s_pb_rng_out++;
+                if (to > from) {
+                    while (s_pb_rng_out != s_pb_rng_in) {
+                        uint32_t m = s_pb_rng_out % PB_RANGES;
+                        if (s_pb_rng[m].to <= s_pb_rng[m].from || s_pb_rng[m].from != to
+                         || s_pb_rng[m].to - from > 0x200000u)
+                            break;
+                        to = s_pb_rng[m].to;
+                        tag_hi = s_pb_rng[m].tag;
+                        s_pb_rng_out++;
+                    }
+                }
+                nv2a_pb_walk_tags(tag_lo, tag_hi);
+                s_pb_last_put = from;
+                s_pb_snap_put = to;
+                s_pb_eager_walks++;
                 {
                     static DWORD shown;
                     static uint32_t deepest;
-                    static unsigned long takes0, refused0;
-                    uint32_t depth = s_pb_rng_in - s_pb_rng_out + 1;
+                    static unsigned long takes0, refused0, walks0;
                     if (depth > deepest) deepest = depth;
                     if (now_ms - shown >= 10000) {
-                        fprintf(stderr, "  [NV2A] eager GET: %lu copies taken, %lu held back "
+                        fprintf(stderr, "  [NV2A] eager GET: %lu copies taken in %lu walks, %lu held back "
                                 "(queue or copy full), deepest line %u in the last 10 s\n",
-                                s_pb_eager_takes - takes0, s_pb_eager_refused - refused0, deepest);
+                                s_pb_eager_takes - takes0, s_pb_eager_walks - walks0,
+                                s_pb_eager_refused - refused0, deepest);
                         shown = now_ms;
                         takes0 = s_pb_eager_takes;
                         refused0 = s_pb_eager_refused;
+                        walks0 = s_pb_eager_walks;
                         deepest = 0;
                     }
                 }
