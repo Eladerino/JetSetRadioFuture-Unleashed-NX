@@ -1,5 +1,6 @@
 /*
- * The device on a thread of its own (RECOMP_GL_THREAD=1).
+ * The device on a thread of its own (RECOMP_GL_THREAD=1; on by default on
+ * the Switch, where RECOMP_GL_THREAD=0 turns it off).
  *
  * In a heavy scene the GPU thread -- the one that walks the pushbuffer and
  * keeps the front half's state -- is the frame's limit, and about forty per
@@ -876,7 +877,13 @@ const Nv2aGfx *nv2a_gfx_thread_start(const Nv2aGfx *real, void (*release)(void),
                                      int (*take)(void))
 {
     const char *e = getenv("RECOMP_GL_THREAD");
+#if defined(__SWITCH__)
+    /* On by default on the Switch (run 11: heavy scenes 15-24% faster);
+     * RECOMP_GL_THREAD=0 draws on the GPU thread as before. */
+    if (e && e[0] == '0') return real;
+#else
     if (!(e && e[0] == '1')) return real;
+#endif
     if (real->lang == NV2A_LANG_MSL) return real;              /* OpenGL only */
     g_ring = (uint8_t *)malloc(RING_BYTES);
     g_mu = SDL_CreateMutex();
@@ -932,7 +939,7 @@ const Nv2aGfx *nv2a_gfx_thread_start(const Nv2aGfx *real, void (*release)(void),
         return real;
     }
     g_on = 1;
-    fprintf(stderr, "  [GL] the device runs on a thread of its own (RECOMP_GL_THREAD=1)\n");
+    fprintf(stderr, "  [GL] the device runs on a thread of its own (RECOMP_GL_THREAD=0 for none)\n");
     return &g_dev;
 }
 
