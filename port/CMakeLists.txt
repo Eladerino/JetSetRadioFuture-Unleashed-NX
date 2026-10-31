@@ -138,7 +138,9 @@ message(STATUS "C flags: ${CMAKE_C_FLAGS} | ${CMAKE_BUILD_TYPE}: ${CMAKE_C_FLAGS
 # so a value never lingers in the cache from an earlier build.
 set(JSRF_GEN_OPT "" CACHE STRING "Compile options added for the generated code (e.g. -O3)")
 if(JSRF_GEN_OPT)
-    message(STATUS "generated code also gets: ${JSRF_GEN_OPT}")
+    message(STATUS "generated code: the flags above, then ${JSRF_GEN_OPT} (JSRF_GEN_OPT)")
+else()
+    message(STATUS "generated code: the flags above only (JSRF_GEN_OPT unset)")
 endif()
 
 # The runtime: everything in this repository outside port/ and launcher/.
@@ -166,6 +168,10 @@ if(JSRF_GEN_OPT)
     separate_arguments(JSRF_GEN_OPT_LIST NATIVE_COMMAND "${JSRF_GEN_OPT}")
     set_source_files_properties(${JSRF_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${JSRF_GEN_OPT_LIST}")
 endif()
+# And the run's own log says it ([MANUAL] generated code: ..., from
+# recomp_manual.c), so a test run's log tells which build it came from.
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/recomp_manual.c" APPEND PROPERTY
+    COMPILE_DEFINITIONS "JSRF_GEN_OPT_DESC=\"${JSRF_GEN_OPT}\"")
 
 if(ANDROID)
     # Android: the engine is libmain.so, which SDL's Java side loads and whose

@@ -274,11 +274,21 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
                     "functions + the DirectSound stop-pending wait; %u hole "
                     "functions (always on)\n",
                     manual_on ? "ON" : "OFF", g_recomp_seeded_count, g_recomp_holes_count);
-#ifdef RECOMP_FAST_MEM
-            fprintf(stderr, "[MANUAL] generated code: fast guest memory\n");
-#else
-            fprintf(stderr, "[MANUAL] generated code: plain guest memory\n");
+            /* And what it was compiled with beyond the toolchain's flags
+             * (JSRF_GEN_OPT, port/CMakeLists.txt). */
+#ifndef JSRF_GEN_OPT_DESC
+#define JSRF_GEN_OPT_DESC ""
 #endif
+            {
+                const char *how = JSRF_GEN_OPT_DESC[0]
+                                ? "built with " JSRF_GEN_OPT_DESC " added (JSRF_GEN_OPT)"
+                                : "built with the toolchain's flags";
+#ifdef RECOMP_FAST_MEM
+                fprintf(stderr, "[MANUAL] generated code: fast guest memory, %s\n", how);
+#else
+                fprintf(stderr, "[MANUAL] generated code: plain guest memory, %s\n", how);
+#endif
+            }
             fflush(stderr);
         }
         if (manual_on) {

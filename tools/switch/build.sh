@@ -350,6 +350,11 @@ echo "nro:  $DIST/jsrf-unleashed.nro ($(stat -c%s "$DIST/jsrf-unleashed.nro") by
 echo "sha:  $(sha256sum "$DIST/jsrf-unleashed.nro" | cut -d' ' -f1)"
 echo "copy: $WORK_DIR/dist/switch/jsrf-unleashed  ->  sdmc:/switch/jsrf-unleashed"
 echo "logs: $WORK_DIR/logs/ (send these back if anything failed)"
+if [ -n "${JSRF_GEN_OPT:-}" ]; then
+    echo "code: generated code built with devkitPro's flags, then $JSRF_GEN_OPT (JSRF_GEN_OPT)"
+else
+    echo "code: generated code built with devkitPro's flags only (JSRF_GEN_OPT unset)"
+fi
 if [ -n "${EXPORTED:-}" ]; then
     echo "windows: $(wslpath -w "$EXPORTED" 2>/dev/null || echo "$EXPORTED")"
 fi
