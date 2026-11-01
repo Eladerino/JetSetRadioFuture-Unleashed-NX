@@ -5754,7 +5754,10 @@ static const char *vc_debug_switch(void)
         "THREAD", "THREAD_CORE",
         /* settings with a switch of their own: shadow volumes skipped, and
          * the two anti-aliasing passes (none of them reads vertices back) */
-        "SKIPVOL", "SMAA", "MSAA", NULL
+        "SKIPVOL", "SMAA", "MSAA",
+        /* the depth census: it converts its own sample vertices from the
+         * title's arrays and never reads the cache's buffers */
+        "DEPTHLOG", NULL
     };
     static char name[64];
     char **e;
@@ -6739,6 +6742,96 @@ static void do_draw_body(void)
         }
     }
     if (PROF_ON()) g_prof.verts += prof_now() - _t0 - (g_prof.vbo - vbo0); }
+
+    /* RECOMP_GL_DEPTHLOG=1: how far away the draws are. 99th Street draws
+     * about 456 world batches a frame against about 180 in the other
+     * districts, and the question is whether a shorter draw distance would
+     * cut them: that depends on how many of them are far off. Three of each
+     * programmable draw's vertices (first, a third and two thirds in) go
+     * through the CPU interpreter, the one the generated GLSL is checked
+     * against, and the nearest clip-space w (the distance along the view)
+     * files the draw in a doubling bin. Once a second: world and character
+     * (palette-indexed) draws per frame by bin, the farthest world w seen,
+     * and the fog the scene ran with. Off by default: it decodes programs
+     * and interprets vertices on the GPU thread, so frame rates read with
+     * it on are lower than normal. */
+    { static int on = -1;
+      if (on < 0) on = getenv("RECOMP_GL_DEPTHLOG") ? 1 : 0;
+      if (on && slot >= 0 && out_n >= 3 && nlive > 0
+          && S.xf_mode != NV2A_XF_MODE_FIXED
+          && stride_floats <= NUM_ATTRS * 4) {
+          enum { DB = 12 };   /* <8, 8-16, ..., 4096-8192, 8192+ ; plus behind */
+          static struct { int slot; uint32_t ps; int ok; Nv2aVshProgram p; } pc[64];
+          static unsigned long dw[DB + 1], dm[DB + 1], fixed_n, nw_tot;
+          static double t_last; static uint32_t f_last;
+          static float wmax;
+          uint32_t psd = S.prog_start < NV2A_VSH_MAX_INSNS ? S.prog_start : 0;
+          int ci = slot & 63, mover = g_pcache[slot].uses_a0 != 0;
+          if (pc[ci].slot != slot + 1 || pc[ci].ps != psd) {
+              pc[ci].slot = slot + 1; pc[ci].ps = psd;
+              pc[ci].ok = nv2a_vsh_decode(S.prog + psd * 4,
+                                          (int)(NV2A_VSH_MAX_INSNS - psd), &pc[ci].p) > 0;
+          }
+          if (pc[ci].ok) {
+              float vtx[NUM_ATTRS * 4], vin[16][4], op[4], wmin = 1e30f;
+              int si, kb, any = 0, bin;
+              for (si = 0; si < 3; si++) {
+                  uint32_t k = (uint32_t)((uint64_t)out_n * (uint32_t)si / 3u), src_i;
+                  if (fan_expand == 1) {
+                      static const uint32_t q[6] = { 0, 1, 2, 2, 3, 0 };
+                      src_i = S.idx[(k / 6) * 4 + q[k % 6]];
+                  } else if (fan_expand == 2) {
+                      static const uint32_t q[6] = { 0, 1, 3, 3, 2, 0 };
+                      src_i = S.idx[(k / 6) * 2 + q[k % 6]];
+                  } else {
+                      src_i = S.idx[k];
+                  }
+                  vtx_convert(live, nlive, src_i, vtx);
+                  memset(vin, 0, sizeof vin);
+                  for (kb = 0; kb < NUM_ATTRS && kb < 16; kb++) {
+                      if (attr_at[kb] >= 0) memcpy(vin[kb], &vtx[attr_at[kb]], 16);
+                      else memcpy(vin[kb], S.const_attr[kb], 16);
+                  }
+                  if (!nv2a_vsh_interp(&pc[ci].p, vin, S.u.c, op)) continue;
+                  if (op[3] > 0.0f && op[3] < wmin) wmin = op[3];
+                  any = 1;
+              }
+              if (any) {
+                  if (wmin >= 1e29f) bin = DB;            /* all behind the eye */
+                  else {
+                      float lim = 8.0f;
+                      for (bin = 0; bin < DB - 1 && wmin >= lim; bin++) lim *= 2.0f;
+                  }
+                  if (mover) dm[bin]++;
+                  else { dw[bin]++; nw_tot++; if (wmin < 1e29f && wmin > wmax) wmax = wmin; }
+              }
+          }
+          { double now = g_frame_clock;
+            if (t_last == 0.0) { t_last = now; f_last = S.frames; }
+            else if (now - t_last >= 1.0) {
+                uint32_t fr = S.frames - f_last;
+                char line[640]; size_t n = 0; int b;
+                int stage = xbox_current_stage ? xbox_current_stage() : -1;
+                double inv = fr ? 1.0 / fr : 0.0;
+                n += (size_t)snprintf(line + n, sizeof line - n,
+                        "[DEPTH] Stg%02d %u frames | world/frame by nearest w:", stage, fr);
+                for (b = 0; b <= DB && n < sizeof line; b++)
+                    n += (size_t)snprintf(line + n, sizeof line - n, " %.1f", dw[b] * inv);
+                n += (size_t)snprintf(line + n, sizeof line - n, " | chars:");
+                for (b = 0; b <= DB && n < sizeof line; b++)
+                    n += (size_t)snprintf(line + n, sizeof line - n, " %.1f", dm[b] * inv);
+                if (n < sizeof line)
+                    snprintf(line + n, sizeof line - n,
+                             " | far w %.0f | fog on %u params %g %g %g\n",
+                             wmax, S.fog_enable, S.fog_params[0], S.fog_params[1],
+                             S.fog_params[2]);
+                fputs(line, stderr);
+                memset(dw, 0, sizeof dw); memset(dm, 0, sizeof dm);
+                wmax = 0.0f; t_last = now; f_last = S.frames;
+            }
+          }
+          (void)fixed_n; (void)nw_tot;
+      } }
 
     /* The program behind a slot, and the constants it reads, printed once.
      *
