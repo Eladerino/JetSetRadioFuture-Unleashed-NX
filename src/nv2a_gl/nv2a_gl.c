@@ -2146,9 +2146,12 @@ static int menu_skipvol_state(void)
 
 static void menu_skipvol_pick(int i)
 {
+    static const char *const what[] = { "all drawn", "characters' skipped",
+                                        "scenery's skipped", "all skipped" };
     g_skipvol = i;
     sdl_cfg_set("skipvol", i);
     sdl_menu_update();
+    if (i >= 0 && i <= 3) fprintf(stderr, "[WIN] shadow volumes: %s (skipvol=%d)\n", what[i], i);
 }
 
 /* The Developer rows, and Controller's Both sticks: switches the rest
@@ -4251,6 +4254,8 @@ static int skipvol_init(void)
     g_skipvol = e ? atoi(e) : sdl_cfg_get("skipvol", 0);
     if (g_skipvol < 0) g_skipvol = 0;
     if (g_skipvol > 3) g_skipvol = 3;
+    fprintf(stderr, "[GL] shadow volumes: skipvol=%d (%s)\n", g_skipvol,
+            e ? "RECOMP_GL_SKIPVOL" : "the settings");
     return g_skipvol;
 }
 
