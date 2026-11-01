@@ -2931,6 +2931,7 @@ class Lifter:
         including a range crossing into MMIO or wrapping the 32-bit address.
         """
         mem = f"MEM{size*8}"
+        memw = f"MEMW{size*8}"
         return [
             "{ uint64_t _n = (uint64_t)ecx * %du;" % size,
             "if (!g_df && esi < 0xFD000000u && edi < 0xFD000000u"
@@ -2938,10 +2939,10 @@ class Lifter:
             " && (uint64_t)edi + _n <= 0xFD000000u) {",
             "  uint8_t *_d = (uint8_t*)XBOX_PTR(edi), *_s = (uint8_t*)XBOX_PTR(esi);",
             "  if ((uint64_t)edi + _n <= esi || (uint64_t)esi + _n <= edi) memcpy(_d, _s, (size_t)_n);",
-            f"  else {{ uint32_t _i; for (_i = 0; _i < ecx; _i++) {mem}(edi + _i*{size}u) = {mem}(esi + _i*{size}u); }}",
+            f"  else {{ uint32_t _i; for (_i = 0; _i < ecx; _i++) {memw}(edi + _i*{size}u, {mem}(esi + _i*{size}u)); }}",
             f"  esi += ecx * {size}u; edi += ecx * {size}u; }}",
             f"else {{ uint32_t _i; int32_t _st = RECOMP_DF_STEP({size});",
-            f"  for (_i = 0; _i < ecx; _i++) {mem}(edi + _i*_st) = {mem}(esi + _i*_st);",
+            f"  for (_i = 0; _i < ecx; _i++) {memw}(edi + _i*_st, {mem}(esi + _i*_st));",
             "  esi += ecx * _st; edi += ecx * _st; }",
             f"ecx = 0; }} /* {m} */",
         ]
@@ -2977,19 +2978,19 @@ class Lifter:
         if "stosb" in m:
             return ["if (!g_df) { memset((void*)XBOX_PTR(edi), (uint8_t)eax, ecx); edi += ecx; }",
                     "else { uint32_t _i; for (_i = 0; _i < ecx; _i++)"
-                    " MEM8(edi - _i) = LO8(eax); edi -= ecx; }",
+                    " MEMW8(edi - _i, LO8(eax)); edi -= ecx; }",
                     "ecx = 0; /* rep stosb */"]
         if "stosd" in m:
             return [
                 "{ uint32_t _i; int32_t _st = RECOMP_DF_STEP(4);"
-                " for (_i = 0; _i < ecx; _i++) MEM32(edi + _i*_st) = eax;"
+                " for (_i = 0; _i < ecx; _i++) MEMW32(edi + _i*_st, eax);"
                 " edi += ecx * _st; }",
                 "ecx = 0; /* rep stosd */"
             ]
         if "stosw" in m:
             return [
                 "{ uint32_t _i; int32_t _st = RECOMP_DF_STEP(2);"
-                " for (_i = 0; _i < ecx; _i++) MEM16(edi + _i*_st) = LO16(eax);"
+                " for (_i = 0; _i < ecx; _i++) MEMW16(edi + _i*_st, LO16(eax));"
                 " edi += ecx * _st; }",
                 "ecx = 0; /* rep stosw */"
             ]
@@ -3055,24 +3056,24 @@ class Lifter:
     def _lift_string_op(self, insn, m):
         # Unprefixed forms; direction still comes from EFLAGS.DF.
         if m == "movsb":
-            return ["MEM8(edi) = MEM8(esi); esi += RECOMP_DF_STEP(1);"
+            return ["MEMW8(edi, MEM8(esi)); esi += RECOMP_DF_STEP(1);"
                     " edi += RECOMP_DF_STEP(1); /* movsb */"]
         if m == "movsd":
-            return ["MEM32(edi) = MEM32(esi); esi += RECOMP_DF_STEP(4);"
+            return ["MEMW32(edi, MEM32(esi)); esi += RECOMP_DF_STEP(4);"
                     " edi += RECOMP_DF_STEP(4); /* movsd */"]
         if m == "stosb":
-            return ["MEM8(edi) = LO8(eax); edi += RECOMP_DF_STEP(1); /* stosb */"]
+            return ["MEMW8(edi, LO8(eax)); edi += RECOMP_DF_STEP(1); /* stosb */"]
         if m == "stosd":
-            return ["MEM32(edi) = eax; edi += RECOMP_DF_STEP(4); /* stosd */"]
+            return ["MEMW32(edi, eax); edi += RECOMP_DF_STEP(4); /* stosd */"]
         if m == "lodsb":
             return ["SET_LO8(eax, MEM8(esi)); esi += RECOMP_DF_STEP(1); /* lodsb */"]
         if m == "lodsd":
             return ["eax = MEM32(esi); esi += RECOMP_DF_STEP(4); /* lodsd */"]
         if m == "movsw":
-            return ["MEM16(edi) = MEM16(esi); esi += RECOMP_DF_STEP(2);"
+            return ["MEMW16(edi, MEM16(esi)); esi += RECOMP_DF_STEP(2);"
                     " edi += RECOMP_DF_STEP(2); /* movsw */"]
         if m == "stosw":
-            return ["MEM16(edi) = LO16(eax); edi += RECOMP_DF_STEP(2); /* stosw */"]
+            return ["MEMW16(edi, LO16(eax)); edi += RECOMP_DF_STEP(2); /* stosw */"]
         if m == "lodsw":
             return ["SET_LO16(eax, MEM16(esi)); esi += RECOMP_DF_STEP(2); /* lodsw */"]
         return [f"/* {m} */"]

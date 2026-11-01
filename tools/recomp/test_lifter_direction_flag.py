@@ -55,7 +55,7 @@ class DirectionFlagLifterTest(unittest.TestCase):
 
         # An explicit ascending byte loop, not memmove: memmove would give the
         # copy-through-a-temporary answer, which is a different result.
-        self.assertIn("for (_i = 0; _i < ecx; _i++) MEM8(edi + _i*1u) = MEM8(esi + _i*1u);", generated)
+        self.assertIn("for (_i = 0; _i < ecx; _i++) MEMW8(edi + _i*1u, MEM8(esi + _i*1u));", generated)
         self.assertNotIn("memmove", generated)
 
     def test_rep_movs_never_memcpys_a_hardware_window(self):
@@ -71,14 +71,14 @@ class DirectionFlagLifterTest(unittest.TestCase):
     def test_rep_movsb_backward_case_is_still_a_loop(self):
         generated = _lift(Instruction(0, 2, "rep movsb", "", "f3a4"))
 
-        self.assertIn("MEM8(edi + _i*_st) = MEM8(esi + _i*_st)", generated)
+        self.assertIn("MEMW8(edi + _i*_st, MEM8(esi + _i*_st))", generated)
 
     def test_rep_movsd_overlap_steps_by_dwords(self):
         # Element granularity matters: a dword-at-a-time propagation is not
         # the same sequence of bytes as a byte-at-a-time one.
         generated = _lift(Instruction(0, 2, "rep movsd", "", "f3a5"))
 
-        self.assertIn("MEM32(edi + _i*4u) = MEM32(esi + _i*4u)", generated)
+        self.assertIn("MEMW32(edi + _i*4u, MEM32(esi + _i*4u))", generated)
         self.assertIn("(uint64_t)edi + _n <= esi || (uint64_t)esi + _n <= edi", generated)
 
     def test_unprefixed_string_ops_step_by_the_direction_flag(self):

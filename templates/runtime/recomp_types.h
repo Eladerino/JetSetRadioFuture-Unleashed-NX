@@ -799,6 +799,79 @@ static inline volatile uint64_t *recomp_p64(uint32_t a) {
     }
     return p;
 }
+/* ---- Plain guest loads (RECOMP_PLAIN_LOADS, generated code only, opt-in:
+ * JSRF_GEN_OPT=-DRECOMP_PLAIN_LOADS) ------------------------------------------
+ *
+ * Every guest read above is volatile, so the compiler performs each one, in
+ * program order, even when the same word was read two lines earlier and
+ * nothing has stored since. With this on, MEM8/16/32 and SMEM8/16/32/64 read
+ * through plain pointers instead, so a repeated read can be reused and reads
+ * can be scheduled freely. What keeps the code doing the same thing:
+ *
+ *  - a read goes through a union of the four store types (recomp_st8_t ..
+ *    recomp_st64_t), so type-based aliasing sees it as possibly reading what
+ *    any guest store wrote, of any width: a byte store then a dword read of
+ *    the same word stays in that order, and a read after a store is done
+ *    again. No register has those types, so the guest registers still stay
+ *    in host registers across reads. Every guest store in generated code
+ *    goes through those types (MEMWxx, RECOMP_STORE32, the float and vector
+ *    stores) or through memcpy/memset/atomics, which alias everything;
+ *  - stores stay volatile, so every store is still performed, in order;
+ *  - the value read is converted to the plain integer type at once, so the
+ *    arithmetic is exactly what it was. The macros are no longer assignable;
+ *    the lifter's string instructions store through MEMWxx for that;
+ *  - RECOMP_BACK_EDGE, on every loop's back edge, tells the compiler guest
+ *    memory may have changed (an asm that writes all 4 GB of it, not a full
+ *    memory clobber, so the registers are left alone): a loop that waits on
+ *    a word another thread writes reads it again on every pass. Calls the
+ *    compiler cannot see into already do the same.
+ *
+ * Guest threads take turns under the guest lock, and every hand-over is a
+ * call, so the words a reused read could miss are the ones host threads
+ * write (the GPU's write-backs, the APU's), and those are waited on in
+ * loops. */
+#if defined(RECOMP_PLAIN_LOADS) || defined(RECOMP_VALUE_LOADS)
+/* RECOMP_VALUE_LOADS alone: the same value-returning reads, still volatile
+ * (no reuse, no reordering) -- the half of this with nothing to get wrong,
+ * to tell the two halves' gains apart. */
+#if defined(RECOMP_PLAIN_LOADS)
+#define RECOMP_LDQ
+#else
+#define RECOMP_LDQ volatile
+#endif
+union __attribute__((packed)) recomp_gm {
+    recomp_st8_t b; recomp_st16_t h; recomp_st32_t w; recomp_st64_t d;
+};
+/* Values, not pointers: with no scratch to read back, two reads of the same
+ * address take the same branch and the second is the first's value. */
+static inline uint8_t recomp_ld8(uint32_t a) {
+    if (RECOMP_IS_MMIO(a)) return (uint8_t)recomp_mmio_read_fast(a, 1);
+    return (uint8_t)RECOMP_HOST(const RECOMP_LDQ union recomp_gm, a)->b;
+}
+static inline uint16_t recomp_ld16(uint32_t a) {
+    if (RECOMP_IS_MMIO(a)) return (uint16_t)recomp_mmio_read_fast(a, 2);
+    return (uint16_t)RECOMP_HOST(const RECOMP_LDQ union recomp_gm, a)->h;
+}
+static inline uint32_t recomp_ld32(uint32_t a) {
+    if (RECOMP_IS_MMIO(a)) return recomp_mmio_read_fast(a, 4);
+    return (uint32_t)RECOMP_HOST(const RECOMP_LDQ union recomp_gm, a)->w;
+}
+static inline uint64_t recomp_ld64(uint32_t a) {
+    if (RECOMP_IS_MMIO(a))
+        return (uint64_t)recomp_mmio_read_fast(a, 4)
+             | ((uint64_t)recomp_mmio_read_fast(a + 4, 4) << 32);
+    return (uint64_t)RECOMP_HOST(const RECOMP_LDQ union recomp_gm, a)->d;
+}
+#define RECOMP_LD8(a)  recomp_ld8((uint32_t)(a))
+#define RECOMP_LD16(a) recomp_ld16((uint32_t)(a))
+#define RECOMP_LD32(a) recomp_ld32((uint32_t)(a))
+#define RECOMP_LD64(a) recomp_ld64((uint32_t)(a))
+/* Guest memory may have changed: all 4 GB of it, from the compiler's view. */
+#define RECOMP_GUEST_MEM_CHANGED() \
+    __asm__ volatile("" : "+m"(*(char (*)[0x100000000ull])(uintptr_t)g_xbox_mem_offset))
+#endif
+#endif
+
 /* A store through what recomp_p32 returned, as `MEM32(a) = v` is, but typed
  * so it cannot be taken for a register write. */
 #define RECOMP_STORE32(a, v) \
@@ -927,9 +1000,15 @@ static inline void recomp_wd(uint32_t a, double v) {
 #endif /* RECOMP_FAST_MEM */
 
 /** Read N bytes at a flat Xbox memory address (assignable for RAM only). */
+#if defined(RECOMP_FAST_MEM) && (defined(RECOMP_PLAIN_LOADS) || defined(RECOMP_VALUE_LOADS))
+#define MEM8(addr)   RECOMP_LD8(addr)
+#define MEM16(addr)  RECOMP_LD16(addr)
+#define MEM32(addr)  RECOMP_LD32(addr)
+#else
 #define MEM8(addr)   (*recomp_p8((uint32_t)(addr)))
 #define MEM16(addr)  (*recomp_p16((uint32_t)(addr)))
 #define MEM32(addr)  (*recomp_p32((uint32_t)(addr)))
+#endif
 
 /** Write N bytes: the form the lifter emits for every store. */
 #define MEMW8(addr, v)   recomp_w8((uint32_t)(addr), (uint8_t)(v))
@@ -939,10 +1018,17 @@ static inline void recomp_wd(uint32_t a, double v) {
 #define MEMWD(addr, v)   recomp_wd((uint32_t)(addr), (double)(v))
 
 /** Signed memory reads. */
+#if defined(RECOMP_FAST_MEM) && (defined(RECOMP_PLAIN_LOADS) || defined(RECOMP_VALUE_LOADS))
+#define SMEM8(addr)  ((int8_t)RECOMP_LD8(addr))
+#define SMEM16(addr) ((int16_t)RECOMP_LD16(addr))
+#define SMEM32(addr) ((int32_t)RECOMP_LD32(addr))
+#define SMEM64(addr) ((int64_t)RECOMP_LD64(addr))
+#else
 #define SMEM8(addr)  (*(volatile int8_t   *)recomp_p8((uint32_t)(addr)))
 #define SMEM16(addr) (*(volatile int16_t  *)recomp_p16((uint32_t)(addr)))
 #define SMEM32(addr) (*(volatile int32_t  *)recomp_p32((uint32_t)(addr)))
 #define SMEM64(addr) (*(volatile int64_t  *)recomp_p64((uint32_t)(addr)))
+#endif
 
 /** Float/double memory access. */
 #define MEMF(addr)   (*(volatile float    *)recomp_p32((uint32_t)(addr)))
@@ -1599,8 +1685,14 @@ extern volatile uint64_t g_icall_guard_misses;
 extern int32_t g_xbox_guest_cpu_preempt;
 extern int32_t g_xbox_guest_callback_depth;
 void xbox_GuestCpuPreempt(uint32_t va);
+#if defined(RECOMP_FAST_MEM) && defined(RECOMP_PLAIN_LOADS)
+#define RECOMP_BACK_EDGE_MEM() RECOMP_GUEST_MEM_CHANGED()
+#else
+#define RECOMP_BACK_EDGE_MEM() ((void)0)
+#endif
 #define RECOMP_BACK_EDGE(va) \
-    do { if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) { \
+    do { RECOMP_BACK_EDGE_MEM(); \
+         if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) { \
              if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_callback_depth) > 0 \
                  || RECOMP_UNLIKELY((++g_recomp_tick & 0xFFu) == 0u)) \
                  xbox_GuestCpuPreempt(va); \
