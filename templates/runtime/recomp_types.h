@@ -973,6 +973,12 @@ static inline void recomp_wd(uint32_t a, double v) {
     if (RECOMP_IS_MMIO(a)) { recomp_mmio_write_fast(a, (uint32_t)b, 4); recomp_mmio_write_fast(a + 4, (uint32_t)(b >> 32), 4); }
     else *p = b;
 }
+static inline void recomp_w64(uint32_t a, uint64_t b) {
+    volatile recomp_st64_t *p = RECOMP_HOST(volatile recomp_st64_t, a);
+    RECOMP_WATCH(a, 8);
+    if (RECOMP_IS_MMIO(a)) { recomp_mmio_write_fast(a, (uint32_t)b, 4); recomp_mmio_write_fast(a + 4, (uint32_t)(b >> 32), 4); }
+    else *p = b;
+}
 #else
 static inline void recomp_w8(uint32_t a, uint8_t v) {
     RECOMP_WATCH(a, 1);
@@ -996,6 +1002,11 @@ static inline void recomp_wd(uint32_t a, double v) {
     if (RECOMP_IS_MMIO(a)) { uint64_t b; memcpy(&b, &v, 8); recomp_mmio_write(a, (uint32_t)b, 4); recomp_mmio_write(a + 4, (uint32_t)(b >> 32), 4); }
     else *(volatile double *)XBOX_PTR(a) = v;
 }
+static inline void recomp_w64(uint32_t a, uint64_t v) {
+    RECOMP_WATCH(a, 8);
+    if (RECOMP_IS_MMIO(a)) { recomp_mmio_write(a, (uint32_t)v, 4); recomp_mmio_write(a + 4, (uint32_t)(v >> 32), 4); }
+    else *(volatile uint64_t *)XBOX_PTR(a) = v;
+}
 #endif /* RECOMP_FAST_MEM */
 
 /** Read N bytes at a flat Xbox memory address (assignable for RAM only). */
@@ -1015,6 +1026,7 @@ static inline void recomp_wd(uint32_t a, double v) {
 #define MEMW32(addr, v)  recomp_w32((uint32_t)(addr), (uint32_t)(v))
 #define MEMWF(addr, v)   recomp_wf((uint32_t)(addr), (float)(v))
 #define MEMWD(addr, v)   recomp_wd((uint32_t)(addr), (double)(v))
+#define MEMW64(addr, v)  recomp_w64((uint32_t)(addr), (uint64_t)(v))
 
 /** Signed memory reads. */
 #if defined(RECOMP_FAST_MEM) && (defined(RECOMP_PLAIN_LOADS) || defined(RECOMP_VALUE_LOADS))

@@ -1602,7 +1602,8 @@ class Lifter:
             if dst.type == "mem" and bit.type != "imm":
                 base = _fmt_mem(dst)
                 off = _fmt_operand_read(bit)
-                word = f"MEM32(({base}) + (((int32_t)({off}) >> 5) * 4))"
+                waddr = f"({base}) + (((int32_t)({off}) >> 5) * 4)"
+                word = f"MEM32({waddr})"
                 index = f"(({off}) & 31)"
                 out = []
                 if self.needs_cf:
@@ -1612,7 +1613,7 @@ class Lifter:
                           "bts": f"{word} | (1u << {index})",
                           "btc": f"{word} ^ (1u << {index})"}.get(m)
                 if update:
-                    out.append(f"{word} = ({update}); /* {m} */")
+                    out.append(f"MEMW32({waddr}, ({update})); /* {m} */")
                 elif not out:
                     out.append(f"/* bt {insn.op_str}: no CF consumer */")
                 return out
@@ -3753,11 +3754,10 @@ class Lifter:
                     size, "int32_t")
                 pop = " fp_pop();" if m != "fist" else ""
                 control = "0x0C00u" if m == "fisttp" else "g_fp_control_word"
-                wacc = {2: "MEMW16", 4: "MEMW32"}.get(size)
-                if wacc:
-                    return [f"{wacc}({_fmt_mem(ops[0])}, ({int_type})recomp_fist(fp_top(), {control}, {size * 8}));{pop} /* {m} */"]
-                return [f"{mem_acc}({_fmt_mem(ops[0])}) = "
-                        f"({int_type})recomp_fist(fp_top(), {control}, {size * 8});{pop} /* {m} */"]
+                # Every size stores through MEMWxx: the read macros are not
+                # assignable (RECOMP_PLAIN_LOADS in recomp_types.h).
+                wacc = {2: "MEMW16", 4: "MEMW32", 8: "MEMW64"}.get(size, "MEMW32")
+                return [f"{wacc}({_fmt_mem(ops[0])}, ({int_type})recomp_fist(fp_top(), {control}, {size * 8}));{pop} /* {m} */"]
             return [f"/* {m} {insn.op_str} */"]
 
         if m in ("fadd", "faddp", "fsub", "fsubp", "fsubr", "fsubrp",

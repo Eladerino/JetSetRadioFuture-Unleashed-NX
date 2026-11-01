@@ -100,7 +100,7 @@ class BitTestCarryTest(unittest.TestCase):
             lifter, BasicBlock(start=0, instructions=[bit, branch]))
         generated = "\n".join(lifted)
         self.assertIn("if (_cf)", generated)
-        self.assertLess(generated.index("_cf = "), generated.index("= (MEM32"))
+        self.assertLess(generated.index("_cf = "), generated.index("MEMW32("))
 
     def test_the_snapshot_is_actually_emitted_for_these_functions(self):
         # The other half of the bug. Without this, the consumer would name a
