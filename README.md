@@ -15,16 +15,18 @@ or in the release downloads.
 **It boots and plays.** Logos, title, saving and loading, character
 select and gameplay all work on real hardware. Frame rates in the
 areas tested most, on an overclocked console (CPU 1963 / GPU 1152 /
-memory 2133 MHz): the hideout and other light scenes hold the game's
-60 fps cap, and the busiest districts, Shibuya Terminal and
-Dogenzaka Hill, average around 40 fps in their crowded sightlines.
+memory 2366 MHz): the garage holds the game's 60 fps cap, Shibuya
+Terminal and Dogenzaka Hill sit near 60 with their busiest views
+around 50, Chuo Street around 57, and 99th Street, the heaviest area
+so far, around 49 with dips into the low 30s in its densest views.
 At stock clocks the same areas run slower. It has not been played
 from start to finish, so later areas should be expected to have
 bugs. The port's status and open issues are kept in the
 [Switch port notes](docs/switch-port.md), and how it is
 tested in the [testing notes](docs/switch-testing-notes.md).
 Switch bugs are best reported as an issue in this repository, with
-the run's `Logs/last-run.log` attached.
+the run's `Logs/last-run.log` attached (the log is off by default:
+set `log=1` in `options.txt` and play up to the problem again).
 
 Like the upstream project, this is an unofficial fan project: it is
 not affiliated with or endorsed by SEGA or Smilebit, *Jet Set Radio
@@ -77,8 +79,8 @@ from your own copy of the game.
   copying a new `.nro` over the old one keeps your settings. It
   covers widescreen (16:9 in gameplay; logos and the title screen
   stay 4:3), internal resolution (1x to 4x), anisotropic filtering,
-  the 60 fps cap, the shader cache, the run log (`log=0` writes no
-  log file at all), and `fast_gpu`, the asynchronous
+  the 60 fps cap, the shader cache, the run log (off by default;
+  `log=1` writes one), and `fast_gpu`, the asynchronous
   GPU path, which is on by default on Switch; `fast_gpu=0` falls back
   to the serial path.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
@@ -97,10 +99,12 @@ from your own copy of the game.
   between runs: the menu keeps `options.txt` itself up to date for
   the settings it names. File > About lists the build and the credits.
 - **Performance and overclocking:** the recommended settings are the
-  shipped defaults (render scale 1x, SMAA on, MSAA off, anisotropic
-  filtering 4x, shadow volumes drawn, the 60 fps cap). In crowded
-  areas, the menu's Shadow volumes > Skip characters is the one
-  change worth trying: it trades character shadows for frame rate.
+  shipped defaults (render scale 1x, SMAA off, MSAA off, anisotropic
+  filtering 4x, shadow volumes drawn, the 60 fps cap, every
+  diagnostic and the run log off). Shadows, SMAA and anisotropic
+  filtering at 8x measured within a frame or two of free in testing,
+  since the console's limit is the game's own CPU work rather than
+  the GPU; render scale above 1x is the setting that costs.
   The frame rates above were measured with the console heavily
   overclocked, well past Nintendo's stock clocks (CPU 1020 / GPU up
   to 921 / memory 1600 MHz). **Overclocking is optional and at your
@@ -113,8 +117,8 @@ from your own copy of the game.
   [sys-clk](https://github.com/retronx-team/sys-clk), whose own
   limits are lower than that. The port runs at stock
   clocks too, just slower.
-- **Each run writes `Logs/last-run.log`** in the port's folder (the
-  previous run is kept as `previous-run.log`). After a run,
+- **With `log=1`, each run writes `Logs/last-run.log`** in the
+  port's folder (the previous run is kept as `previous-run.log`). After a run,
   [`tools/switch/prof.sh`](tools/switch/prof.sh) on the build machine
   turns the log's profile into a per-function breakdown, resolved
   against the `.elf` of the build that produced it.

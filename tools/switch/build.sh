@@ -35,6 +35,10 @@
 #                      means none, every time: it is not remembered from
 #                      an earlier build. Changing it recompiles all of the
 #                      generated code (SKIP_RECOMP=1 still applies).
+#   RELEASE=1  also make jsrf-unleashed-<tag>.zip (in EXPORT_DIR, else
+#              WORK_DIR): the .nro plus a fresh options.txt at the release
+#              defaults under switch/jsrf-unleashed/, for a GitHub release.
+#              Build with the release tag checked out.
 #   EXPORT_DIR  a folder the finished .nro is also copied to, for dragging
 #              onto the SD card (default under WSL: Downloads\jsrf-unleashed-switch
 #              in your Windows profile; "none" turns it off). Only the .nro
@@ -218,6 +222,108 @@ first launch checks it and unpacks it into the folder.
 
 The log of every run is sdmc:/switch/jsrf-unleashed/Logs/last-run.log.
 EOF
+# ---------------------------------------------------------------- options.txt
+# Every option written out at its release default, with a note on each:
+# the file a new player gets (in the release zip) and the one the export
+# folder is seeded with once. Performance testing switches are all off.
+write_default_options() {
+    printf '%s\r\n' \
+        "# JSRF Unleashed for Switch -- options" \
+        "# Change a value, save, and copy this file to the SD card beside" \
+        "# jsrf-unleashed.nro. 1 means on, 0 means off. Lines starting with #" \
+        "# are notes and are ignored. The log's [SWITCH] options: line shows" \
+        "# what was read." \
+        "" \
+        "# ---- picture" \
+        "" \
+        "# Widescreen 16:9 in gameplay (the logos and title screen stay 4:3)." \
+        "widescreen=1" \
+        "" \
+        "# Internal resolution: 1 = the Xbox's 640x480, 2 = twice that, up to 4." \
+        "# Each step costs GPU time." \
+        "scale=1" \
+        "" \
+        "# Texture sharpness at an angle (anisotropic filtering): 1 = off, 4, 8, 16." \
+        "aniso=4" \
+        "" \
+        "# Frame rate cap: 60 as on the Xbox. 0 removes the cap (testing only)." \
+        "fps=60" \
+        "" \
+        "# Wait for the display's refresh before showing each frame." \
+        "# The same choice is in the in-game menu, under Display (Vsync)." \
+        "RECOMP_VSYNC=0" \
+        "" \
+        "# ---- sound" \
+        "" \
+        "mute=0" \
+        "" \
+        "# ---- performance testing (leave at 0 for normal play)" \
+        "" \
+        "# Keep compiled shaders between runs, so stutters only happen once." \
+        "shader_cache=1" \
+        "" \
+        "# Where each frame's time goes, written to the log every second." \
+        "profile=0" \
+        "" \
+        "# Which functions each thread is busy in, every 10 seconds" \
+        "# (turn into names with tools/switch/prof.sh)." \
+        "sample=0" \
+        "" \
+        "# Write the run's log (Logs/last-run.log). Off for normal play:" \
+        "# nothing is written to the card, and a crash leaves no log" \
+        "# behind. Set 1 when something goes wrong and you want to send" \
+        "# a report, then play up to the problem again." \
+        "log=0" \
+        "" \
+        "# 1 = write every log line to the card at once (slower). Only for" \
+        "# chasing a freeze; normally the log is written every 0.25 s." \
+        "log_direct=0" \
+        "" \
+        "# Log time spent busy-waiting (spinning). A Developer page switch." \
+        "JSRF_SPIN_LOG=0" \
+        "" \
+        "# 1 = let the game hand work to the GPU thread without waiting" \
+        "# for it to finish the last batch. 0 = the old, slower hand-off." \
+        "fast_gpu=1" \
+        "" \
+        "# In widescreen, draw full-screen effects (the boost smear and its" \
+        "# like) across the whole frame instead of squeezing them into a" \
+        "# 4:3 box. A Developer page switch." \
+        "RECOMP_WIDE_FX_FULL=1" \
+        "" \
+        "# Check the vertex and texture caches' contents with the CPU's" \
+        "# CRC instructions (fast). 0 = the older software hash. A" \
+        "# Developer page switch." \
+        "RECOMP_GL_CRC32HASH=1" \
+        "" \
+        "# With fast_gpu, copy the GPU command lists the game replays by" \
+        "# reference before drawing them, so the game cannot rewrite one" \
+        "# halfway through. 0 = read them live. A Developer page switch." \
+        "RECOMP_PB_CALLSNAP=1" \
+        "" \
+        "# Four Developer switches are read by their presence alone, so" \
+        "# they are NOT lines to set to 0 -- a RECOMP_PB_OVERLAP=0 line" \
+        "# would turn it on. Add the line with =1 to turn one on; leave" \
+        "# the line out for off. The in-game menu writes and removes" \
+        "# these lines itself:" \
+        "#   RECOMP_PB_OVERLAP=1       count push-buffer overlap, in the log" \
+        "#   RECOMP_GL_MERGEPROBE=1    probe merging draws, log the findings" \
+        "#   RECOMP_PB_SEMLOG=1        log GPU semaphore waits and releases" \
+        "#   RECOMP_MENU_STICK_BOTH=1  both sticks in the game's own menus" \
+        "" \
+        "# 1 = the face buttons by their printed names (A confirms," \
+        "# B goes back, X and Y likewise) instead of by Xbox position." \
+        "# The same choice is in the in-game menu, under Controller." \
+        "nintendo_layout=0" \
+        "" \
+        "# 1 = the frame rate in the top-left corner. The same choice" \
+        "# is in the in-game menu, under Display." \
+        "show_fps=0" \
+        "" \
+        "# Any other engine variable can go here too as NAME=value" \
+        "# (RECOMP_... or JSRF_...)." > "$1"
+}
+
 # ---------------------------------------------------------------- export
 # dist/ is rebuilt from nothing every time, so files kept beside the .nro
 # there (env, settings) vanished with each build. The export folder is
@@ -251,102 +357,47 @@ EOF
     # default: change a number in Notepad, save, copy it to the card. The
     # build never touches it again.
     if [ ! -f "$EXPORT_DIR/options.txt" ]; then
-        printf '%s\r\n' \
-            "# JSRF Unleashed for Switch -- options" \
-            "# Change a value, save, and copy this file to the SD card beside" \
-            "# jsrf-unleashed.nro. 1 means on, 0 means off. Lines starting with #" \
-            "# are notes and are ignored. The log's [SWITCH] options: line shows" \
-            "# what was read." \
-            "" \
-            "# ---- picture" \
-            "" \
-            "# Widescreen 16:9 in gameplay (the logos and title screen stay 4:3)." \
-            "widescreen=1" \
-            "" \
-            "# Internal resolution: 1 = the Xbox's 640x480, 2 = twice that, up to 4." \
-            "# Each step costs GPU time." \
-            "scale=1" \
-            "" \
-            "# Texture sharpness at an angle (anisotropic filtering): 1 = off, 4, 8, 16." \
-            "aniso=4" \
-            "" \
-            "# Frame rate cap: 60 as on the Xbox. 0 removes the cap (testing only)." \
-            "fps=60" \
-            "" \
-            "# Wait for the display's refresh before showing each frame." \
-            "# The same choice is in the in-game menu, under Display (Vsync)." \
-            "RECOMP_VSYNC=0" \
-            "" \
-            "# ---- sound" \
-            "" \
-            "mute=0" \
-            "" \
-            "# ---- performance testing (leave at 0 for normal play)" \
-            "" \
-            "# Keep compiled shaders between runs, so stutters only happen once." \
-            "shader_cache=1" \
-            "" \
-            "# Where each frame's time goes, written to the log every second." \
-            "profile=0" \
-            "" \
-            "# Which functions each thread is busy in, every 10 seconds" \
-            "# (turn into names with tools/switch/prof.sh)." \
-            "sample=0" \
-            "" \
-            "# Write the run's log (Logs/last-run.log). 0 = no log file" \
-            "# at all: logging writes nothing to the card, and a crash" \
-            "# leaves no log behind." \
-            "log=1" \
-            "" \
-            "# 1 = write every log line to the card at once (slower). Only for" \
-            "# chasing a freeze; normally the log is written every 0.25 s." \
-            "log_direct=0" \
-            "" \
-            "# Log time spent busy-waiting (spinning). A Developer page switch." \
-            "JSRF_SPIN_LOG=0" \
-            "" \
-            "# 1 = let the game hand work to the GPU thread without waiting" \
-            "# for it to finish the last batch. 0 = the old, slower hand-off." \
-            "fast_gpu=1" \
-            "" \
-            "# In widescreen, draw full-screen effects (the boost smear and its" \
-            "# like) across the whole frame instead of squeezing them into a" \
-            "# 4:3 box. A Developer page switch." \
-            "RECOMP_WIDE_FX_FULL=1" \
-            "" \
-            "# Check the vertex and texture caches' contents with the CPU's" \
-            "# CRC instructions (fast). 0 = the older software hash. A" \
-            "# Developer page switch." \
-            "RECOMP_GL_CRC32HASH=1" \
-            "" \
-            "# With fast_gpu, copy the GPU command lists the game replays by" \
-            "# reference before drawing them, so the game cannot rewrite one" \
-            "# halfway through. 0 = read them live. A Developer page switch." \
-            "RECOMP_PB_CALLSNAP=1" \
-            "" \
-            "# Four Developer switches are read by their presence alone, so" \
-            "# they are NOT lines to set to 0 -- a RECOMP_PB_OVERLAP=0 line" \
-            "# would turn it on. Add the line with =1 to turn one on; leave" \
-            "# the line out for off. The in-game menu writes and removes" \
-            "# these lines itself:" \
-            "#   RECOMP_PB_OVERLAP=1       count push-buffer overlap, in the log" \
-            "#   RECOMP_GL_MERGEPROBE=1    probe merging draws, log the findings" \
-            "#   RECOMP_PB_SEMLOG=1        log GPU semaphore waits and releases" \
-            "#   RECOMP_MENU_STICK_BOTH=1  both sticks in the game's own menus" \
-            "" \
-            "# 1 = the face buttons by their printed names (A confirms," \
-            "# B goes back, X and Y likewise) instead of by Xbox position." \
-            "# The same choice is in the in-game menu, under Controller." \
-            "nintendo_layout=0" \
-            "" \
-            "# 1 = the frame rate in the top-left corner. The same choice" \
-            "# is in the in-game menu, under Display." \
-            "show_fps=0" \
-            "" \
-            "# Any other engine variable can go here too as NAME=value" \
-            "# (RECOMP_... or JSRF_...)." > "$EXPORT_DIR/options.txt"
+        write_default_options "$EXPORT_DIR/options.txt"
     fi
     EXPORTED="$EXPORT_DIR"
+fi
+
+# ---------------------------------------------------------------- release zip
+# RELEASE=1: the zip to attach to a GitHub release. It holds the .nro and
+# a fresh options.txt at the release defaults, laid out as the SD card
+# wants them (switch/jsrf-unleashed/), and nothing else: not the export
+# folder's own options.txt (that one is the tester's, with whatever
+# diagnostics were turned on) and never game/. Named after the tag the
+# tree is at; build on the release tag so the .nro carries that version.
+if [ "${RELEASE:-0}" = "1" ]; then
+    VER="$(git -C "$FORK_DIR" describe --tags --match 'v[0-9]*' --dirty 2>/dev/null || echo unknown)"
+    case "$VER" in
+        *-g*|*-dirty|unknown)
+            echo "WARNING: the tree is not exactly at a release tag ($VER);" \
+                 "the zip and the .nro's version say so." ;;
+    esac
+    REL_ROOT="$WORK_DIR/release"
+    REL_DIR="$REL_ROOT/switch/jsrf-unleashed"
+    rm -rf "$REL_ROOT"
+    mkdir -p "$REL_DIR"
+    cp "$DIST/jsrf-unleashed.nro" "$REL_DIR/jsrf-unleashed.nro"
+    write_default_options "$REL_DIR/options.txt"
+    ZIP_DIR="$WORK_DIR"
+    [ -n "${EXPORTED:-}" ] && ZIP_DIR="$EXPORTED"
+    ZIP="$ZIP_DIR/jsrf-unleashed-$VER.zip"
+    rm -f "$ZIP"
+    python3 - "$REL_ROOT" "$ZIP" <<'PY'
+import os, sys, zipfile
+root, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    for d, _, files in os.walk(root):
+        for f in sorted(files):
+            p = os.path.join(d, f)
+            z.write(p, os.path.relpath(p, root))
+PY
+    say "release zip"
+    python3 -c 'import sys,zipfile; [print("  ", i.filename, i.file_size) for i in zipfile.ZipFile(sys.argv[1]).infolist()]' "$ZIP"
+    RELEASE_ZIP="$ZIP"
 fi
 
 say "done"
@@ -361,4 +412,7 @@ else
 fi
 if [ -n "${EXPORTED:-}" ]; then
     echo "windows: $(wslpath -w "$EXPORTED" 2>/dev/null || echo "$EXPORTED")"
+fi
+if [ -n "${RELEASE_ZIP:-}" ]; then
+    echo "zip:  $(wslpath -w "$RELEASE_ZIP" 2>/dev/null || echo "$RELEASE_ZIP")"
 fi

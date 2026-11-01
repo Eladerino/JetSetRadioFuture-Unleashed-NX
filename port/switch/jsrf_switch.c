@@ -404,10 +404,11 @@ static void open_log(const char *data)
     const char *d = getenv("JSRF_LOG_DIRECT");
     snprintf(logs, sizeof logs, "%s/Logs", data);
     snprintf(s_logs_dir, sizeof s_logs_dir, "%s", logs);
-    /* options.txt log=0: no log at all. Nothing is created or
-     * written for logging and stdio keeps its default destination,
-     * so output is discarded; a crash then leaves no log behind. */
-    { const char *l = getenv("JSRF_LOG"); if (l && !atoi(l)) return; }
+    /* No log unless options.txt says log=1 (JSRF_LOG defaults to 0
+     * in k_env). Off, nothing is created or written for logging and
+     * stdio keeps its default destination, so output is discarded; a
+     * crash then leaves no log behind. */
+    { const char *l = getenv("JSRF_LOG"); if (!l || !atoi(l)) return; }
     mkdir_p(logs);
     snprintf(last, sizeof last, "%s/last-run.log", logs);
     snprintf(prev, sizeof prev, "%s/previous-run.log", logs);
@@ -464,6 +465,10 @@ static const char *const k_env[][2] = {
     /* fast_gpu: on by default; it runs title, character select and
      * gameplay cleanly. fast_gpu=0 in options.txt turns it off. */
     { "RECOMP_NV2A_FLUSH_ACK", "1" },
+    /* The run log: off unless options.txt says log=1 (the Developer
+     * page's Log row writes that line). A player turns it on to send
+     * a bug report; off, nothing is written to the card. */
+    { "JSRF_LOG", "0" },
 };
 
 /* Set when the binary is loaded, before the runtime's own constructors

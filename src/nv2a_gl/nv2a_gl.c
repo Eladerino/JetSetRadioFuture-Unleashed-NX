@@ -4266,13 +4266,19 @@ static int skipvol_init(void)
  * long one: a road or a wall seen at a glancing angle stays sharp instead of
  * going to the blur of the level its long side needs. */
 /* The forced level: RECOMP_GL_ANISO, the settings' aniso= under it, 16
- * by default. File scope so the in-game menu's row can hold it too. */
+ * by default (4 on the Switch, as in the options.txt its build writes).
+ * File scope so the in-game menu's row can hold it too. */
+#if defined(__SWITCH__)
+#define ANISO_DEFAULT 4
+#else
+#define ANISO_DEFAULT 16
+#endif
 static int g_aniso_forced = -1;
 static int aniso_forced(void)
 {
     if (g_aniso_forced < 0) {
         const char *v = getenv("RECOMP_GL_ANISO");
-        g_aniso_forced = v ? atoi(v) : sdl_cfg_get("aniso", 16);
+        g_aniso_forced = v ? atoi(v) : sdl_cfg_get("aniso", ANISO_DEFAULT);
         if (g_aniso_forced < 1) g_aniso_forced = 1;
         if (g_aniso_forced > 16) g_aniso_forced = 16;
     }
