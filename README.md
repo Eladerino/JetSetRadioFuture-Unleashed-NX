@@ -43,10 +43,10 @@ files from your own copy of the game, and launch. The Switch port can be had
 two ways, a prebuilt download or a build from source; both need the files
 from your own copy of the game.
 
-- **Prebuilt:** download `jsrf-unleashed-switch.zip` from this
-  repository's
-  [Releases](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases)
-  page and extract it at the root of the SD card. It puts
+- **Prebuilt:** download the Switch zip from this repository's
+  [latest release](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest)
+  (the file is named `jsrf-unleashed-<version>-switch.zip`) and
+  extract it at the root of the SD card. It puts
   `jsrf-unleashed.nro`, `options.txt` and an empty `game/` folder in
   `sdmc:/switch/jsrf-unleashed/`. Then put your game files in that
   `game/` folder: either the extracted files (`default.xbe` and
@@ -177,7 +177,7 @@ you own.
 | iPhone and iPad, iOS 15 or later (iPhone XS or newer recommended) | [JSRF-Unleashed-iOS.ipa](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-iOS.ipa) — less tested on iPads |
 | Windows 10 or 11, 64-bit | [JSRF-Unleashed-windows-x86_64.zip](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-windows-x86_64.zip) — tested under Wine |
 | Android 10 or later, 64-bit, Snapdragon 8 Gen 1 or newer | [JSRF-Unleashed-android-arm64.apk](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases/latest/download/JSRF-Unleashed-android-arm64.apk) — tested in the Android emulator |
-| Nintendo Switch, Atmosphère (this fork) | [jsrf-unleashed-switch.zip](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest/download/jsrf-unleashed-switch.zip) — the `.nro`, the settings file and an empty `game/` folder; see [Nintendo Switch (this fork)](#nintendo-switch-this-fork) above |
+| Nintendo Switch, Atmosphère (this fork) | [Latest Switch release](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest) — download the `jsrf-unleashed-<version>-switch.zip` file on that page: the `.nro`, the settings file and an empty `game/` folder; see [Nintendo Switch (this fork)](#nintendo-switch-this-fork) above |
 
 Every version is on the [Releases](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/releases) page; what changed is in the [changelog](CHANGELOG.md).
 

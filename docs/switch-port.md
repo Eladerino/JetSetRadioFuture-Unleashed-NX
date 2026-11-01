@@ -48,10 +48,22 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
   (RECOMP_GL_CRC32HASH=0 reverts).
 - The GL backend skips small uniforms whose program already holds
   the value (RECOMP_GL_UNIFORM_SKIP=0 reverts).
+- The GL device runs on its own thread by default on Switch
+  (RECOMP_GL_THREAD), shipped in v0.2.0. fast_gpu above is a
+  separate switch and also stays on by default.
+- Upstream v0.6.1 is merged: in widescreen the HUD sits at the
+  screen's edges and the boost's heat haze covers the whole
+  screen. Both shipped in v0.2.0.
 - Performance on the reference clocks (CPU 1963 / GPU 1152 /
-  mem 2133 MHz): light scenes at the 60 fps cap, typical gameplay
-  40-60 fps, heavy districts around a 40 fps median.
+  mem 2366 MHz, v0.2.0 release measurements): the garage holds
+  the 60 fps cap, Shibuya Terminal and Dogenzaka Hill sit near
+  60 with their busiest views around 50, Chuo Street around 57,
+  and 99th Street, the heaviest area so far, around 49 with
+  dips into the low 30s in its densest views. At stock clocks
+  the same areas run slower.
 - Open items: an intermittent red/blue channel split last seen
-  before draw validation landed; visual confirmation of the
-  widescreen boost-blur fix; further GPU-thread profiling in
-  heavy scenes. Detail in the testing notes.
+  before draw validation landed; the draw-distance census
+  (RECOMP_GL_DEPTHLOG) run over 99th Street and Shibuya that
+  decides the shorter draw distance idea; and the GL worker
+  thread measurement (RECOMP_GL_SPLIT) that prices Mesa's share
+  of a heavy frame. Detail in the testing notes.

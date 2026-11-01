@@ -2,8 +2,12 @@
 
 How Switch testing works, what the fast-path machinery does, and the
 current state of the port's known issues. Performance figures are
-measured on real hardware (Atmosphère emuMMC, title takeover,
-overclock CPU 1963 / GPU 1152 / mem 2133 MHz) unless stated otherwise.
+measured on real hardware (Atmosphère emuMMC, title takeover)
+unless stated otherwise. The v0.2.0 release figures were measured
+at overclock CPU 1963 / GPU 1152 / mem 2366 MHz; the machinery
+measurements in the Measured state section are from the earlier
+builds they describe, at mem 2133 MHz, and are kept as the record
+of those changes.
 
 ## Workflow
 
@@ -72,14 +76,23 @@ Two renderer guards belong to the same story:
 
 ## Measured state
 
+- Current release (v0.2.0, the GL device thread on by default,
+  mem 2366 MHz): the garage holds the 60 fps cap, Shibuya
+  Terminal and Dogenzaka Hill sit near 60 with their busiest
+  views around 50, Chuo Street around 57, and 99th Street
+  around 49 with dips into the low 30s in its densest views.
+  These are medians over each area's play time, from test
+  builds with the profiler running.
 - Title average rose from 26.5 fps (serial path) to 32.7 fps with
   the fast path and snapshot walk; light scenes reach the 60 cap.
 - Bulk index runs on the GPU thread took the run average from
   44.4 to 51.2 fps. Skipping the per-open case walk on SD removed
   a similar amount of title-side file time.
-- Gameplay is typically 40-60 fps; heavy districts (Shibuya
-  terminal, 300-680 draws) run at a median of about 40 fps on the
-  current build, where the game thread is the limit. The lifted
+- On the pre-thread build measured here, gameplay was typically
+  40-60 fps; heavy districts (Shibuya terminal, 300-680 draws)
+  ran at a median of about 40 fps, where the game thread was the
+  limit. The GL device thread is the change that moved those
+  districts up to the v0.2.0 figures above. The lifted
   code keeps guest registers in host registers (RECOMP_FAST_MEM;
   JSRF_SLOW_MEM=ON reverts), which is where the last gain came
   from: the same district measured 28-40 fps before it. The log
@@ -98,15 +111,25 @@ Two renderer guards belong to the same story:
   at that moment before treating it as a separate bug; a
   screenshot that shows whether the HUD splits too is the other
   useful evidence.
-- **Boost blur in widescreen.** Screen-space blur quads that
-  sample a rendered surface are no longer squeezed
-  (RECOMP_WIDE_FX_FULL=0 restores the old behaviour). Awaiting
-  visual confirmation on hardware that the boost effect is
-  correct; the practical test area is Dogenzaka (the hideout
-  has no paint cans to build boost charge).
+- **Boost blur in widescreen.** Closed as shipped in v0.2.0:
+  screen-space blur quads that sample a rendered surface are no
+  longer squeezed (RECOMP_WIDE_FX_FULL=0 restores the old
+  behaviour), and upstream v0.6.1's boost heat haze fix
+  (RECOMP_WIDE_FILL) is merged. If a boost effect still shows a
+  boxed edge on hardware, report the area with a screenshot;
+  the practical test area is Dogenzaka (the hideout has no
+  paint cans to build boost charge).
 - **Vertex hashing cost.** Even with CRC32 the content hash is a
   visible share of the GPU thread; whether more is worth taking
   there is a profiling question, answered by prof.sh over a
   heavy-scene run.
 - fast_gpu's default-on status is recent. A longer soak across
   more stages is still the deciding evidence for keeping it.
+  The same applies to the GL device thread that v0.2.0 made the
+  default.
+- **Draw-distance census.** RECOMP_GL_DEPTHLOG=1 counts draws
+  by distance from the camera in 99th Street and Shibuya. If
+  99th Street's extra world draws sit in the far bands, an
+  opt-in shorter draw distance (off by default) has something
+  to cut; if they are up close, the idea is closed. The run is
+  still owed.
