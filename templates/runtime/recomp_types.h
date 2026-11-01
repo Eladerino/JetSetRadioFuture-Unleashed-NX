@@ -870,7 +870,6 @@ static inline uint64_t recomp_ld64(uint32_t a) {
 #define RECOMP_GUEST_MEM_CHANGED() \
     __asm__ volatile("" : "+m"(*(char (*)[0x100000000ull])(uintptr_t)g_xbox_mem_offset))
 #endif
-#endif
 
 /* A store through what recomp_p32 returned, as `MEM32(a) = v` is, but typed
  * so it cannot be taken for a register write. */
