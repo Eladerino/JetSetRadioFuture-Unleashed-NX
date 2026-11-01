@@ -5740,7 +5740,10 @@ static const char *vc_debug_switch(void)
         /* DXT textures decoded rather than handed over as they are */
         "DXT",
         /* the device on a thread of its own, and which core it takes */
-        "THREAD", "THREAD_CORE", NULL
+        "THREAD", "THREAD_CORE",
+        /* settings with a switch of their own: shadow volumes skipped, and
+         * the two anti-aliasing passes (none of them reads vertices back) */
+        "SKIPVOL", "SMAA", "MSAA", NULL
     };
     static char name[64];
     char **e;
