@@ -36,9 +36,11 @@
 #                      an earlier build. Changing it recompiles all of the
 #                      generated code (SKIP_RECOMP=1 still applies).
 #   RELEASE=1  also make jsrf-unleashed-<tag>.zip (in EXPORT_DIR, else
-#              WORK_DIR): the .nro plus a fresh options.txt at the release
-#              defaults under switch/jsrf-unleashed/, for a GitHub release.
-#              Build with the release tag checked out.
+#              WORK_DIR): the .nro, a fresh options.txt at the release
+#              defaults, READ-ME-FIRST.txt, an empty game/ folder and the
+#              license texts (LICENSE, NOTICE, LICENSES/) under
+#              switch/jsrf-unleashed/, for a GitHub release. Build with
+#              the release tag checked out.
 #   EXPORT_DIR  a folder the finished .nro is also copied to, for dragging
 #              onto the SD card (default under WSL: Downloads\jsrf-unleashed-switch
 #              in your Windows profile; "none" turns it off). Only the .nro
@@ -220,7 +222,8 @@ game/ holds the game files from your own disc (default.xbe and
 Media/). If game/ ever contains only a single .iso instead, the
 first launch checks it and unpacks it into the folder.
 
-The log of every run is sdmc:/switch/jsrf-unleashed/Logs/last-run.log.
+The run log is off by default. If you set log=1 in options.txt,
+each run's log lands in sdmc:/switch/jsrf-unleashed/Logs/last-run.log.
 EOF
 # ---------------------------------------------------------------- options.txt
 # Every option written out at its release default, with a note on each:
@@ -363,12 +366,16 @@ EOF
 fi
 
 # ---------------------------------------------------------------- release zip
-# RELEASE=1: the zip to attach to a GitHub release. It holds the .nro and
-# a fresh options.txt at the release defaults, laid out as the SD card
-# wants them (switch/jsrf-unleashed/), and nothing else: not the export
-# folder's own options.txt (that one is the tester's, with whatever
-# diagnostics were turned on) and never game/. Named after the tag the
-# tree is at; build on the release tag so the .nro carries that version.
+# RELEASE=1: the zip to attach to a GitHub release, laid out as the SD
+# card wants it (switch/jsrf-unleashed/). It holds the .nro, a fresh
+# options.txt at the release defaults (never the export folder's own
+# options.txt: that one is the tester's, with whatever diagnostics were
+# turned on), READ-ME-FIRST.txt, an empty game/ folder for a fresh
+# install to drop its own game files into (never the game's files
+# themselves) and the license texts the code's licenses require to
+# travel with copies (LICENSE, NOTICE, LICENSES/). Named after the tag
+# the tree is at; build on the release tag so the .nro carries that
+# version.
 if [ "${RELEASE:-0}" = "1" ]; then
     VER="$(git -C "$FORK_DIR" describe --tags --match 'v[0-9]*' --dirty 2>/dev/null || echo unknown)"
     case "$VER" in
@@ -379,9 +386,12 @@ if [ "${RELEASE:-0}" = "1" ]; then
     REL_ROOT="$WORK_DIR/release"
     REL_DIR="$REL_ROOT/switch/jsrf-unleashed"
     rm -rf "$REL_ROOT"
-    mkdir -p "$REL_DIR"
+    mkdir -p "$REL_DIR/game"
     cp "$DIST/jsrf-unleashed.nro" "$REL_DIR/jsrf-unleashed.nro"
     write_default_options "$REL_DIR/options.txt"
+    cp "$DIST/READ-ME-FIRST.txt" "$REL_DIR/READ-ME-FIRST.txt"
+    cp "$FORK_DIR/LICENSE" "$FORK_DIR/NOTICE" "$REL_DIR/"
+    cp -r "$FORK_DIR/LICENSES" "$REL_DIR/LICENSES"
     ZIP_DIR="$WORK_DIR"
     [ -n "${EXPORTED:-}" ] && ZIP_DIR="$EXPORTED"
     ZIP="$ZIP_DIR/jsrf-unleashed-$VER.zip"
@@ -390,7 +400,11 @@ if [ "${RELEASE:-0}" = "1" ]; then
 import os, sys, zipfile
 root, out = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-    for d, _, files in os.walk(root):
+    for d, subdirs, files in os.walk(root):
+        # Empty folders (game/) get a directory entry of their own, or
+        # they would not be in the zip at all.
+        if not subdirs and not files:
+            z.writestr(os.path.relpath(d, root) + "/", "")
         for f in sorted(files):
             p = os.path.join(d, f)
             z.write(p, os.path.relpath(p, root))
