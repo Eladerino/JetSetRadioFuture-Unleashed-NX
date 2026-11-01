@@ -1369,6 +1369,11 @@ static int  sdl_cfg_get(const char *key, int def);   /* the settings file, below
 static void sdl_menu_register(void);   /* this window's in-game menu rows, below */
 #endif
 int nv_window_pref_vsync(void);        /* the vsync preference, below */
+static int   sdl_pref_picture(void);     /* the picture (4:3, 16:9, 21:9), below */
+static int   sdl_picture_now(void);
+static float sdl_screen_aspect(void);
+float nv2a_wide_aspect(void);
+void  nv2a_set_picture(int pic, float screen, int apply);
 
 static int gl_init(uint32_t w, uint32_t h)
 {
@@ -1403,15 +1408,18 @@ static int gl_init(uint32_t w, uint32_t h)
     /* The window is not the game's resolution: the game draws 640x480, the
      * renderer works at a multiple of that (RECOMP_GL_SCALE), and the window
      * is whatever size the player makes it -- each frame is fitted into it
-     * (sdl_present). It opens at 1280x960, or 16:9 at that height when
-     * widescreen is on, shrunk to fit the screen. */
+     * (sdl_present). It opens at 1280x960, or at the picture's shape at that
+     * height in widescreen (16:9, or 21:9), shrunk to fit the screen. */
     {
         int ww = 1280, wh = 960;
         Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
         SDL_Rect usable;
         const char *e;
         (void)w; (void)h;
-        if (nv2a_widescreen()) ww = wh * 16 / 9;
+        /* The stored picture's shape, unless the environment says (tests). */
+        if (!getenv("RECOMP_WIDESCREEN") && !getenv("RECOMP_WIDE_ASPECT"))
+            nv2a_set_picture(sdl_pref_picture(), sdl_screen_aspect(), 0);
+        if (nv2a_widescreen()) ww = (int)((float)wh * nv2a_wide_aspect() + 0.5f);
         if (SDL_GetDisplayUsableBounds(0, &usable) == 0 && usable.h > 0 && usable.w > 0) {
             int maxh = usable.h * 9 / 10, maxw = usable.w * 9 / 10;
             if (wh > maxh) { ww = ww * maxh / wh; wh = maxh; }
@@ -1463,8 +1471,9 @@ static int gl_init(uint32_t w, uint32_t h)
 #if defined(_WIN32)
     sdl_menu_init();
 #endif
-    fprintf(stderr, "  [WIN] SDL window (%s video), %s\n", SDL_GetCurrentVideoDriver(),
-            nv2a_widescreen() ? "16:9" : "4:3");
+    fprintf(stderr, "  [WIN] SDL window (%s video), %s (%.3f:1; the screen %.3f:1)\n", SDL_GetCurrentVideoDriver(),
+            nv2a_widescreen() ? (sdl_picture_now() == 2 ? "21:9" : "16:9") : "4:3",
+            nv2a_widescreen() ? (double)nv2a_wide_aspect() : 4.0 / 3.0, (double)sdl_screen_aspect());
 
     fprintf(stderr, "  [GL] %s | %s | GLSL %s\n",
             (const char *)glGetString(GL_VERSION),
@@ -1495,6 +1504,7 @@ int  nv2a_widescreen(void);
 void nv2a_set_widescreen(int on);
 int  nv2a_wide_scene(void);
 float nv2a_wide_aspect(void);
+void nv2a_set_picture(int pic, float screen, int apply);
 
 /* $XDG_CONFIG_HOME/jsrf-unleashed/settings (or JSRF_SETTINGS_FILE): lines of
  * key=value, shared with the launcher script, which keeps game_dir and
@@ -1801,24 +1811,63 @@ static volatile int g_sdl_want_wide = -1;
 void nv_window_request_widescreen(int on);
 void nv_window_request_widescreen(int on) { g_sdl_want_wide = on ? 1 : 0; }
 
-static void sdl_toggle_widescreen(void)
+/* The picture -- 0 4:3, 1 16:9, 2 21:9 (nv2a_set_picture) -- kept as
+ * widescreen= and ultrawide= in the settings, the first as before, so the
+ * Android app's switch and an older version's choice still read right. */
+static int sdl_pref_picture(void)
 {
-    int on = !nv2a_widescreen();
-    nv2a_set_widescreen(on);
-    sdl_cfg_set("widescreen", on);
+    if (!sdl_cfg_get("widescreen", 0)) return 0;
+    return sdl_cfg_get("ultrawide", 0) ? 2 : 1;
+}
+/* The one shown now (RECOMP_WIDESCREEN and RECOMP_WIDE_ASPECT included). */
+static int sdl_picture_now(void)
+{
+    if (!nv2a_widescreen()) return 0;
+    return nv2a_wide_aspect() > 16.0f / 9.0f + 0.01f ? 2 : 1;
+}
+/* The shape of the screen the window is on (before there is a window, the
+ * first screen's); 0 if SDL cannot say. */
+static float sdl_screen_aspect(void)
+{
+    SDL_DisplayMode dm;
+    int d = g_window ? SDL_GetWindowDisplayIndex(g_window) : 0;
+    if (d < 0) d = 0;
+    if (SDL_GetDesktopDisplayMode(d, &dm) != 0 || dm.w <= 0 || dm.h <= 0) return 0.0f;
+    return (float)dm.w / (float)dm.h;
+}
+
+/* F10 (round 4:3, 16:9, 21:9), Video > Picture on Windows, and the Android
+ * app's widescreen switch (16:9 or 4:3). */
+static void sdl_set_picture(int pic)
+{
+    nv2a_set_picture(pic, sdl_screen_aspect(), 1);
+    sdl_cfg_set("widescreen", pic != 0);
+    sdl_cfg_set("ultrawide", pic == 2);
 #if defined(__SWITCH__)
-    switch_options_set("widescreen", on, 0);
+    switch_options_set("widescreen", pic != 0, 0);
 #endif
     /* A window (not full screen, not maximised) takes the new shape at the
-     * same height, as the Mac's does. */
+     * same height, as the Mac's does -- narrower if that would not fit. */
     if (!(SDL_GetWindowFlags(g_window) & (SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_MAXIMIZED))) {
-        int ww, wh;
+        int ww, wh, nw;
+        SDL_Rect usable;
+        int d = SDL_GetWindowDisplayIndex(g_window);
         SDL_GetWindowSize(g_window, &ww, &wh);
-        SDL_SetWindowSize(g_window, on ? wh * 16 / 9 : wh * 4 / 3, wh);
+        nw = (int)((float)wh * (pic ? nv2a_wide_aspect() : 4.0f / 3.0f) + 0.5f);
+        if (SDL_GetDisplayUsableBounds(d < 0 ? 0 : d, &usable) == 0 && usable.w > 320
+            && nw > usable.w * 19 / 20) {
+            wh = wh * (usable.w * 19 / 20) / nw;
+            nw = usable.w * 19 / 20;
+        }
+        SDL_SetWindowSize(g_window, nw, wh);
     }
     sdl_menu_update();
-    fprintf(stderr, "[WIN] widescreen %s\n", on ? "on (16:9)" : "off (4:3)");
+    if (pic) fprintf(stderr, "[WIN] picture %s (%.3f:1)\n", pic == 2 ? "21:9" : "16:9",
+                     (double)nv2a_wide_aspect());
+    else     fprintf(stderr, "[WIN] picture 4:3\n");
 }
+/* The Switch menu's widescreen row: 16:9 or 4:3 (21:9 is the desktop's). */
+static void sdl_toggle_widescreen(void) { sdl_set_picture(nv2a_widescreen() ? 0 : 1); }
 
 /* F9: the internal resolution, 1x to 6x the Xbox's 640x480 (4x on Android,
  * as the iPhone's settings) -- what the Mac's Video menu offers. 6x is
@@ -2444,20 +2493,21 @@ static void sdl_menu_register(void)
 #if defined(_WIN32)
 /*
  * The window's menu bar (Windows): Video -- the resolution, anti-aliasing,
- * widescreen and full screen, which is what the Mac's Video menu has and what
- * F9, F8, F10 and F11 do. Not in full screen, where it would sit across the
- * top of the picture; the keys work there, and leaving full screen brings it
- * back. SDL hands the menu's WM_COMMAND over as a system event (sdl_pump).
+ * the picture (4:3, 16:9, 21:9) and full screen, which is what the Mac's
+ * Video menu has and what F9, F8, F10 and F11 do. Not in full screen, where
+ * it would sit across the top of the picture; the keys work there, and
+ * leaving full screen brings it back. SDL hands the menu's WM_COMMAND over
+ * as a system event (sdl_pump).
  *
  * Holding a menu open holds the thread that owns the window, which is the
  * one that runs the GPU, so the game waits while it is open -- as a pause
  * menu would. Choosing a resolution asks before it restarts.
  */
 #include <SDL2/SDL_syswm.h>
-enum { MENU_RES1 = 101, MENU_WIDE = 110, MENU_FULL = 111, MENU_SMAA = 120, MENU_MSAA1 = 121,
+enum { MENU_RES1 = 101, MENU_FULL = 111, MENU_PIC1 = 112, MENU_SMAA = 120, MENU_MSAA1 = 121,
        MENU_RCAM = 130 };
 static HWND  g_menu_hwnd;
-static HMENU g_menu_bar, g_menu_video, g_menu_res, g_menu_aa, g_menu_controls;
+static HMENU g_menu_bar, g_menu_video, g_menu_res, g_menu_aa, g_menu_pic, g_menu_controls;
 
 static void sdl_menu_update(void)
 {
@@ -2466,8 +2516,8 @@ static void sdl_menu_update(void)
     for (i = 1; i <= NV2A_SCALE_MAX; i++)
         CheckMenuItem(g_menu_res, MENU_RES1 + i - 1,
                       MF_BYCOMMAND | (i == cur ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(g_menu_video, MENU_WIDE,
-                  MF_BYCOMMAND | (nv2a_widescreen() ? MF_CHECKED : MF_UNCHECKED));
+    if (g_menu_pic)
+        CheckMenuRadioItem(g_menu_pic, MENU_PIC1, MENU_PIC1 + 2, MENU_PIC1 + sdl_picture_now(), MF_BYCOMMAND);
     /* Anti-aliasing: what is asked for, and only what the device can do. */
     CheckMenuItem(g_menu_aa, MENU_SMAA, MF_BYCOMMAND | (g_smaa_want ? MF_CHECKED : MF_UNCHECKED));
     EnableMenuItem(g_menu_aa, MENU_SMAA,
@@ -2506,7 +2556,8 @@ static void sdl_menu_init(void)
     g_menu_video = CreatePopupMenu();
     g_menu_res   = CreatePopupMenu();
     g_menu_aa    = CreatePopupMenu();
-    if (!g_menu_bar || !g_menu_video || !g_menu_res || !g_menu_aa) { g_menu_bar = NULL; return; }
+    g_menu_pic   = CreatePopupMenu();
+    if (!g_menu_bar || !g_menu_video || !g_menu_res || !g_menu_aa || !g_menu_pic) { g_menu_bar = NULL; return; }
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 0, L"1x  (640 x 480)");
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 1, L"2x  (1280 x 960)");
     AppendMenuW(g_menu_res, MF_STRING, MENU_RES1 + 2, L"3x  (1920 x 1440)");
@@ -2520,8 +2571,11 @@ static void sdl_menu_init(void)
     AppendMenuW(g_menu_aa, MF_STRING, MENU_MSAA1 + 2, L"MSAA &4x");
     AppendMenuW(g_menu_aa, MF_STRING, MENU_MSAA1 + 3, L"MSAA &8x");
     AppendMenuW(g_menu_video, MF_POPUP, (UINT_PTR)g_menu_res, L"&Resolution\tF9");
+    AppendMenuW(g_menu_pic, MF_STRING, MENU_PIC1 + 0, L"&4:3");
+    AppendMenuW(g_menu_pic, MF_STRING, MENU_PIC1 + 1, L"16:9  (&widescreen)");
+    AppendMenuW(g_menu_pic, MF_STRING, MENU_PIC1 + 2, L"21:9  (&ultrawide)");
     AppendMenuW(g_menu_video, MF_POPUP, (UINT_PTR)g_menu_aa, L"&Anti-aliasing\tF8");
-    AppendMenuW(g_menu_video, MF_STRING, MENU_WIDE, L"&Widescreen\tF10");
+    AppendMenuW(g_menu_video, MF_POPUP, (UINT_PTR)g_menu_pic, L"&Picture\tF10");
     AppendMenuW(g_menu_video, MF_STRING, MENU_FULL, L"&Full screen\tF11");
     AppendMenuW(g_menu_bar, MF_POPUP, (UINT_PTR)g_menu_video, L"&Video");
     if ((g_menu_controls = CreatePopupMenu()) != NULL) {
@@ -2556,8 +2610,8 @@ static void sdl_menu_command(unsigned id)
         box.buttons = b;
         if (SDL_ShowMessageBox(&box, &ans) == 0 && ans == 1) sdl_restart_at(pick, 0);
         sdl_keys_release();
-    } else if (id == MENU_WIDE) {
-        sdl_toggle_widescreen();
+    } else if (id >= MENU_PIC1 && id < MENU_PIC1 + 3) {
+        sdl_set_picture((int)(id - MENU_PIC1));
     } else if (id == MENU_FULL) {
         sdl_fullscreen_by_player();
     } else if (id == MENU_SMAA) {
@@ -3048,7 +3102,7 @@ static void sdl_pump(void)
     if (g_sdl_want_wide >= 0) {
         int want = g_sdl_want_wide;
         g_sdl_want_wide = -1;
-        if (want != nv2a_widescreen()) sdl_toggle_widescreen();
+        if (want != nv2a_widescreen()) sdl_set_picture(want ? 1 : 0);
     }
     if (g_sdl_want_rcam >= 0) {
         int want = g_sdl_want_rcam;
@@ -3073,7 +3127,7 @@ static void sdl_pump(void)
                     sdl_fullscreen_by_player();
                     break;
                 }
-                if (k == SDL_SCANCODE_F10) { sdl_toggle_widescreen(); break; }
+                if (k == SDL_SCANCODE_F10) { sdl_set_picture((sdl_picture_now() + 1) % 3); break; }
                 if (k == SDL_SCANCODE_F9)  { sdl_choose_scale(); break; }
                 if (k == SDL_SCANCODE_F8)  { sdl_choose_aa(); break; }
                 if (k == SDL_SCANCODE_F7)  { sdl_toggle_rstick_camera(); break; }
@@ -3090,6 +3144,15 @@ static void sdl_pump(void)
                 g_sdl_kb_buttons = 0;
                 for (i = 0; i < 8; i++) g_sdl_kb_analog[i] = 0;
             }
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            /* 21:9 is the screen's own shape: moved to another screen, the
+             * window takes that one's. */
+            if (ev.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED && sdl_picture_now() == 2
+                && !getenv("RECOMP_WIDE_ASPECT")) {
+                nv2a_set_picture(2, sdl_screen_aspect(), 0);
+                fprintf(stderr, "[WIN] another screen: picture 21:9 at %.3f:1\n", (double)nv2a_wide_aspect());
+            }
+#endif
             break;
 #if defined(_WIN32)
         case SDL_SYSWMEVENT:
@@ -5291,10 +5354,108 @@ void nv2a_set_wide_aspect(float a)
 }
 float nv2a_wide_aspect(void) { return g_wide_aspect; }
 float nv2a_wide_squeeze(void) { return g_wide_s; }
+/* The windows' Video menus (Mac, Windows, Linux) offer three pictures: 4:3,
+ * 16:9 and 21:9. "21:9" is an ultrawide screen's own shape when the window
+ * is on one -- 2560x1080 is 2.370:1, 3440x1440 2.389:1, 3840x1600 2.4:1 --
+ * so the picture fills it exactly; on any other screen it is 64:27, the
+ * 2.370:1 that "21:9" is sold as, between bars above and below. */
+float nv2a_ultrawide_aspect(float screen);
+float nv2a_ultrawide_aspect(float screen)
+{
+    if (screen >= 2.2f) return screen < 2.4f ? screen : 2.4f;
+    return 64.0f / 27.0f;
+}
+/* A window's picture: 0 4:3, 1 16:9, 2 21:9, on a screen of shape `screen`
+ * (width over height). `apply` switches widescreen too -- a choice made in
+ * the menu; at start-up, whether it is on is nv2a_widescreen's to read, from
+ * RECOMP_WIDESCREEN or the stored choice. RECOMP_WIDE_ASPECT, a test's, keeps
+ * its shape. */
+void nv2a_set_picture(int pic, float screen, int apply);
+void nv2a_set_picture(int pic, float screen, int apply)
+{
+    const char *v = getenv("RECOMP_WIDE_ASPECT");
+    if (apply) nv2a_set_widescreen(pic != 0);
+    if (!(v && atof(v) > 0.0))
+        nv2a_set_wide_aspect(pic == 2 ? nv2a_ultrawide_aspect(screen) : 16.0f / 9.0f);
+}
 static int g_wide_squeeze;   /* this draw's 2D squeeze, set in do_draw */
 static float g_wide_shift;   /* this draw's framed-3D move, title pixels, ditto */
+static float g_wide_anchor;  /* this draw's move to a screen edge, NDC (see wide_hud_sheet) */
+static int g_wide_fill;      /* this draw is a quad filling the 4:3 view, widened (do_draw) */
 static Nv2aRenderState g_draw_rs;   /* the state this draw was given */
 static float g_wide_ext[4];  /* its x and y extent, for the draw log */
+
+/* ---- the HUD at the screen's edges, in widescreen ---------------------------
+ *
+ * The squeeze above keeps every overlay its shape by drawing it into the
+ * middle 4:3 of the wide screen. For menus and dialogue that is right -- they
+ * are compositions centred on the screen -- but the in-game HUD is pinned to
+ * the 4:3 screen's corners: the health bar, the spray cans and a race's rival
+ * at the top right, the gauge at the bottom right (the timer is at the top
+ * centre). Kept in the middle 4:3 they ended 82% of the way across a 16:9
+ * screen and 74% across 21:9.
+ *
+ * The HUD draws its pieces from one texture, a 256x256 DXT3 sheet of them --
+ * the bars, the digits, the can, the icons -- while the dialogue box, the
+ * menus and their text have sheets of their own. So a flat piece of that
+ * sheet drawn wholly in the right part of the 4:3 screen (from 0.1 of the
+ * half-width right of centre) goes with the right edge, one wholly in the
+ * left part with the left edge, and the rest -- the timer -- stays centred.
+ * Moved by the width the squeeze took away, 1 - s of the half-width (a
+ * quarter at 16:9), a piece is as far from its edge as on the console, in
+ * the screen's height. The HUD's few pieces drawn in 3D (the can, the icon of
+ * the rival in a race) come right after the flat ones and go with them.
+ *
+ * The sheet is told by its content, not by where it is in memory.
+ * RECOMP_WIDE_HUD=0: the HUD in the middle 4:3, as before. */
+static int wide_hud_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("RECOMP_WIDE_HUD"); on = !(v && v[0] == '0'); }
+    return on;
+}
+/* The content hash (tex_content) of the texture a stage is bound to, from
+ * the texture cache: 0 if it has not been made yet. */
+static uint32_t tcache_content_of(const TexStage *t)
+{
+    uint32_t key = (t->offset ^ (t->width << 16) ^ (t->height << 4) ^ t->color) * 2246822519u, i;
+    for (i = 0; i < TEX_CACHE; i++) {
+        uint32_t k = (key + i) % TEX_CACHE;
+        if (!g_tcache[k].used) break;
+        if (g_tcache[k].tex && g_tcache[k].offset == t->offset && g_tcache[k].format == t->color
+            && g_tcache[k].w == t->width && g_tcache[k].h == t->height)
+            return g_tcache[k].content;
+    }
+    return 0;
+}
+/* The sheet's tex_content: the same in every mission measured (City Rush,
+ * Dogenzaka Hill, the Fortified Residential Zone), wherever it is loaded. */
+#ifndef WIDE_HUD_SHEET
+#define WIDE_HUD_SHEET 0x35732389u
+#endif
+static int wide_hud_sheet(const TexStage *t)
+{
+    static uint32_t said[8]; static int nsaid;
+    static int mode = -1; static uint32_t want;
+    uint32_t c;
+    int i, hit;
+    if (!t->enabled || t->width != 256 || t->height != 256 || t->color != 0x0E) return 0;
+    if (mode < 0) {
+        /* RECOMP_WIDE_HUD_SHEET (test only): another hash, or @address. */
+        const char *v = getenv("RECOMP_WIDE_HUD_SHEET");
+        mode = (v && v[0] == '@') ? 1 : 0;
+        want = v ? (uint32_t)strtoul(v + mode, NULL, 16) : WIDE_HUD_SHEET;
+    }
+    c = tcache_content_of(t);
+    hit = mode ? t->offset == want : (c != 0 && c == want);
+    for (i = 0; i < nsaid; i++) if (said[i] == (t->offset ^ c)) break;
+    if (i == nsaid && nsaid < 8) {
+        said[nsaid++] = t->offset ^ c;
+        fprintf(stderr, "[WIDEHUD] 256x256 DXT3 at %08X, content %08X: %s\n", t->offset, c,
+                hit ? "the HUD's sheet" : "not the HUD's");
+    }
+    return hit;
+}
 
 /* One attribute array a draw reads, resolved once per draw: see do_draw. */
 typedef struct {
@@ -6750,6 +6911,80 @@ static void do_draw_body(void)
           if (nosq < 0) nosq = getenv("RECOMP_WIDE_NOSQUEEZE") ? 1 : 0;
           if (nosq) g_wide_squeeze = 0; }
     }
+    /* The HUD's pieces to the screen's edges (see wide_hud_sheet): a flat one
+     * by where it is; a 3D one, drawn right after a flat one that moved (or
+     * after a 3D one that did), with it. The pause screen draws its banners
+     * from the same sheet in 3D, with no flat piece of it before them, and
+     * they stay where they are. */
+    g_wide_anchor = 0.0f;
+    { static uint32_t hud_next = 0xFFFFFFFFu; static int hud_side;
+      if (nv2a_wide_scene() && wide_hud_on() && S.clip_w == 640 && S.clip_h == 480
+          && g_wide_s < 0.999f && S.tex[0].enabled) {
+          int flat = S.xf_mode != NV2A_XF_MODE_FIXED && g_pcache[slot].inputs == 0x1F9B;
+          if (flat && g_wide_squeeze && wide_hud_sheet(&S.tex[0])) {
+              hud_side = g_wide_ext[0] >= 0.1f ? 1 : g_wide_ext[1] <= -0.1f ? -1 : 0;
+              g_wide_anchor = (float)hud_side * (1.0f - g_wide_s);
+              hud_next = hud_side ? S.draws + 1 : 0xFFFFFFFFu;
+          } else if (!flat && out_n <= 32 && hud_side && S.draws == hud_next
+                     && wide_hud_sheet(&S.tex[0])) {
+              g_wide_anchor = (float)hud_side * (1.0f - g_wide_s);
+              hud_next = S.draws + 1;
+          }
+          if (g_wide_anchor != 0.0f) {
+              static int said;
+              if (said < 24) {
+                  said++;
+                  fprintf(stderr, "[WIDEHUD] flip %u draw %u: %s, %u vertices, x %.2f..%.2f y %.2f..%.2f "
+                          "-> %s edge (%+.3f)\n", S.flips, S.since_present, flat ? "flat" : "3D", out_n,
+                          g_wide_ext[0], g_wide_ext[1], g_wide_ext[2], g_wide_ext[3],
+                          g_wide_anchor > 0.0f ? "the right" : "the left", (double)g_wide_anchor);
+              }
+          }
+      } }
+    /* A quad that fills the screen from in front of the camera -- the boost
+     * dash's heat haze, which bends the scene drawn again small (a bump-
+     * mapped quad over a 128x128 copy of it). The title sizes it to fill its
+     * 4:3 view; through the widened camera it covered the middle 4:3 of the
+     * wide screen, with the edges of the haze in plain view at 12.5% and
+     * 87.5% of the width. A fixed-function draw of eight vertices or fewer
+     * whose corners land on that middle 4:3 -- the squeezed 4:3 screen, to a
+     * few pixels -- is widened to fill the screen (see the matrix it is
+     * drawn with, NV2A_U_FFMAT), the copy it samples with it. RECOMP_WIDE_FILL=0:
+     * as before. */
+    g_wide_fill = 0;
+    { static int on = -1;
+      if (on < 0) { const char *v = getenv("RECOMP_WIDE_FILL"); on = !(v && v[0] == '0'); }
+      if (on && nv2a_wide_scene() && S.xf_mode == NV2A_XF_MODE_FIXED && !vc_vb && attr_at[0] >= 0
+          && out_n >= 3 && out_n <= 8 && S.clip_w == 640 && S.clip_h == 480 && g_wide_s < 0.999f) {
+          const float (*mm)[4] = S.u.ff_mat;
+          float xlo = 1e30f, xhi = -1e30f, ylo = 1e30f, yhi = -1e30f, c = 0.5f * (float)g_fbo_w;
+          float tol = 0.008f * (float)g_fbo_w;
+          uint32_t q;
+          int ok = 1;
+          for (q = 0; q < out_n && ok; q++) {
+              const float *v = &vbuf[(size_t)q * stride_floats + (size_t)attr_at[0]];
+              float X = v[0] * mm[0][0] + v[1] * mm[0][1] + v[2] * mm[0][2] + v[3] * mm[0][3];
+              float Y = v[0] * mm[1][0] + v[1] * mm[1][1] + v[2] * mm[1][2] + v[3] * mm[1][3];
+              float W = v[0] * mm[3][0] + v[1] * mm[3][1] + v[2] * mm[3][2] + v[3] * mm[3][3];
+              if (!(W > 1e-6f)) { ok = 0; break; }
+              X /= W; Y /= W;
+              if (X < xlo) xlo = X;
+              if (X > xhi) xhi = X;
+              if (Y < ylo) ylo = Y;
+              if (Y > yhi) yhi = Y;
+          }
+          if (ok && fabsf(xlo - (c - g_wide_s * c)) < tol && fabsf(xhi - (c + g_wide_s * c)) < tol
+              && fabsf(ylo) < tol && fabsf(yhi - (float)g_fbo_h) < tol) {
+              static int said;
+              g_wide_fill = 1;
+              if (said < 6) {
+                  said++;
+                  fprintf(stderr, "[WIDEFILL] flip %u draw %u: %u vertices on %.1f..%.1f x %.1f..%.1f "
+                          "(the squeezed 4:3 screen) -- widened to fill it\n",
+                          S.flips, S.since_present, out_n, xlo, xhi, ylo, yhi);
+              }
+          }
+      } }
     /*
      * A 3D view inside a 2D frame -- the character select's two windows onto
      * the stage, a split screen. The title points it at a part of the screen
@@ -7133,7 +7368,16 @@ static void do_draw_body(void)
         G->uniform_f(NV2A_U_ZREV, r, 1);
     }
     if (uses(slot, NV2A_U_FFMAT)) {
-        G->uniform_f(NV2A_U_FFMAT, &S.u.ff_mat[0][0], 4);
+        if (g_wide_fill) {
+            /* Widened about the screen's centre c: x' = c + (x - c) / s, in
+             * the pixels the matrix lands in -- X' = X/s + c(1 - 1/s) W. */
+            float wm[4][4], c = 0.5f * (float)g_fbo_w, k = 1.0f / g_wide_s;
+            int j;
+            memcpy(wm, S.u.ff_mat, sizeof wm);
+            for (j = 0; j < 4; j++) wm[0][j] = wm[0][j] * k + c * (1.0f - k) * wm[3][j];
+            G->uniform_f(NV2A_U_FFMAT, &wm[0][0], 4);
+        } else
+            G->uniform_f(NV2A_U_FFMAT, &S.u.ff_mat[0][0], 4);
         if (uses(slot, NV2A_U_FFVPOFF)) {
             /* The viewport offset register less the driver's 0.53125 nudge,
              * as the programmable path takes it off (vpRect): the nudge
@@ -7213,11 +7457,24 @@ static void do_draw_body(void)
      * (x - vpOff.x) / vpScale.x, so 1/s more scale is s the width (at 16:9,
      * 4/3 more scale and 3/4 the width). */
     float vp_scale_eff[4];
+    float wshift = g_wide_shift;
     memcpy(vp_scale_eff, S.u.vp_scale, sizeof vp_scale_eff);
     if (g_wide_squeeze) vp_scale_eff[0] *= 1.0f / g_wide_s;
+    /* A HUD piece's move to the edge (g_wide_anchor, NDC) in the shift's
+     * title pixels: the fixed-function epilogue divides by half the surface,
+     * a program's by its viewport scale -- squeezed or not -- and then maps
+     * the viewport onto the surface (vpRect). */
+    if (g_wide_anchor != 0.0f) {
+        float half = 0.5f * (float)g_fbo_w;
+        if (S.xf_mode == NV2A_XF_MODE_FIXED) wshift -= g_wide_anchor * half;
+        else {
+            float rz = fabsf(S.u.vp_scale[0]) > 1e-6f ? fabsf(S.u.vp_scale[0]) : half;
+            wshift -= g_wide_anchor * vp_scale_eff[0] * half / rz;
+        }
+    }
     if (memcmp(g_last.vp_scale, vp_scale_eff, sizeof vp_scale_eff)
      || memcmp(g_last.vp_off, S.u.vp_off, sizeof S.u.vp_off)
-     || g_last.wide_shift != g_wide_shift
+     || g_last.wide_shift != wshift
      || g_last.fbo_w != g_fbo_w || g_last.fbo_h != g_fbo_h) {
         /* The viewport, whenever it or the surface it is on changes: vpSurface
          * and vpRect hold the surface's size, and a title can draw to a
@@ -7258,10 +7515,10 @@ static void do_draw_body(void)
             }
             G->uniform_f(NV2A_U_VPRECT, r, 1);
         }
-        uni1f(NV2A_U_WIDESHIFT, g_wide_shift);
+        uni1f(NV2A_U_WIDESHIFT, wshift);
         memcpy(g_last.vp_scale, vp_scale_eff, sizeof vp_scale_eff);
         memcpy(g_last.vp_off, S.u.vp_off, sizeof S.u.vp_off);
-        g_last.wide_shift = g_wide_shift;
+        g_last.wide_shift = wshift;
         g_last.fbo_w = g_fbo_w; g_last.fbo_h = g_fbo_h;
     }
 
@@ -7567,6 +7824,10 @@ static void do_draw_body(void)
           if (g_wide_squeeze || g_wide_shift != 0.0f) {
               float c = 0.5f * (float)g_fbo_w;
               float a = c + g_wide_s * ((float)cx0 - c), b = c + g_wide_s * ((float)cx1 - c);
+              /* A HUD piece moved to an edge takes its 4:3 screen with it:
+               * what the title parks past that screen's edge stays out of
+               * sight, past the wide screen's. */
+              if (g_wide_squeeze) { a += g_wide_anchor * c; b += g_wide_anchor * c; }
               cx0 = a > 0.0f ? (uint32_t)floorf(a) : 0u;
               cx1 = b > 0.0f ? (uint32_t)ceilf(b) : 0u;
               clip = 1;
@@ -10313,7 +10574,7 @@ static void do_draw_body(void)
                 "blend %d %04X/%04X depth %d/%d ctl %08X final %08X/%08X "
                 "| xf%u a9 off=%08X t%u s%u st%u u[%.3f..%.3f] v[%.3f..%.3f] "
                 "in%04X | sten %u f%X r%X m%X w%X op%X/%X/%X dfunc %X cm %08X | cull %d %X %X zc %X"
-                " | a0 off=%08X st%u p0 %.3f %.3f %.3f box %.3f..%.3f %.3f..%.3f %.3f..%.3f%s%s\n",
+                " | a0 off=%08X st%u p0 %.3f %.3f %.3f box %.3f..%.3f %.3f..%.3f %.3f..%.3f%s%s%s%s\n",
                 (long)S.flips, S.since_present, out_n, S.prim, slot,
                 S.u.vp_off[0] > 100.0f ? "3D" : "2D",
                 S.tex[0].offset, S.tex[0].width, S.tex[0].height,
@@ -10332,7 +10593,9 @@ static void do_draw_body(void)
                 S.attr[0].offset, S.attr[0].stride, p0[0], p0[1], p0[2],
                 plo[0], phi[0], plo[1], phi[1], plo[2], phi[2],
                 g_imm_drawing ? " | IMMEDIATE" : "",
-                g_wide_squeeze ? " | WIDE-SQUEEZED" : "");
+                g_wide_squeeze ? " | WIDE-SQUEEZED" : "",
+                g_wide_anchor > 0.0f ? " | HUD-RIGHT" : g_wide_anchor < 0.0f ? " | HUD-LEFT" : "",
+                g_wide_fill ? " | WIDE-FILL" : "");
         if (nv2a_wide_scene() && g_pcache[slot].inputs == 0x1F9B)
             fprintf(stderr, "[DRAW] f%ld %4u   2D ndc x[%.2f..%.2f] y[%.2f..%.2f]%s\n",
                     (long)S.flips, S.since_present, g_wide_ext[0], g_wide_ext[1],
