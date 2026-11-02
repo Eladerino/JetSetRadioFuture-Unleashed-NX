@@ -76,7 +76,8 @@ Two renderer guards belong to the same story:
 
 ## Measured state
 
-- Current release (v0.2.0, the GL device thread on by default,
+- Current release (v0.3.0, standing on the v0.2.0 cycle's
+  measurements, the GL device thread on by default,
   mem 2366 MHz): the garage holds the 60 fps cap, Shibuya
   Terminal and Dogenzaka Hill sit near 60 with their busiest
   views around 50, Chuo Street around 57, and 99th Street
@@ -100,6 +101,9 @@ Two renderer guards belong to the same story:
   fast path is live in a build.
 - A 470-second soak on the current delivery machinery completed
   with no freeze and no crash, 2,190 software methods delivered.
+- The guest heap lock (v0.3.0) soaked across runs 27, 28, 30
+  and 31, about an hour of play with saves and loads, with no
+  corruption and no freeze attributable to it.
 
 ## Open items
 
@@ -123,13 +127,25 @@ Two renderer guards belong to the same story:
   visible share of the GPU thread; whether more is worth taking
   there is a profiling question, answered by prof.sh over a
   heavy-scene run.
-- fast_gpu's default-on status is recent. A longer soak across
-  more stages is still the deciding evidence for keeping it.
-  The same applies to the GL device thread that v0.2.0 made the
-  default.
-- **Draw-distance census.** RECOMP_GL_DEPTHLOG=1 counts draws
-  by distance from the camera in 99th Street and Shibuya. If
-  99th Street's extra world draws sit in the far bands, an
-  opt-in shorter draw distance (off by default) has something
-  to cut; if they are up close, the idea is closed. The run is
-  still owed.
+- fast_gpu and the GL device thread have both been the default
+  through two releases and many hours of soak since. The one
+  exception on the record is the freeze below.
+- **One freeze (run 29).** In Rokkaku-dai Heights the game
+  thread waited inside KeWaitForSingleObject for at least
+  24 seconds while the GPU ring sat empty: a lost wake in the
+  completion path, cause unproven. It has not recurred in
+  about thirty minutes of retesting since (runs 30 and 31,
+  the same area included). Since v0.3.0 the frame watchdog
+  names both sides of the GPU wait when it trips, so a
+  recurrence identifies itself; that log is the evidence to
+  send.
+- **Stock-clock measurements.** Every figure in these notes is
+  at the overclock above. A stock-clock pass over the same
+  areas is owed; the v0.3.0 release notes promise it publicly.
+- **Draw distance. Closed.** The census ran (run 25), the
+  trial option was built and tested on hardware (run 31),
+  and every threshold, 1024 included, broke the skybox and
+  the water: single huge draws span near and far, so a
+  three-sample distance test cannot spare them. Removed.
+  The only route back is testing every vertex, which is not
+  planned.
