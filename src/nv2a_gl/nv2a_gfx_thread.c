@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(NV2A_GL_USE_SDL)
 #include <SDL2/SDL.h>
@@ -114,16 +115,72 @@ static void wake_producer(void)
     }
 }
 
-/* The producer waits for `ok` to hold: a spin, then sleep. */
+/* ---- RECOMP_GL_SPLIT: the worker's account of itself -----------------------
+ *
+ * The GLPROF categories in nv2a_gl.c time the device calls on the walk
+ * thread, where a call is a ring write; the driver time is paid here, on
+ * the worker, and the worker used to report none of it. With
+ * RECOMP_GL_SPLIT=1 the worker times its own replay, grouped the way the
+ * driver question is asked (draws, binds, uploads, program creation,
+ * present, the rest), and the producer adds up what it spends waiting
+ * for the worker in PROD_WAIT below. nv2a_gl.c reads both back once a
+ * second through nv2a_gfx_thread_split and prints them beside the rest
+ * of GLPROF. Off, which is the default, nothing here runs: the worker
+ * takes no clock reads and the producer waits exactly as before. */
+enum { SPLIT_DRAWS, SPLIT_BINDS, SPLIT_UPLOADS, SPLIT_PROGNEW,
+       SPLIT_PRESENT, SPLIT_OTHER, SPLIT_GROUPS };
+
+static int g_split_on = -1;
+static double g_split_ms[SPLIT_GROUPS];        /* the worker's */
+static unsigned long g_split_n[SPLIT_GROUPS];  /* the worker's */
+static double g_split_stall;                   /* the producer's */
+
+static int split_on(void)
+{
+    if (g_split_on < 0) g_split_on = getenv("RECOMP_GL_SPLIT") ? 1 : 0;
+    return g_split_on;
+}
+
+static double split_now(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+static int split_group(uint32_t op)
+{
+    switch (op) {
+    case OP_DRAW: case OP_DRAW_INDEXED: return SPLIT_DRAWS;
+    case OP_PROG_USE: case OP_TEXTURE: case OP_STATE: return SPLIT_BINDS;
+    case OP_VERTICES: case OP_VBUF_FILL:
+    case OP_TEX_NEW: case OP_TEX_NEW_DXT:
+    case OP_UNIFORM_F: case OP_UNIFORM_F_PART: case OP_UNIFORM_I:
+        return SPLIT_UPLOADS;
+    case OP_PROG_NEW: return SPLIT_PROGNEW;
+    case OP_PRESENT: return SPLIT_PRESENT;
+    default: return SPLIT_OTHER;
+    }
+}
+
+/* The producer waits for `ok` to hold: a spin, then sleep. With the split
+ * on, a wait that actually waits is timed: the stall is the part of the
+ * worker's pace the frame pays for directly, where replay the walk never
+ * waits on is hidden behind the next segment's decode. */
 #define PROD_WAIT(ok) do {                                                    \
-    int spin_ = 0;                                                            \
-    while (!(ok)) {                                                           \
-        if (++spin_ < 4000) continue;                                         \
-        SDL_LockMutex(g_mu);                                                  \
-        __atomic_store_n(&g_prod_sleeps, 1, __ATOMIC_SEQ_CST);                \
-        if (!(ok)) SDL_CondWaitTimeout(g_cv_prod, g_mu, 2);                   \
-        __atomic_store_n(&g_prod_sleeps, 0, __ATOMIC_SEQ_CST);                \
-        SDL_UnlockMutex(g_mu);                                                \
+    if (!(ok)) {                                                              \
+        int pw_on_ = split_on();                                              \
+        double pw_t0_ = pw_on_ ? split_now() : 0.0;                           \
+        int spin_ = 0;                                                        \
+        while (!(ok)) {                                                       \
+            if (++spin_ < 4000) continue;                                     \
+            SDL_LockMutex(g_mu);                                              \
+            __atomic_store_n(&g_prod_sleeps, 1, __ATOMIC_SEQ_CST);            \
+            if (!(ok)) SDL_CondWaitTimeout(g_cv_prod, g_mu, 2);               \
+            __atomic_store_n(&g_prod_sleeps, 0, __ATOMIC_SEQ_CST);            \
+            SDL_UnlockMutex(g_mu);                                            \
+        }                                                                     \
+        if (pw_on_) g_split_stall += split_now() - pw_t0_;                    \
     }                                                                         \
 } while (0)
 
@@ -826,7 +883,21 @@ static int SDLCALL worker(void *arg)
             const Hdr *h = (const Hdr *)(g_ring + r % RING_BYTES);
             uint64_t next = r + sizeof(Hdr) + h->len;
             uint64_t seq = h->seq;
-            if (h->op != OP_WRAP) run_one(h);
+            if (h->op != OP_WRAP) {
+                if (split_on()) {
+                    /* Two clock reads per entry, on the worker only. It
+                     * replays thousands of entries a frame, not the
+                     * millions of methods the walk decodes, so the reads
+                     * stay a small fraction of the time they measure. */
+                    uint32_t op = h->op;
+                    double t0 = split_now();
+                    int g;
+                    run_one(h);
+                    g = split_group(op);
+                    g_split_ms[g] += split_now() - t0;
+                    g_split_n[g]++;
+                } else run_one(h);
+            }
             r = next;
             st(&g_r, r);
             if (seq) st(&g_done, seq);
@@ -839,6 +910,35 @@ static int SDLCALL worker(void *arg)
 /* ---- for nv2a_gl.c ------------------------------------------------------------- */
 
 int nv2a_gfx_thread_on(void) { return g_on; }
+
+/* One report interval of the split counters, emptied into the caller's
+ * arrays (groups in the order of the enum above: draws, binds, uploads,
+ * program creation, present, other), with the producer's stall time and
+ * the frames the worker finished in the interval. Returns 0, and touches
+ * nothing, while RECOMP_GL_SPLIT is off. The worker may be adding to a
+ * counter while it is read here; a sample landing either side of the
+ * reset is the accepted price of not locking the replay for a
+ * diagnostic. */
+int nv2a_gfx_thread_split(double ms[6], unsigned long n[6],
+                          double *stall_ms, uint64_t *frames)
+{
+    static uint64_t prev_frames;
+    uint64_t fd;
+    int i;
+    if (!split_on()) return 0;
+    for (i = 0; i < SPLIT_GROUPS; i++) {
+        ms[i] = g_split_ms[i];
+        n[i] = g_split_n[i];
+        g_split_ms[i] = 0.0;
+        g_split_n[i] = 0;
+    }
+    *stall_ms = g_split_stall;
+    g_split_stall = 0.0;
+    fd = ld(&g_frames_done);
+    *frames = fd - prev_frames;
+    prev_frames = fd;
+    return 1;
+}
 
 /* The real target behind one of ours, on the worker (inside a run). */
 uint32_t nv2a_gfx_thread_real_target(uint32_t rt) { return real_of(K_RT, rt); }
@@ -946,6 +1046,12 @@ const Nv2aGfx *nv2a_gfx_thread_start(const Nv2aGfx *real, void (*release)(void),
 #else  /* no SDL: no thread */
 
 int nv2a_gfx_thread_on(void) { return 0; }
+int nv2a_gfx_thread_split(double ms[6], unsigned long n[6],
+                          double *stall_ms, uint64_t *frames)
+{
+    (void)ms; (void)n; (void)stall_ms; (void)frames;
+    return 0;
+}
 uint32_t nv2a_gfx_thread_real_target(uint32_t rt) { return rt; }
 const Nv2aGfx *nv2a_gfx_thread_start(const Nv2aGfx *real, void (*release)(void),
                                      int (*take)(void))
