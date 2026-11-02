@@ -4460,8 +4460,6 @@ __attribute__((weak)) int nv_window_pref_rstick_camera(void);
 __attribute__((weak)) int nv_window_pref_rstick_camera(void) { return 0; }   /* no switch: off */
 __attribute__((weak)) int nv_window_pref_rstick_ease(void);
 __attribute__((weak)) int nv_window_pref_rstick_ease(void) { return 1; }   /* no switch: upstream's ease back */
-__attribute__((weak)) int nv_window_pref_rstick_steer(void);
-__attribute__((weak)) int nv_window_pref_rstick_steer(void) { return 0; }   /* no switch: the game's own steering */
 
 #define RCAM_DEAD   0.20f      /* of full deflection: a resting stick drifts */
 /* The speed: what is past the dead zone, to the power 1.5 -- fine near the
@@ -4498,7 +4496,6 @@ static struct {
     float    yaw, pitch;       /* the turn, radians: to the right, and up */
     float    anchor;           /* locked: the held view direction, radians */
     int      anchored;         /* locked: the anchor is live */
-    float    turn;             /* locked: the turn applied on the last camera frame */
     float    idle;             /* seconds since the stick was let go */
     double   last;             /* when the turn was last worked out */
     uint32_t last_frame;       /* and at which of the game's frames (s_rcam_frames) */
@@ -4531,24 +4528,6 @@ static void rcam_note_pad(XBOX_INPUT_STATE *s)
     if (jsrf_now() < s_rcam.active_until) {
         s->Gamepad.sThumbRX = 0;
         s->Gamepad.sThumbRY = 0;
-    }
-    /* Locked, experimental, and a choice (nv_window_pref_rstick_steer):
-     * the left stick is turned by the same angle
-     * the view was turned, so steering is referenced to the view on
-     * screen -- up is up-screen, most noticeable from a standstill.
-     * The anchor only exists in locked, and only inside the same
-     * active window as above: menus, conversations and events keep
-     * the stock stick. A pure rotation, so the stick's magnitude and
-     * the game's deadzone are untouched. If the standstill test shows
-     * the mapping turned the wrong way, the angle's sign is the fix. */
-    if (nv_window_pref_rstick_steer() && s_rcam.anchored && jsrf_now() < s_rcam.active_until && s_rcam.turn != 0.0f) {
-        float lx = (float)s->Gamepad.sThumbLX, ly = (float)s->Gamepad.sThumbLY;
-        if (lx != 0.0f || ly != 0.0f) {
-            float c = cosf(s_rcam.turn), n = sinf(s_rcam.turn);
-            float x = lx * c - ly * n, y = lx * n + ly * c;
-            s->Gamepad.sThumbLX = (int16_t)lrintf(x < -32768.0f ? -32768.0f : x > 32767.0f ? 32767.0f : x);
-            s->Gamepad.sThumbLY = (int16_t)lrintf(y < -32768.0f ? -32768.0f : y > 32767.0f ? 32767.0f : y);
-        }
     }
 }
 
@@ -4704,7 +4683,6 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
                 s_rcam.yaw = s_rcam.anchor - base;
                 while (s_rcam.yaw >  3.14159265f) s_rcam.yaw -= 6.28318531f;
                 while (s_rcam.yaw < -3.14159265f) s_rcam.yaw += 6.28318531f;
-                s_rcam.turn = s_rcam.yaw;
             }
         }
         ca = cosf(s_rcam.yaw); sa = sinf(s_rcam.yaw);

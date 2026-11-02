@@ -1677,21 +1677,6 @@ static void nv_window_set_rstick_ease(int on)
     sdl_cfg_set("rstick_easeback", g_rstick_ease);
     fprintf(stderr, "[WIN] the camera eases back when released: %s\n", on ? "on" : "off");
 }
-/* Whether steering follows the locked view (port/recomp_manual.c):
- * kept as rstick_steer=, off unless turned on -- it is experimental. */
-static volatile int g_rstick_steer = -1;
-int nv_window_pref_rstick_steer(void);
-int nv_window_pref_rstick_steer(void)
-{
-    if (g_rstick_steer < 0) g_rstick_steer = sdl_cfg_get("rstick_steer", 0) != 0;
-    return g_rstick_steer;
-}
-static void nv_window_set_rstick_steer(int on)
-{
-    g_rstick_steer = on ? 1 : 0;
-    sdl_cfg_set("rstick_steer", g_rstick_steer);
-    fprintf(stderr, "[WIN] steering follows the locked view: %s\n", on ? "on" : "off");
-}
 /* Asked for from another thread (the Android app's settings): done at the
  * next sdl_pump, by the thread that owns the window and the settings file. */
 static volatile int g_sdl_want_rcam = -1;
@@ -2127,11 +2112,6 @@ static void sdl_set_rstick_camera(int mode)
     sdl_menu_update();
 }
 
-static void sdl_toggle_rstick_steer(void)
-{
-    nv_window_set_rstick_steer(!nv_window_pref_rstick_steer());
-}
-
 static void sdl_toggle_rstick_ease(void)
 {
     nv_window_set_rstick_ease(!nv_window_pref_rstick_ease());
@@ -2504,13 +2484,6 @@ static void sdl_menu_register(void)
           .tip = "After you let go of the right stick, the view drifts "
                  "back behind the skater. Off, the view stays where you "
                  "left it; the left trigger still resets it." },
-        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
-          .label = "Steering follows the view (locked)",
-          .state = nv_window_pref_rstick_steer, .run = sdl_toggle_rstick_steer,
-          .tip = "With Camera (locked), the left stick steers by the "
-                 "screen instead of by the skater, so up is up-screen "
-                 "even from a standstill. Experimental. Off, steering "
-                 "is the game's own." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Nintendo layout (A/B, X/Y)",
           .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout,
