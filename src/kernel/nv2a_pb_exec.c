@@ -1420,6 +1420,44 @@ volatile uint32_t g_pb_fence_word, g_pb_fence_val, g_pb_fence_at;
 volatile unsigned long g_pb_fence_n;
 static int s_sem_base_known;
 
+/* The freeze watchdog's view of this executor (kernel_bridge.c calls it
+ * through a weak reference when the picture stops): everything a lost
+ * fence wake wants compared, in one line -- what D3D last handed out
+ * and where the title polls, against what the walk last executed and
+ * where this executor's releases actually land, and how much of the
+ * ring is copied but not yet walked. Read-only: the watchdog runs on
+ * the kernel timer thread and takes no guest lock, so every field is
+ * read as it lies, racy edges and all. */
+void nv2a_pb_exec_frozen_dump(void)
+{
+    extern uint32_t g_pb_cmd_va;
+    extern void xbox_nv2a_copy_state(uint32_t *copied, int *eager);
+    uint8_t *m = (uint8_t *)xbox_GetMemoryOffset();
+    uint32_t dev = *(volatile uint32_t *)(m + 0x0019DCE0u);
+    uint32_t newest = 0, poll_va = 0, poll_val = 0, copy = 0;
+    uint32_t sem_va = dma_resolve(s_sem_base + s_sem_offset);
+    uint32_t sem_val = (sem_va >= 0x1000u && sem_va + 4 <= 0xFFFFFFFCu)
+                     ? *(volatile uint32_t *)(m + sem_va) : 0;
+    int eager = 0;
+    if (dev >= 0x1000u && dev < (64u << 20)) {
+        newest = *(volatile uint32_t *)(m + dev + 0x30u);
+        poll_va = *(volatile uint32_t *)(m + dev + 0x34u);
+        if (poll_va >= 0x1000u && (poll_va < (64u << 20)
+            || (poll_va >= 0x80000000u && poll_va < 0x80000000u + (64u << 20))))
+            poll_val = *(volatile uint32_t *)(m + poll_va);
+    }
+    xbox_nv2a_copy_state(&copy, &eager);
+    fprintf(stderr, "  [FROZEN] GPU waits: D3D handed out %u, polls 0x%08X (reads %u); "
+                    "walk's last fence value %u at ring 0x%08X (word 0x%08X), %lu executed; "
+                    "copied to 0x%08X, walk at 0x%08X%s; "
+                    "semaphore handle 0x%08X base 0x%08X offset 0x%08X -> 0x%08X (reads %u)\n",
+            newest, poll_va, poll_val,
+            g_pb_fence_val, g_pb_fence_at, g_pb_fence_word, g_pb_fence_n,
+            copy, g_pb_cmd_va, eager ? " (eager)" : "",
+            s_sem_handle, s_sem_base, s_sem_offset, sem_va, sem_val);
+    fflush(stderr);
+}
+
 /* The physical base of a DMA object, by its handle, through the RAMHT the
  * title's driver built in instance memory (xemu pfifo.c ramht_lookup and
  * nv2a.c nv_dma_load). The NV2A aperture is plain memory in this runtime, so

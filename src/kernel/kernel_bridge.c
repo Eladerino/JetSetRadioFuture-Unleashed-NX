@@ -7492,6 +7492,9 @@ static void kernel_freeze_watch(void)
                         "the title's ISR\n", g_apu_raised, g_apu_claimed);
     }
     kthread_report();
+    {   extern void nv2a_pb_exec_frozen_dump(void) __attribute__((weak));
+        if (nv2a_pb_exec_frozen_dump) nv2a_pb_exec_frozen_dump();
+    }
 #ifdef __APPLE__
     {   long i, n = g_kthread_n;
         for (i = 0; i < n; i++)
