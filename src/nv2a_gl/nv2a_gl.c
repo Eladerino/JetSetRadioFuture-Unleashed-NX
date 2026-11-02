@@ -1638,27 +1638,27 @@ int nv_window_pref_widescreen(void) { return sdl_cfg_get("widescreen", 0) != 0; 
 
 /* The camera on the right stick (port/recomp_manual.c): 1 the camera (the
  * default), 2 tracking -- the view turns and the skater keeps his heading --
- * 3 locked -- the view keeps the direction it was left in -- or 0 off.
- * Controls in the window's menu bar on Windows, F7 anywhere (and
+ * or 0 off. Controls in the window's menu bar on Windows, F7 anywhere (and
  * the Android app's settings); on the Switch, the in-game menu's Controller
- * page. Kept as rstick_camera= (0 for off), rstick_tracking= and
- * rstick_locked=. Asked every frame, so the file is read once. */
+ * page. Kept as rstick_camera= (0 for off) and rstick_tracking=. The
+ * rstick_locked= key from v0.3.0's short-lived locked mode reads as
+ * tracking; nothing writes it any more. Asked every frame, so the file
+ * is read once. */
 static volatile int g_rstick_cam = -1;
 int nv_window_pref_rstick_camera(void);
 int nv_window_pref_rstick_camera(void)
 {
     if (g_rstick_cam < 0)
-        g_rstick_cam = sdl_cfg_get("rstick_camera", 1) ? (sdl_cfg_get("rstick_locked", 0) ? 3 : sdl_cfg_get("rstick_tracking", 0) ? 2 : 1) : 0;
+        g_rstick_cam = sdl_cfg_get("rstick_camera", 1) ? (sdl_cfg_get("rstick_tracking", 0) || sdl_cfg_get("rstick_locked", 0) ? 2 : 1) : 0;
     return g_rstick_cam;
 }
 static void nv_window_set_rstick_camera(int mode)
 {
-    g_rstick_cam = mode < 0 ? 0 : mode > 3 ? 3 : mode;
+    g_rstick_cam = mode < 0 ? 0 : mode > 2 ? 2 : mode;
     sdl_cfg_set("rstick_camera", g_rstick_cam != 0);
     sdl_cfg_set("rstick_tracking", g_rstick_cam == 2);
-    sdl_cfg_set("rstick_locked", g_rstick_cam == 3);
-    fprintf(stderr, "[WIN] the right stick: %s\n", g_rstick_cam == 3 ? "the camera, locked"
-                    : g_rstick_cam == 2 ? "the camera, tracking"
+    sdl_cfg_set("rstick_locked", 0);
+    fprintf(stderr, "[WIN] the right stick: %s\n", g_rstick_cam == 2 ? "the camera, tracking"
                     : g_rstick_cam ? "the camera" : "the game's (camera off)");
 }
 /* Whether the camera turn eases back behind the skater when the stick is
@@ -2398,7 +2398,7 @@ static void sdl_menu_register(void)
 #endif
     };
     static const char *const fps_names[] = { "60", "30", "Unlimited" };
-    static const char *const rcam_names[] = { "Off", "Camera", "Camera (tracking)", "Camera (locked)" };
+    static const char *const rcam_names[] = { "Off", "Camera", "Camera (tracking)" };
     static const char *const msaa_names[] = { "Off", "2x", "4x", "8x" };
     static const char *const aniso_names[] = { "Off", "2x", "4x", "8x", "16x" };
     static const char *const skipvol_names[] = {
@@ -2470,14 +2470,11 @@ static void sdl_menu_register(void)
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_CHOICE,
           .label = "Right-stick camera",
           .state = menu_rcam_state, .pick = menu_rcam_pick,
-          .choices = rcam_names, .nchoices = 4,
+          .choices = rcam_names, .nchoices = 3,
           .tip = "The right stick moves the camera. Camera (tracking) "
                  "turns the view without turning the skater, so up on "
-                 "the left stick stays straight ahead of him. Camera "
-                 "(locked) is this port's own: tracking that also keeps "
-                 "the direction you leave it in, so the game never "
-                 "turns the view, only you do. Off, it does what it "
-                 "did on the Xbox." },
+                 "the left stick stays straight ahead of him. Off, it "
+                 "does what it did on the Xbox." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Camera eases back when released",
           .state = nv_window_pref_rstick_ease, .run = sdl_toggle_rstick_ease,
@@ -2722,7 +2719,7 @@ static void sdl_menu_command(unsigned id)
         sdl_pick_msaa(1 << (id - MENU_MSAA1));
     } else if (id == MENU_RCAM) {
         { int m = nv_window_pref_rstick_camera();
-          sdl_set_rstick_camera(m == 1 ? 2 : m == 2 ? 3 : m == 3 ? 0 : 1); }
+          sdl_set_rstick_camera(m == 1 ? 2 : m == 2 ? 0 : 1); }
     }
 }
 #endif

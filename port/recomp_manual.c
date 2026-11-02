@@ -4481,21 +4481,10 @@ __attribute__((weak)) int nv_window_pref_rstick_ease(void) { return 1; }   /* no
  * what you were looking at -- worst in tracking, where looking without
  * steering is the point -- and the L trigger already resets the turn. */
 
-/* Locked (mode 3) is this port's own addition on top of tracking: the
- * view keeps the compass direction it was left in. The game's camera
- * still turns underneath as the skater moves; the turn it made is
- * measured each frame (the anchor below) and cancelled, so only the
- * right stick, which moves the anchor, the L trigger's reset, and a
- * scripted camera taking the eye move the view. The heading is left
- * alone, as in tracking, and the ease-back choice has nothing to act
- * on. JSRF_RCAM_FIXED does not apply to it. */
-
 static struct {
     float    rx, ry;           /* the right stick, -1..1, dead zone taken out */
     int      lt;               /* the L trigger held */
     float    yaw, pitch;       /* the turn, radians: to the right, and up */
-    float    anchor;           /* locked: the held view direction, radians */
-    int      anchored;         /* locked: the anchor is live */
     float    idle;             /* seconds since the stick was let go */
     double   last;             /* when the turn was last worked out */
     uint32_t last_frame;       /* and at which of the game's frames (s_rcam_frames) */
@@ -4531,20 +4520,19 @@ static void rcam_note_pad(XBOX_INPUT_STATE *s)
     }
 }
 
-/* 0 off, 1 the camera, 2 tracking, 3 locked (see above). */
+/* 0 off, 1 the camera, 2 tracking (see above). A 3 from an older
+ * setting or the env override reads as tracking. */
 static int rcam_mode(void)
 {
     static int env = -2;
     int v;
     if (env == -2) {
         const char *e = getenv("RECOMP_RSTICK_CAMERA");
-        env = (e && *e) ? atoi(e) : -1;
-        if (env > 3) env = 3;
-        if (env < -1) env = 0;
+        env = (e && *e) ? (atoi(e) == 2 ? 2 : atoi(e) != 0) : -1;
     }
     if (env >= 0) return env;
     v = nv_window_pref_rstick_camera();
-    return v < 0 ? 0 : v > 3 ? 3 : v;
+    return v == 2 ? 2 : v > 0;
 }
 
 static int rcam_log_on(void)
@@ -4569,7 +4557,6 @@ static void rcam_restore(uint8_t *m, uint32_t cam)
         if (rcam_log_on())
             fprintf(stderr, "[RCAM] t=%.2f the eye was moved by something else: turn dropped\n", jsrf_now());
         s_rcam.yaw = s_rcam.pitch = 0.0f;
-        s_rcam.anchored = 0;
         return;
     }
     memcpy(e, s_rcam.game_eye, sizeof s_rcam.game_eye);
@@ -4625,18 +4612,15 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
     how = rcam_mode();
     ok = how > 0 && mode != 12 && mode != 14;
     s_rcam.active_until = ok ? now + 0.25 : 0.0;
-    if (how != 3) s_rcam.anchored = 0;   /* the anchor belongs to locked alone */
     if (!ok) {
         s_rcam.yaw = s_rcam.pitch = 0.0f;
         s_rcam.idle = 0.0f;
-        s_rcam.anchored = 0;
-    } else if (fixed > -1.0e7 && how != 3) {
+    } else if (fixed > -1.0e7) {
         s_rcam.yaw = (float)fixed;
         s_rcam.pitch = 0.0f;
     } else if (s_rcam.lt) {
         s_rcam.yaw = s_rcam.pitch = 0.0f;   /* the game puts its camera back behind as well */
         s_rcam.idle = 0.0f;
-        s_rcam.anchored = 0;                /* locked re-anchors on the reset view */
     } else if (s_rcam.rx != 0.0f || s_rcam.ry != 0.0f) {
         s_rcam.yaw   += RCAM_CURVE(s_rcam.rx) * RCAM_YAW * dt;
         s_rcam.pitch += RCAM_CURVE(s_rcam.ry) * RCAM_PITCH * dt;
@@ -4659,7 +4643,7 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
     e = (float *)(m + cam + 0x44);
     t = (float *)(m + cam + 0x5C);
     hd = (int32_t *)(m + cam + 0x228);
-    if (ok && (how == 3 || s_rcam.yaw != 0.0f || s_rcam.pitch != 0.0f)) {
+    if (ok && (s_rcam.yaw != 0.0f || s_rcam.pitch != 0.0f)) {
         /* The eye about the point looked at: turned about the vertical so
          * that the view turns right for a positive yaw (in this left-handed
          * world the right of (x, z) is (z, -x)), then raised or lowered --
@@ -4667,24 +4651,6 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
          * where the game itself put it. */
         memcpy(s_rcam.game_eye, e, sizeof s_rcam.game_eye);
         v[0] = e[0] - t[0]; v[1] = e[1] - t[1]; v[2] = e[2] - t[2];
-        if (how == 3) {
-            /* Locked: this frame's turn is whatever takes the game's own
-             * direction to the anchor. The stick's pan, accumulated in
-             * yaw above, moves the anchor and is then spent. A view with
-             * no horizontal extent has no direction to hold; skip the
-             * anchor for that frame rather than invent one. */
-            float h0 = sqrtf(v[0] * v[0] + v[2] * v[2]);
-            if (h0 > 1e-3f) {
-                float base = atan2f(v[0], v[2]);
-                if (!s_rcam.anchored) { s_rcam.anchor = base; s_rcam.anchored = 1; }
-                s_rcam.anchor += s_rcam.yaw;
-                while (s_rcam.anchor >  3.14159265f) s_rcam.anchor -= 6.28318531f;
-                while (s_rcam.anchor < -3.14159265f) s_rcam.anchor += 6.28318531f;
-                s_rcam.yaw = s_rcam.anchor - base;
-                while (s_rcam.yaw >  3.14159265f) s_rcam.yaw -= 6.28318531f;
-                while (s_rcam.yaw < -3.14159265f) s_rcam.yaw += 6.28318531f;
-            }
-        }
         ca = cosf(s_rcam.yaw); sa = sinf(s_rcam.yaw);
         {
             float x = v[0] * ca + v[2] * sa, z = v[2] * ca - v[0] * sa;
@@ -4705,11 +4671,10 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
         }
         e[0] = t[0] + v[0]; e[1] = t[1] + v[1]; e[2] = t[2] + v[2];
         memcpy(s_rcam.our_eye, e, sizeof s_rcam.our_eye);
-        if (how == 3) s_rcam.yaw = 0.0f;   /* the pan is spent; the anchor holds it */
-        /* The heading is turned with it, in the game's range (-0x8000..0x8000,
+        /* The heading turned with it, in the game's range (-0x8000..0x8000,
          * as sub_0004A7A0 gives it) -- or, tracking, left as it is. */
         s_rcam.game_hd = *hd;
-        if (how == 1)
+        if (how != 2)
             *hd = (int32_t)(int16_t)(uint16_t)(s_rcam.game_hd + (int32_t)lrintf(s_rcam.yaw * (65536.0f / 6.28318531f)));
         s_rcam.our_hd = *hd;
         s_rcam.cam = cam;
@@ -4722,10 +4687,10 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
                 s_rcam.yaw * 57.29578f, s_rcam.pitch * 57.29578f);
     } else if (rcam_log_on() && now >= next_log) {
         next_log = now + 0.1;
-        fprintf(stderr, "[RCAM] t=%.2f flip %u mode %u on %d | stick %.2f %.2f lt %d | yaw %.1f pitch %.1f | "
+        fprintf(stderr, "[RCAM] t=%.2f flip %u mode %u on %d how %d | stick %.2f %.2f lt %d | yaw %.1f pitch %.1f | "
                 "eye (%.2f %.2f %.2f) game (%.2f %.2f %.2f) tgt (%.2f %.2f %.2f) | hd %d game %d | "
                 "player (%.2f %.2f %.2f)\n",
-                now, nv2a_gl_flips(), mode, ok, s_rcam.rx, s_rcam.ry, s_rcam.lt,
+                now, nv2a_gl_flips(), mode, ok, how, s_rcam.rx, s_rcam.ry, s_rcam.lt,
                 s_rcam.yaw * 57.29578f, s_rcam.pitch * 57.29578f, e[0], e[1], e[2],
                 s_rcam.applied ? s_rcam.game_eye[0] : e[0], s_rcam.applied ? s_rcam.game_eye[1] : e[1],
                 s_rcam.applied ? s_rcam.game_eye[2] : e[2], t[0], t[1], t[2],
