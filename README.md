@@ -90,10 +90,9 @@ from your own copy of the game.
   together) to open it over the game. It holds the display settings
   (render scale, frame rate, vsync), the graphics settings (widescreen,
   stretch to fill screen, SMAA, MSAA, anisotropic filtering, shadow
-  volumes), a right-stick camera choice (Camera, Camera (tracking),
-  or Camera (locked), which holds the view in the direction you
-  leave it), a toggle for the camera easing back when the stick is
-  released, and a Nintendo layout option that
+  volumes), a right-stick camera choice (Camera, or Camera
+  (tracking) from upstream), a toggle for the camera easing back
+  when the stick is released, and a Nintendo layout option that
   swaps A/B and X/Y so the face buttons work by their printed
   names (it is `nintendo_layout` in `options.txt`). A Developer
   page holds a live status readout and the engine's logging and
