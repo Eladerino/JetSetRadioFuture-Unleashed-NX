@@ -852,6 +852,7 @@ static struct {
     int      used;
     uint32_t last_use;    /* bind order, for eviction */
     uint32_t last_draw;   /* S.draws when last drawn or cleared into */
+    uint32_t drawn_stamp; /* S.draws when last drawn into (draws only) */
     uint32_t fmt;         /* SET_SURFACE_FORMAT when it was last bound */
     uint32_t serial;      /* allocation holding its memory when last bound */
 } g_surf[SURF_CACHE];
@@ -6485,6 +6486,10 @@ static void do_draw_body(void)
 
     if (!g_ready || !S.prim) return;
     surface_sync();
+    /* Draws only: a surface drawn into this flip, as opposed to cleared
+     * into (surface_sync stamps last_draw for both). The FLIP_STALL
+     * handler uses it to recognise a loading frame. */
+    if (g_cur_surf >= 0) g_surf[g_cur_surf].drawn_stamp = S.draws + 1;
 
     mode = nv2a_prim(S.prim, &fan_expand);
     prim_note(inl);
@@ -13269,6 +13274,7 @@ void nv2a_gl_method(uint32_t method, uint32_t param)
          * stays the frame for a title that does not.
          */
         S.seen_flip_stall = 1;
+        int flip_drawn_slot = -1;   /* same-size surface drawn into since the last flip */
         /* Which surface the window shows for this frame.
          *
          * The one the title has set up when it flips is the back buffer it
@@ -13288,12 +13294,25 @@ void nv2a_gl_method(uint32_t method, uint32_t param)
                   if (k == m || !g_surf[k].used) continue;
                   if (g_surf[k].w != g_surf[m].w || g_surf[k].h != g_surf[m].h) continue;
                   if (g_surf[k].fmt != (S.surf_format & 0xFFFFu)) continue;
+                  if (g_surf[k].drawn_stamp > g_last_flip_draws &&
+                      (flip_drawn_slot < 0 ||
+                       g_surf[k].drawn_stamp > g_surf[flip_drawn_slot].drawn_stamp))
+                      flip_drawn_slot = k;
                   if (g_surf[k].last_draw <= g_last_flip_draws) continue;
                   if (best < 0 || g_surf[k].last_draw > g_surf[best].last_draw) best = k;
               }
           g_present_slot = best >= 0 ? best : m;
           g_last_flip_draws = S.draws; }
-        if (S.since_present) { fliplog("flip_stall"); present(1); }
+        /* A frame whose draws were followed by a full clear reads as
+         * "nothing drawn" here, because the clear presents the frame's
+         * bookkeeping and zeroes since_present. The loading frames are
+         * exactly that shape, and they held the last picture for a second
+         * or more instead of cutting to what was drawn. If a display-sized
+         * surface was drawn into since the last flip, show that one. */
+        if (S.since_present || flip_drawn_slot >= 0) {
+            if (!S.since_present) g_present_slot = flip_drawn_slot;
+            fliplog("flip_stall"); present(1);
+        }
         else {
             /* Nothing drawn since the last frame -- a black frame, a fade,
              * a frame spent loading -- but the title still flipped, and on

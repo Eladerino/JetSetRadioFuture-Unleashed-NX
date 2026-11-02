@@ -3545,6 +3545,36 @@ uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
     return n;
 }
 
+/*
+ * Nonzero when no live block holds this guest address: it names a block the
+ * heap handed out and took back, or space inside the heap that no block has
+ * ever covered. Zero when the address is outside the heap altogether (not
+ * this allocator's to judge) or inside a live block (an interior pointer
+ * counts as held, as in xbox_HeapBlockSize).
+ *
+ * This is what tells a pointer a title kept after releasing its buffer from
+ * a live allocation: the game's resource manager does exactly that (see
+ * port/resource_load.c), and its second release of the same address would
+ * otherwise free whatever the heap handed the address to in between.
+ */
+int xbox_HeapIsFreeSpace(uint32_t xbox_va)
+{
+    int result = 1, i;
+
+    if (xbox_va < XBOX_HEAP_BASE || xbox_va >= XBOX_HEAP_TOP)
+        return 0;
+    EnterCriticalSection(&g_heap_lock);
+    for (i = 0; i < g_heap_block_count; i++) {
+        if (xbox_va >= g_heap_blocks[i].addr &&
+            xbox_va <  g_heap_blocks[i].addr + g_heap_blocks[i].size) {
+            result = g_heap_blocks[i].free ? 1 : 0;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_heap_lock);
+    return result;
+}
+
 static void heap_free(uint32_t xbox_va)
 {
     static int frees = 0, matched = 0;

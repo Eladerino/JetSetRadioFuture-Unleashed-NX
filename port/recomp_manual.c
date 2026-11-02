@@ -2663,6 +2663,60 @@ void sub_00030490(void) { mission_hook(".bin"); sub_00030490_gen(); }
 extern void sub_00030690_gen(void);
 void sub_00030690(void) { mission_hook(".dat"); sub_00030690_gen(); }
 
+/* ---- the game's resource loads, checked (resource_load.c) -----------------
+ * sub_00032C70, the character loader's step, releases a character's .dat and
+ * can keep the pointer, which a character unload then releases again: after
+ * the step, it is forgotten once its buffer is released. The graffiti cache
+ * builder's four functions that release its file buffer keep the pointer
+ * too, and its sheets' writes (sub_0002D8D0, sub_0002D950) release it again:
+ * after each of the four, it is forgotten once released, and before each
+ * write what was forgotten is logged. The hooks are on those functions, not
+ * on the builder's step, as the step can give the guest lock up between a
+ * release and its end. */
+#include "resource_load.h"
+extern int xbox_HeapIsFreeSpace(uint32_t xbox_va);   /* released, or never handed out */
+extern void sub_00032C70_gen(void);
+extern void sub_0002DA70_gen(void);
+extern void sub_0002D8D0_gen(void);
+extern void sub_0002D950_gen(void);
+extern void sub_0002D9D0_gen(void);
+void sub_00032C70(void)
+{
+    uint32_t mgr = g_ecx;
+    sub_00032C70_gen();
+    resource_load_char_step((uint8_t *)g_xbox_mem_offset, mgr, xbox_HeapIsFreeSpace, pad_now());
+}
+/* A texture copied into the sheet. */
+void sub_0002DA70(void)
+{
+    uint32_t mgr = g_ecx;
+    sub_0002DA70_gen();
+    resource_load_graffiti_release((uint8_t *)g_xbox_mem_offset, mgr, xbox_HeapIsFreeSpace);
+}
+/* Sheet 0 written. */
+void sub_0002D8D0(void)
+{
+    uint32_t mgr = g_ecx;
+    resource_load_graffiti_sheet(0, pad_now());
+    sub_0002D8D0_gen();
+    resource_load_graffiti_release((uint8_t *)g_xbox_mem_offset, mgr, xbox_HeapIsFreeSpace);
+}
+/* Sheet 1 written. */
+void sub_0002D950(void)
+{
+    uint32_t mgr = g_ecx;
+    resource_load_graffiti_sheet(1, pad_now());
+    sub_0002D950_gen();
+    resource_load_graffiti_release((uint8_t *)g_xbox_mem_offset, mgr, xbox_HeapIsFreeSpace);
+}
+/* A ready-made sheet copied. */
+void sub_0002D9D0(void)
+{
+    uint32_t mgr = g_ecx;
+    sub_0002D9D0_gen();
+    resource_load_graffiti_release((uint8_t *)g_xbox_mem_offset, mgr, xbox_HeapIsFreeSpace);
+}
+
 /* JSRF_TRACE_AT="t:frames[:shots,every][;t:frames[:shots,every]...]" (test
  * only): at each time t, log every render pass for that many frames and
  * capture a burst of frames -- up to eight of them, in time order, so one
