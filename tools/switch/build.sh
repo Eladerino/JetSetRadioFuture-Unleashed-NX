@@ -242,6 +242,11 @@ write_default_options() {
         "# Widescreen 16:9 in gameplay (the logos and title screen stay 4:3)." \
         "widescreen=1" \
         "" \
+        "# Stretch the 4:3 picture to fill the screen, title and menus" \
+        "# included, instead of widening the view. The same choice is" \
+        "# in the in-game menu, under Graphics (Stretch to fill screen)." \
+        "JSRF_WIDE_STRETCH=1" \
+        "" \
         "# Internal resolution: 1 = the Xbox's 640x480, 2 = twice that, up to 4." \
         "# Each step costs GPU time." \
         "scale=1" \
@@ -304,15 +309,18 @@ write_default_options() {
         "# halfway through. 0 = read them live. A Developer page switch." \
         "RECOMP_PB_CALLSNAP=1" \
         "" \
-        "# Four Developer switches are read by their presence alone, so" \
+        "# Seven switches are read by their presence alone, so" \
         "# they are NOT lines to set to 0 -- a RECOMP_PB_OVERLAP=0 line" \
         "# would turn it on. Add the line with =1 to turn one on; leave" \
         "# the line out for off. The in-game menu writes and removes" \
-        "# these lines itself:" \
+        "# the first four lines itself; the last three are log diagnostics:" \
         "#   RECOMP_PB_OVERLAP=1       count push-buffer overlap, in the log" \
         "#   RECOMP_GL_MERGEPROBE=1    probe merging draws, log the findings" \
         "#   RECOMP_PB_SEMLOG=1        log GPU semaphore waits and releases" \
         "#   RECOMP_MENU_STICK_BOTH=1  both sticks in the game's own menus" \
+        "#   RECOMP_PB_SCAN=1          survey push-buffer methods, in the log" \
+        "#   RECOMP_GL_DEPTHLOG=1      log draw distances once a second" \
+        "#   RECOMP_GL_SPLIT=1         split the frame's time in the log" \
         "" \
         "# 1 = the face buttons by their printed names (A confirms," \
         "# B goes back, X and Y likewise) instead of by Xbox position." \
@@ -324,7 +332,8 @@ write_default_options() {
         "show_fps=0" \
         "" \
         "# Any other engine variable can go here too as NAME=value" \
-        "# (RECOMP_... or JSRF_...)." > "$1"
+        "# (RECOMP_... or JSRF_...). Two more developer ones:" \
+        "#   JSRF_FENCE_LOG=1          log the game's GPU waits, once a second" > "$1"
 }
 
 # ---------------------------------------------------------------- export
