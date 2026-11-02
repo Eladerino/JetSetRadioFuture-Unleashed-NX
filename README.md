@@ -47,7 +47,8 @@ from your own copy of the game.
   [latest release](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest)
   (the file is named `jsrf-unleashed-<version>-switch.zip`) and
   extract it at the root of the SD card. It puts
-  `jsrf-unleashed.nro`, `options.txt` and an empty `game/` folder in
+  `jsrf-unleashed.nro`, `options.txt`, a `READ-ME-FIRST.txt` and an
+  empty `game/` folder in
   `sdmc:/switch/jsrf-unleashed/`. Then put your game files in that
   `game/` folder: either the extracted files (`default.xbe` and
   `Media/`) or a single `.iso` of the US disc, which the first launch
@@ -77,8 +78,10 @@ from your own copy of the game.
 - **Settings live in `options.txt`** beside the `.nro`: plain text
   that ships in the release and is never overwritten by an update, so
   copying a new `.nro` over the old one keeps your settings. It
-  covers widescreen (16:9 in gameplay; logos and the title screen
-  stay 4:3), internal resolution (1x to 4x), anisotropic filtering,
+  covers the picture (by default the 4:3 image stretched to fill
+  the screen, title and menus included; or true widescreen, 16:9 in
+  gameplay with the logos and title screen at 4:3), internal
+  resolution (1x to 4x), anisotropic filtering,
   the 60 fps cap, the shader cache, the run log (off by default;
   `log=1` writes one), and `fast_gpu`, the asynchronous
   GPU path, which is on by default on Switch; `fast_gpu=0` falls back
@@ -86,8 +89,12 @@ from your own copy of the game.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
   together) to open it over the game. It holds the display settings
   (render scale, frame rate, vsync), the graphics settings (widescreen,
-  SMAA, MSAA, anisotropic filtering, shadow volumes), the
-  right-stick camera toggle and a Nintendo layout option that
+  stretch to fill screen, SMAA, MSAA, anisotropic filtering, shadow
+  volumes), a right-stick camera choice (Camera, Camera (tracking),
+  or Camera (locked), which holds the view in the direction you
+  leave it) with toggles for the camera easing back when the stick
+  is released and, experimentally, for steering that follows the
+  locked view, and a Nintendo layout option that
   swaps A/B and X/Y so the face buttons work by their printed
   names (it is `nintendo_layout` in `options.txt`). A Developer
   page holds a live status readout and the engine's logging and
@@ -106,8 +113,9 @@ from your own copy of the game.
   since the console's limit is the game's own CPU work rather than
   the GPU; render scale above 1x is the setting that costs.
   The frame rates above were measured with the console heavily
-  overclocked, well past Nintendo's stock clocks (CPU 1020 / GPU up
-  to 921 / memory 1600 MHz). **Overclocking is optional and at your
+  overclocked, well past Nintendo's stock clocks (CPU 1020 MHz,
+  GPU 384 MHz handheld and 768 MHz docked, memory 1331 MHz
+  handheld and 1600 MHz docked). **Overclocking is optional and at your
   own risk:** it makes the console run hotter, drains the battery
   faster, can cause crashes and may shorten the hardware's life, and
   launch-model consoles have the least headroom. The clocks used
@@ -586,6 +594,10 @@ empty tables in their place.
 - Dear ImGui — the library the in-game menu is drawn with.
 - [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
   in-game menu's design and code were adapted from.
+- [jsrf-nx](https://github.com/skeammer/jsrf-nx) — skeammer's Switch
+  port of the same project: the stretch view's approach came from
+  it, and its findings log has been a second set of measurements
+  to check against.
 - devkitPro and libnx — the homebrew toolchain and library the
   Switch build is made with.
 - The title lettering in the banner is set in
