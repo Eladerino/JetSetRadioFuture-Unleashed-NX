@@ -2494,10 +2494,10 @@ static void sdl_menu_register(void)
           .tip = "The right stick moves the camera. Camera (tracking) "
                  "turns the view without turning the skater, so up on "
                  "the left stick stays straight ahead of him. Camera "
-                 "(locked) also keeps the direction you leave it in: "
-                 "the game never turns it, only you do, and steering "
-                 "follows the view (experimental). Off, it does what "
-                 "it did on the Xbox." },
+                 "(locked) is this port's own: tracking that also keeps "
+                 "the direction you leave it in, so the game never "
+                 "turns the view, only you do. Off, it does what it "
+                 "did on the Xbox." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Camera eases back when released",
           .state = nv_window_pref_rstick_ease, .run = sdl_toggle_rstick_ease,
