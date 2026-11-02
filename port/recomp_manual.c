@@ -2410,7 +2410,28 @@ extern void sub_001910E0_gen(void);
  *             copied but not walked, and how far past the walk on average
  *   lag       fence numbers handed out (dev+0x30) less the fence word
  *   fences    releases executed, and the last one's place
- * and the raw values of the first eight waits, to check the units. */
+ * and the raw values of the first eight waits, to check the units.
+ *
+ * Run 26 (the first full run) corrected two assumptions above: the
+ * fence pointer reaching here (edx at the sub_001910E0 call) is a
+ * device-interior pointer (dev+0x80, dev+0x158), not the fence's
+ * place in the ring, so the copied/unplaced split read 100 percent
+ * unplaced and says nothing yet; the raw print now dumps the two
+ * words at that pointer, to find where the ring place lives. And
+ * dev+0x34 holds an Xbox VA in the contiguous window, not a RAM
+ * offset (see the val read below). The told distances never
+ * depended on either and stand: about a fifth of waits are told
+ * 32 KB or more.
+ *
+ * Run 27 (with the v2 instrument) answered both: the val read as a
+ * VA gives sane lag (per-second averages in the tens, not the
+ * hundred-thousands), and the dumped words identify the record:
+ * word 0 is the fence value waited on, and word 1 is a window VA
+ * four bytes before the ring word of that fence's release (a wait's
+ * word 1 + 4 is where the walk next reports executing it). The
+ * classifier below therefore keys on word 1 + 4, not on the record
+ * pointer; the raw print shows the derived place so the next run
+ * can check the derivation against the walk's own reports. */
 extern volatile uint32_t g_pb_fence_word, g_pb_fence_val, g_pb_fence_at;
 extern volatile unsigned long g_pb_fence_n;
 extern void xbox_nv2a_copy_state(uint32_t *copied, int *eager);
@@ -2434,7 +2455,7 @@ static void fence_log(uint32_t from, uint32_t ecx, uint32_t at, uint32_t dist)
     static uint32_t dist_max, lag_max;
     static double next, last;
     uint8_t *m = (uint8_t *)g_xbox_mem_offset;
-    uint32_t copy, newest, word, val, walk, dev;
+    uint32_t copy, newest, word, val, walk, dev, place = 0;
     int eager;
     double now;
 
@@ -2457,9 +2478,24 @@ static void fence_log(uint32_t from, uint32_t ecx, uint32_t at, uint32_t dist)
     walk = g_pb_fence_at;
     newest = *(volatile uint32_t *)(m + dev + 0x30u);
     word = *(volatile uint32_t *)(m + dev + 0x34u);
-    val = (word >= 0x1000u && word < (64u << 20)) ? *(volatile uint32_t *)(m + word) : 0;
+    /* +0x34 is an Xbox VA, not a RAM offset: in practice the contiguous
+     * window's (0x80000000-based), which the reservation maps at the same
+     * offset, so read it as a VA. The old check (word < 64 MB) rejected
+     * every real value and val read 0 all run (run 26: lag ran away to
+     * the handed-out count itself). Accept RAM and the window's alias. */
+    val = (word >= 0x1000u && (word < (64u << 20)
+           || (word >= 0x80000000u && word < 0x80000000u + (64u << 20))))
+          ? *(volatile uint32_t *)(m + word) : 0;
     {
-        uint32_t span = ring_fwd(copy, walk), past = ring_fwd(at, walk);
+        /* The fence's place in the ring, from the record's word 1 (see
+         * the header): a window VA four bytes before the release's
+         * ring word. A word 1 that is not a plausible VA leaves place
+         * outside the ring and ring_fwd calls it unplaced, honestly. */
+        uint32_t rec1 = (at >= 0x1000u && at + 4 < (64u << 20))
+                      ? *(volatile uint32_t *)(m + at + 4) : 0;
+        uint32_t span, past;
+        place = (rec1 & 0x0FFFFFFFu) + 4u;
+        span = ring_fwd(copy, walk); past = ring_fwd(place, walk);
         if (span == 0xFFFFFFFFu || past == 0xFFFFFFFFu) unknown++;
         else if (past <= span) { copied++; past_sum += past; }
     }
@@ -2470,10 +2506,13 @@ static void fence_log(uint32_t from, uint32_t ecx, uint32_t at, uint32_t dist)
         shown++;
         fprintf(stderr, "  [FENCE] wait #%lu: fence at 0x%08X, told %u bytes; walk's last fence at 0x%08X "
                 "(value %u, word 0x%08X); copied to 0x%08X%s; dev 0x%08X (ecx 0x%08X) +0x30=%u +0x34=0x%08X -> %u; "
-                "DMA_PUT=0x%08X DMA_GET=0x%08X\n",
+                "DMA_PUT=0x%08X DMA_GET=0x%08X; *fence=0x%08X +4=0x%08X; place 0x%08X\n",
                 shown, at, dist, walk, g_pb_fence_val, g_pb_fence_word, copy, eager ? " (eager)" : "",
                 dev, ecx, newest, word, val,
-                *(volatile uint32_t *)(m + 0xFD800040u), *(volatile uint32_t *)(m + 0xFD800044u));
+                *(volatile uint32_t *)(m + 0xFD800040u), *(volatile uint32_t *)(m + 0xFD800044u),
+                (at >= 0x1000u && at < (64u << 20)) ? *(volatile uint32_t *)(m + at) : 0,
+                (at >= 0x1000u && at < (64u << 20)) ? *(volatile uint32_t *)(m + at + 4) : 0,
+                place);
     }
     now = jsrf_now();
     if (now >= next) {
@@ -4394,11 +4433,20 @@ void sub_00042EE0(void)
  * If something else moved the eye in between (an event placing the camera),
  * that is left as it is and the turn dropped.
  *
- * Not in a conversation (mode 12) or the first-person look (14). On unless
- * the player turns it off, nv_window_pref_rstick_camera: the Mac's Controls
- * menu, the iPhone's and the Android app's settings, and on Windows and Linux
- * F7 (and Controls in the Windows window's menu bar); RECOMP_RSTICK_CAMERA=1
- * or 0 overrides.
+ * Tracking, the second way to have it (issue #44, players' feedback): the
+ * view turns as above but the heading is left alone, so the skater keeps the
+ * way he was going -- "up" on the left stick is still straight ahead of him,
+ * as the game's own camera behind him has it -- and the right stick only
+ * looks around. With the turn on the heading, panning the camera to look at
+ * something steered the skater towards it.
+ *
+ * Not in a conversation (mode 12) or the first-person look (14).
+ * nv_window_pref_rstick_camera says which: 0 off (the game's camera), 1 the
+ * camera (the default), 2 tracking -- the Mac's Controls menu, the iPhone's
+ * and the Android app's settings, and on Windows and Linux F7 (and Controls
+ * in the Windows window's menu bar); on the Switch it is the Controller
+ * page's Right-stick camera choice in the in-game menu.
+ * RECOMP_RSTICK_CAMERA=0, 1 or 2 overrides.
  * The turn goes by the game's frames, a sixtieth of a second each, as its own
  * camera and its first-person look do: by the clock, it came out in uneven
  * steps from one picture to the next whenever the frames were not evenly
@@ -4410,6 +4458,10 @@ void sub_00042EE0(void)
  */
 __attribute__((weak)) int nv_window_pref_rstick_camera(void);
 __attribute__((weak)) int nv_window_pref_rstick_camera(void) { return 0; }   /* no switch: off */
+__attribute__((weak)) int nv_window_pref_rstick_ease(void);
+__attribute__((weak)) int nv_window_pref_rstick_ease(void) { return 1; }   /* no switch: upstream's ease back */
+__attribute__((weak)) int nv_window_pref_rstick_steer(void);
+__attribute__((weak)) int nv_window_pref_rstick_steer(void) { return 0; }   /* no switch: the game's own steering */
 
 #define RCAM_DEAD   0.20f      /* of full deflection: a resting stick drifts */
 /* The speed: what is past the dead zone, to the power 1.5 -- fine near the
@@ -4425,11 +4477,28 @@ __attribute__((weak)) int nv_window_pref_rstick_camera(void) { return 0; }   /* 
 #define RCAM_EL_MAX 1.2f
 #define RCAM_HOLD   0.6f       /* seconds after the stick is let go before it drifts back */
 #define RCAM_TAU    0.3f       /* and how quickly: e-fold time, seconds */
+/* The drift back itself is a choice (nv_window_pref_rstick_ease, the
+ * Controller page's "Camera eases back when released"): off on the Switch
+ * by default, where the held view reads as the camera snapping away from
+ * what you were looking at -- worst in tracking, where looking without
+ * steering is the point -- and the L trigger already resets the turn. */
+
+/* Locked (mode 3) is this port's own addition on top of tracking: the
+ * view keeps the compass direction it was left in. The game's camera
+ * still turns underneath as the skater moves; the turn it made is
+ * measured each frame (the anchor below) and cancelled, so only the
+ * right stick, which moves the anchor, the L trigger's reset, and a
+ * scripted camera taking the eye move the view. The heading is left
+ * alone, as in tracking, and the ease-back choice has nothing to act
+ * on. JSRF_RCAM_FIXED does not apply to it. */
 
 static struct {
     float    rx, ry;           /* the right stick, -1..1, dead zone taken out */
     int      lt;               /* the L trigger held */
     float    yaw, pitch;       /* the turn, radians: to the right, and up */
+    float    anchor;           /* locked: the held view direction, radians */
+    int      anchored;         /* locked: the anchor is live */
+    float    turn;             /* locked: the turn applied on the last camera frame */
     float    idle;             /* seconds since the stick was let go */
     double   last;             /* when the turn was last worked out */
     uint32_t last_frame;       /* and at which of the game's frames (s_rcam_frames) */
@@ -4463,17 +4532,40 @@ static void rcam_note_pad(XBOX_INPUT_STATE *s)
         s->Gamepad.sThumbRX = 0;
         s->Gamepad.sThumbRY = 0;
     }
+    /* Locked, experimental, and a choice (nv_window_pref_rstick_steer):
+     * the left stick is turned by the same angle
+     * the view was turned, so steering is referenced to the view on
+     * screen -- up is up-screen, most noticeable from a standstill.
+     * The anchor only exists in locked, and only inside the same
+     * active window as above: menus, conversations and events keep
+     * the stock stick. A pure rotation, so the stick's magnitude and
+     * the game's deadzone are untouched. If the standstill test shows
+     * the mapping turned the wrong way, the angle's sign is the fix. */
+    if (nv_window_pref_rstick_steer() && s_rcam.anchored && jsrf_now() < s_rcam.active_until && s_rcam.turn != 0.0f) {
+        float lx = (float)s->Gamepad.sThumbLX, ly = (float)s->Gamepad.sThumbLY;
+        if (lx != 0.0f || ly != 0.0f) {
+            float c = cosf(s_rcam.turn), n = sinf(s_rcam.turn);
+            float x = lx * c - ly * n, y = lx * n + ly * c;
+            s->Gamepad.sThumbLX = (int16_t)lrintf(x < -32768.0f ? -32768.0f : x > 32767.0f ? 32767.0f : x);
+            s->Gamepad.sThumbLY = (int16_t)lrintf(y < -32768.0f ? -32768.0f : y > 32767.0f ? 32767.0f : y);
+        }
+    }
 }
 
-static int rcam_enabled(void)
+/* 0 off, 1 the camera, 2 tracking, 3 locked (see above). */
+static int rcam_mode(void)
 {
     static int env = -2;
+    int v;
     if (env == -2) {
         const char *e = getenv("RECOMP_RSTICK_CAMERA");
-        env = (e && *e) ? (atoi(e) != 0) : -1;
+        env = (e && *e) ? atoi(e) : -1;
+        if (env > 3) env = 3;
+        if (env < -1) env = 0;
     }
     if (env >= 0) return env;
-    return nv_window_pref_rstick_camera() > 0;
+    v = nv_window_pref_rstick_camera();
+    return v < 0 ? 0 : v > 3 ? 3 : v;
 }
 
 static int rcam_log_on(void)
@@ -4498,6 +4590,7 @@ static void rcam_restore(uint8_t *m, uint32_t cam)
         if (rcam_log_on())
             fprintf(stderr, "[RCAM] t=%.2f the eye was moved by something else: turn dropped\n", jsrf_now());
         s_rcam.yaw = s_rcam.pitch = 0.0f;
+        s_rcam.anchored = 0;
         return;
     }
     memcpy(e, s_rcam.game_eye, sizeof s_rcam.game_eye);
@@ -4516,7 +4609,7 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
     static double next_log, dump_at = -2.0;
     static int by_clock = -1;
     uint32_t mode, frames;
-    int ok, i;
+    int ok, i, how;
     if (by_clock < 0) by_clock = getenv("JSRF_RCAM_CLOCK") ? 1 : 0;
     /* The game's frames since the last turn (one, as a rule), a sixtieth of a
      * second each; up to six, after a pause. */
@@ -4550,22 +4643,26 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
         fixed = f ? atof(f) * 3.14159265358979 / 180.0 : -1.0e8;
     }
     mode = c[0x208 / 4];
-    ok = rcam_enabled() && mode != 12 && mode != 14;
+    how = rcam_mode();
+    ok = how > 0 && mode != 12 && mode != 14;
     s_rcam.active_until = ok ? now + 0.25 : 0.0;
+    if (how != 3) s_rcam.anchored = 0;   /* the anchor belongs to locked alone */
     if (!ok) {
         s_rcam.yaw = s_rcam.pitch = 0.0f;
         s_rcam.idle = 0.0f;
-    } else if (fixed > -1.0e7) {
+        s_rcam.anchored = 0;
+    } else if (fixed > -1.0e7 && how != 3) {
         s_rcam.yaw = (float)fixed;
         s_rcam.pitch = 0.0f;
     } else if (s_rcam.lt) {
         s_rcam.yaw = s_rcam.pitch = 0.0f;   /* the game puts its camera back behind as well */
         s_rcam.idle = 0.0f;
+        s_rcam.anchored = 0;                /* locked re-anchors on the reset view */
     } else if (s_rcam.rx != 0.0f || s_rcam.ry != 0.0f) {
         s_rcam.yaw   += RCAM_CURVE(s_rcam.rx) * RCAM_YAW * dt;
         s_rcam.pitch += RCAM_CURVE(s_rcam.ry) * RCAM_PITCH * dt;
         s_rcam.idle = 0.0f;
-    } else {
+    } else if (nv_window_pref_rstick_ease()) {
         s_rcam.idle += dt;
         if (s_rcam.idle > RCAM_HOLD) {
             float k = expf(-dt / RCAM_TAU);
@@ -4573,6 +4670,7 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
             s_rcam.pitch *= k;
         }
     }
+    /* Ease off: the turn simply stays where the player left it. */
     while (s_rcam.yaw >  3.14159265f) s_rcam.yaw -= 6.28318531f;
     while (s_rcam.yaw < -3.14159265f) s_rcam.yaw += 6.28318531f;
     if (s_rcam.pitch >  RCAM_PMAX) s_rcam.pitch =  RCAM_PMAX;
@@ -4582,7 +4680,7 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
     e = (float *)(m + cam + 0x44);
     t = (float *)(m + cam + 0x5C);
     hd = (int32_t *)(m + cam + 0x228);
-    if (ok && (s_rcam.yaw != 0.0f || s_rcam.pitch != 0.0f)) {
+    if (ok && (how == 3 || s_rcam.yaw != 0.0f || s_rcam.pitch != 0.0f)) {
         /* The eye about the point looked at: turned about the vertical so
          * that the view turns right for a positive yaw (in this left-handed
          * world the right of (x, z) is (z, -x)), then raised or lowered --
@@ -4590,6 +4688,25 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
          * where the game itself put it. */
         memcpy(s_rcam.game_eye, e, sizeof s_rcam.game_eye);
         v[0] = e[0] - t[0]; v[1] = e[1] - t[1]; v[2] = e[2] - t[2];
+        if (how == 3) {
+            /* Locked: this frame's turn is whatever takes the game's own
+             * direction to the anchor. The stick's pan, accumulated in
+             * yaw above, moves the anchor and is then spent. A view with
+             * no horizontal extent has no direction to hold; skip the
+             * anchor for that frame rather than invent one. */
+            float h0 = sqrtf(v[0] * v[0] + v[2] * v[2]);
+            if (h0 > 1e-3f) {
+                float base = atan2f(v[0], v[2]);
+                if (!s_rcam.anchored) { s_rcam.anchor = base; s_rcam.anchored = 1; }
+                s_rcam.anchor += s_rcam.yaw;
+                while (s_rcam.anchor >  3.14159265f) s_rcam.anchor -= 6.28318531f;
+                while (s_rcam.anchor < -3.14159265f) s_rcam.anchor += 6.28318531f;
+                s_rcam.yaw = s_rcam.anchor - base;
+                while (s_rcam.yaw >  3.14159265f) s_rcam.yaw -= 6.28318531f;
+                while (s_rcam.yaw < -3.14159265f) s_rcam.yaw += 6.28318531f;
+                s_rcam.turn = s_rcam.yaw;
+            }
+        }
         ca = cosf(s_rcam.yaw); sa = sinf(s_rcam.yaw);
         {
             float x = v[0] * ca + v[2] * sa, z = v[2] * ca - v[0] * sa;
@@ -4610,10 +4727,12 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
         }
         e[0] = t[0] + v[0]; e[1] = t[1] + v[1]; e[2] = t[2] + v[2];
         memcpy(s_rcam.our_eye, e, sizeof s_rcam.our_eye);
-        /* The heading turned with it, in the game's range (-0x8000..0x8000,
-         * as sub_0004A7A0 gives it). */
+        if (how == 3) s_rcam.yaw = 0.0f;   /* the pan is spent; the anchor holds it */
+        /* The heading is turned with it, in the game's range (-0x8000..0x8000,
+         * as sub_0004A7A0 gives it) -- or, tracking, left as it is. */
         s_rcam.game_hd = *hd;
-        *hd = (int32_t)(int16_t)(uint16_t)(s_rcam.game_hd + (int32_t)lrintf(s_rcam.yaw * (65536.0f / 6.28318531f)));
+        if (how == 1)
+            *hd = (int32_t)(int16_t)(uint16_t)(s_rcam.game_hd + (int32_t)lrintf(s_rcam.yaw * (65536.0f / 6.28318531f)));
         s_rcam.our_hd = *hd;
         s_rcam.cam = cam;
         s_rcam.applied = 1;

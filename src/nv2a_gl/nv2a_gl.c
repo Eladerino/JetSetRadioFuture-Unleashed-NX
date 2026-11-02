@@ -508,6 +508,12 @@ typedef struct {
     unsigned long long tex_verified;    /* source bytes tcache_verify compared */
 } GlProfile;
 static void vc_report(const char *when);
+/* nv2a_gfx_thread.c: one interval of the RECOMP_GL_SPLIT counters (the
+ * worker's replay time by group, the producer's stall, frames finished),
+ * for prof_report below. Declared here because prof_report runs long
+ * before the thread device's other declarations further down. */
+int nv2a_gfx_thread_split(double ms[6], unsigned long n[6],
+                          double *stall_ms, uint64_t *frames);
 static GlProfile g_prof;
 static int g_prof_on = -1;
 
@@ -734,6 +740,41 @@ static void prof_report(void)
                 100 * (g_pb_time - prev_pb) / dt,
                 (g_pb_words - prev_words) / 1000);
             prev_pb = g_pb_time; prev_words = g_pb_words;
+        }
+        {
+            /* RECOMP_GL_SPLIT (nv2a_gfx_thread.c): what the worker's
+             * replay cost in this interval, and what the producer waited
+             * for it. Every figure above times this thread, where a
+             * device call is a ring write; these two lines are the ones
+             * that price the real driver work, and the stall is the part
+             * of it on the frame's critical path. Groups, in order:
+             * draws, binds, uploads, program creation, present, other. */
+            double ms[6], stall = 0.0;
+            unsigned long n[6];
+            uint64_t fr = 0;
+            if (nv2a_gfx_thread_split(ms, n, &stall, &fr) && fr) {
+                fprintf(stderr,
+                    "[GLPROF]   worker replay per frame: %.2f ms in the "
+                    "driver (draws %.2f, binds %.2f, uploads %.2f, program "
+                    "creation %.2f, present %.2f, other %.2f); producer "
+                    "stalled %.2f ms\n",
+                    1000.0 * (ms[0] + ms[1] + ms[2] + ms[3] + ms[4] + ms[5]) / fr,
+                    1000.0 * ms[0] / fr, 1000.0 * ms[1] / fr,
+                    1000.0 * ms[2] / fr, 1000.0 * ms[3] / fr,
+                    1000.0 * ms[4] / fr, 1000.0 * ms[5] / fr,
+                    1000.0 * stall / fr);
+                fprintf(stderr,
+                    "[GLPROF]   worker calls per frame: draws %.0f "
+                    "(%.1f us each), binds %.0f (%.1f us), uploads %.0f "
+                    "(%.1f us), program creation %.0f (%.1f us), present "
+                    "%.0f (%.1f us), other %.0f (%.1f us)\n",
+                    (double)n[0] / fr, n[0] ? 1e6 * ms[0] / n[0] : 0.0,
+                    (double)n[1] / fr, n[1] ? 1e6 * ms[1] / n[1] : 0.0,
+                    (double)n[2] / fr, n[2] ? 1e6 * ms[2] / n[2] : 0.0,
+                    (double)n[3] / fr, n[3] ? 1e6 * ms[3] / n[3] : 0.0,
+                    (double)n[4] / fr, n[4] ? 1e6 * ms[4] / n[4] : 0.0,
+                    (double)n[5] / fr, n[5] ? 1e6 * ms[5] / n[5] : 0.0);
+            }
         }
         fflush(stderr);
         last = now; prev = g_prof;
@@ -1503,6 +1544,8 @@ static int gl_init(uint32_t w, uint32_t h)
 int  nv2a_widescreen(void);
 void nv2a_set_widescreen(int on);
 int  nv2a_wide_scene(void);
+int  nv2a_wide_stretch(void);
+void nv2a_set_wide_stretch(int on);
 float nv2a_wide_aspect(void);
 void nv2a_set_picture(int pic, float screen, int apply);
 
@@ -1593,28 +1636,67 @@ static void switch_options_set(const char *key, int val, int drop);
 /* nv2a_widescreen() asks this when RECOMP_WIDESCREEN is not set. */
 int nv_window_pref_widescreen(void) { return sdl_cfg_get("widescreen", 0) != 0; }
 
-/* The camera on the right stick (port/recomp_manual.c): on unless turned off --
- * Controls in the window's menu bar on Windows, F7 anywhere (and the Android
- * app's settings), kept as rstick_camera= (0 for off). Asked every frame, so
- * the file is read once. */
+/* The camera on the right stick (port/recomp_manual.c): 1 the camera (the
+ * default), 2 tracking -- the view turns and the skater keeps his heading --
+ * 3 locked -- the view keeps the direction it was left in -- or 0 off.
+ * Controls in the window's menu bar on Windows, F7 anywhere (and
+ * the Android app's settings); on the Switch, the in-game menu's Controller
+ * page. Kept as rstick_camera= (0 for off), rstick_tracking= and
+ * rstick_locked=. Asked every frame, so the file is read once. */
 static volatile int g_rstick_cam = -1;
 int nv_window_pref_rstick_camera(void);
 int nv_window_pref_rstick_camera(void)
 {
-    if (g_rstick_cam < 0) g_rstick_cam = sdl_cfg_get("rstick_camera", 1) != 0;
+    if (g_rstick_cam < 0)
+        g_rstick_cam = sdl_cfg_get("rstick_camera", 1) ? (sdl_cfg_get("rstick_locked", 0) ? 3 : sdl_cfg_get("rstick_tracking", 0) ? 2 : 1) : 0;
     return g_rstick_cam;
 }
-static void nv_window_set_rstick_camera(int on)
+static void nv_window_set_rstick_camera(int mode)
 {
-    g_rstick_cam = on ? 1 : 0;
-    sdl_cfg_set("rstick_camera", g_rstick_cam);
-    fprintf(stderr, "[WIN] the camera on the right stick: %s\n", on ? "on" : "off");
+    g_rstick_cam = mode < 0 ? 0 : mode > 3 ? 3 : mode;
+    sdl_cfg_set("rstick_camera", g_rstick_cam != 0);
+    sdl_cfg_set("rstick_tracking", g_rstick_cam == 2);
+    sdl_cfg_set("rstick_locked", g_rstick_cam == 3);
+    fprintf(stderr, "[WIN] the right stick: %s\n", g_rstick_cam == 3 ? "the camera, locked"
+                    : g_rstick_cam == 2 ? "the camera, tracking"
+                    : g_rstick_cam ? "the camera" : "the game's (camera off)");
+}
+/* Whether the camera turn eases back behind the skater when the stick is
+ * let go (port/recomp_manual.c): kept as rstick_easeback=, and off unless
+ * turned on -- on the Switch the held view is the point (see there). */
+static volatile int g_rstick_ease = -1;
+int nv_window_pref_rstick_ease(void);
+int nv_window_pref_rstick_ease(void)
+{
+    if (g_rstick_ease < 0) g_rstick_ease = sdl_cfg_get("rstick_easeback", 0) != 0;
+    return g_rstick_ease;
+}
+static void nv_window_set_rstick_ease(int on)
+{
+    g_rstick_ease = on ? 1 : 0;
+    sdl_cfg_set("rstick_easeback", g_rstick_ease);
+    fprintf(stderr, "[WIN] the camera eases back when released: %s\n", on ? "on" : "off");
+}
+/* Whether steering follows the locked view (port/recomp_manual.c):
+ * kept as rstick_steer=, off unless turned on -- it is experimental. */
+static volatile int g_rstick_steer = -1;
+int nv_window_pref_rstick_steer(void);
+int nv_window_pref_rstick_steer(void)
+{
+    if (g_rstick_steer < 0) g_rstick_steer = sdl_cfg_get("rstick_steer", 0) != 0;
+    return g_rstick_steer;
+}
+static void nv_window_set_rstick_steer(int on)
+{
+    g_rstick_steer = on ? 1 : 0;
+    sdl_cfg_set("rstick_steer", g_rstick_steer);
+    fprintf(stderr, "[WIN] steering follows the locked view: %s\n", on ? "on" : "off");
 }
 /* Asked for from another thread (the Android app's settings): done at the
  * next sdl_pump, by the thread that owns the window and the settings file. */
 static volatile int g_sdl_want_rcam = -1;
-void nv_window_request_rstick_camera(int on);
-void nv_window_request_rstick_camera(int on) { g_sdl_want_rcam = on ? 1 : 0; }
+void nv_window_request_rstick_camera(int mode);
+void nv_window_request_rstick_camera(int mode) { g_sdl_want_rcam = mode == 2 ? 2 : mode ? 1 : 0; }
 
 /* The face buttons by their printed names (the Nintendo layout): SDL
  * reports the pad by Xbox position, so on a Switch controller the
@@ -1868,6 +1950,7 @@ static void sdl_set_picture(int pic)
 }
 /* The Switch menu's widescreen row: 16:9 or 4:3 (21:9 is the desktop's). */
 static void sdl_toggle_widescreen(void) { sdl_set_picture(nv2a_widescreen() ? 0 : 1); }
+static void sdl_toggle_wide_stretch(void) { nv2a_set_wide_stretch(!nv2a_wide_stretch()); }
 
 /* F9: the internal resolution, 1x to 6x the Xbox's 640x480 (4x on Android,
  * as the iPhone's settings) -- what the Mac's Video menu offers. 6x is
@@ -2036,10 +2119,22 @@ static void sdl_choose_aa(void)
     sdl_keys_release();
 }
 
-/* F7 and Controls > Camera on the Right Stick: on or off, kept. */
-static void sdl_toggle_rstick_camera(void)
+/* F7 (round the camera, tracking and off) and the menu's Right-stick
+ * camera choice: kept. */
+static void sdl_set_rstick_camera(int mode)
 {
-    nv_window_set_rstick_camera(!nv_window_pref_rstick_camera());
+    nv_window_set_rstick_camera(mode);
+    sdl_menu_update();
+}
+
+static void sdl_toggle_rstick_steer(void)
+{
+    nv_window_set_rstick_steer(!nv_window_pref_rstick_steer());
+}
+
+static void sdl_toggle_rstick_ease(void)
+{
+    nv_window_set_rstick_ease(!nv_window_pref_rstick_ease());
     sdl_menu_update();
 }
 
@@ -2069,6 +2164,10 @@ static int    g_aniso_forced;       /* defined with tex_aniso, below */
 static int    aniso_forced(void);
 static double g_fps_period;         /* defined with frame_pace, below */
 static void   fps_period_init(void);
+
+static int menu_rcam_state(void) { return nv_window_pref_rstick_camera(); }
+
+static void menu_rcam_pick(int i) { sdl_set_rstick_camera(i); }
 
 static int menu_scale_state(void)
 {
@@ -2319,6 +2418,7 @@ static void sdl_menu_register(void)
 #endif
     };
     static const char *const fps_names[] = { "60", "30", "Unlimited" };
+    static const char *const rcam_names[] = { "Off", "Camera", "Camera (tracking)", "Camera (locked)" };
     static const char *const msaa_names[] = { "Off", "2x", "4x", "8x" };
     static const char *const aniso_names[] = { "Off", "2x", "4x", "8x", "16x" };
     static const char *const skipvol_names[] = {
@@ -2357,6 +2457,13 @@ static void sdl_menu_register(void)
           .tip = "Widens the view to fill a 16:9 screen instead of "
                  "the original 4:3." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Stretch to fill screen",
+          .state = nv2a_wide_stretch, .run = sdl_toggle_wide_stretch,
+          .tip = "Stretches the whole 4:3 picture to fill a 16:9 "
+                 "screen: title, menus and loading fill it too, and "
+                 "the port's own widening stands down. Everything "
+                 "looks a little wider; nothing is cut off." },
+        { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "SMAA",
           .state = nv2a_smaa, .run = menu_smaa_flip,
           .tip = "A smoothing pass over edges after rendering: a "
@@ -2380,11 +2487,30 @@ static void sdl_menu_register(void)
           .tip = "A speed experiment: shadow volumes are work the "
                  "renderer can skip, for characters, for scenery, or "
                  "for everything. Skipped shadows simply don't appear." },
-        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
+        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_CHOICE,
           .label = "Right-stick camera",
-          .state = nv_window_pref_rstick_camera, .run = sdl_toggle_rstick_camera,
-          .tip = "The right stick moves the camera. Off, it does what "
+          .state = menu_rcam_state, .pick = menu_rcam_pick,
+          .choices = rcam_names, .nchoices = 4,
+          .tip = "The right stick moves the camera. Camera (tracking) "
+                 "turns the view without turning the skater, so up on "
+                 "the left stick stays straight ahead of him. Camera "
+                 "(locked) also keeps the direction you leave it in: "
+                 "the game never turns it, only you do, and steering "
+                 "follows the view (experimental). Off, it does what "
                  "it did on the Xbox." },
+        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Camera eases back when released",
+          .state = nv_window_pref_rstick_ease, .run = sdl_toggle_rstick_ease,
+          .tip = "After you let go of the right stick, the view drifts "
+                 "back behind the skater. Off, the view stays where you "
+                 "left it; the left trigger still resets it." },
+        { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Steering follows the view (locked)",
+          .state = nv_window_pref_rstick_steer, .run = sdl_toggle_rstick_steer,
+          .tip = "With Camera (locked), the left stick steers by the "
+                 "screen instead of by the skater, so up is up-screen "
+                 "even from a standstill. Experimental. Off, steering "
+                 "is the game's own." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Nintendo layout (A/B, X/Y)",
           .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout,
@@ -2622,7 +2748,8 @@ static void sdl_menu_command(unsigned id)
     } else if (id >= MENU_MSAA1 && id < MENU_MSAA1 + 4) {
         sdl_pick_msaa(1 << (id - MENU_MSAA1));
     } else if (id == MENU_RCAM) {
-        sdl_toggle_rstick_camera();
+        { int m = nv_window_pref_rstick_camera();
+          sdl_set_rstick_camera(m == 1 ? 2 : m == 2 ? 3 : m == 3 ? 0 : 1); }
     }
 }
 #endif
@@ -2644,7 +2771,7 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &dfb);
     SDL_GL_GetDrawableSize(g_window, &ww, &wh);
     if (ww <= 0 || wh <= 0) return;
-    if (nv2a_wide_scene()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
+    if (nv2a_wide_scene() || nv2a_wide_stretch()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
     dw = ww; dh = wh;
     if ((long)ww * fh > (long)wh * fw) dw = (int)((long)wh * fw / fh);
     else                               dh = (int)((long)ww * fh / fw);
@@ -3072,7 +3199,7 @@ static void sdl_hand_over(GLuint src_fbo, int sw, int sh)
     if (sc) glEnable(GL_SCISSOR_TEST);
     glColorMask(cm[0], cm[1], cm[2], cm[3]);
     SDL_LockMutex(g_gs_mu);
-    s->wide = nv2a_wide_scene();
+    s->wide = nv2a_wide_scene() || nv2a_wide_stretch();
     g_gs_new = slot;
     g_gs_serial++;
     SDL_CondSignal(g_gs_cv);
@@ -3110,7 +3237,7 @@ static void sdl_pump(void)
     if (g_sdl_want_rcam >= 0) {
         int want = g_sdl_want_rcam;
         g_sdl_want_rcam = -1;
-        if (want != nv_window_pref_rstick_camera()) sdl_toggle_rstick_camera();
+        if (want != nv_window_pref_rstick_camera()) sdl_set_rstick_camera(want);
     }
     while (SDL_PollEvent(&ev)) {
 #if defined(XBOXRECOMP_MENU)
@@ -3133,7 +3260,9 @@ static void sdl_pump(void)
                 if (k == SDL_SCANCODE_F10) { sdl_set_picture((sdl_picture_now() + 1) % 3); break; }
                 if (k == SDL_SCANCODE_F9)  { sdl_choose_scale(); break; }
                 if (k == SDL_SCANCODE_F8)  { sdl_choose_aa(); break; }
-                if (k == SDL_SCANCODE_F7)  { sdl_toggle_rstick_camera(); break; }
+                if (k == SDL_SCANCODE_F7)  {   /* the camera -> tracking -> locked -> off -> the camera */
+                    int m = nv_window_pref_rstick_camera();
+                    sdl_set_rstick_camera(m == 1 ? 2 : m == 2 ? 3 : m == 3 ? 0 : 1); break; }
             }
             sdl_key(ev.key.keysym.scancode, 1);
             break;
@@ -5341,7 +5470,38 @@ void nv2a_set_widescreen(int on) { g_wide = on ? 1 : 0; }
  * throughout. */
 static volatile int g_wide_scene = 1;
 void nv2a_set_wide_scene(int on) { g_wide_scene = on ? 1 : 0; }
-int nv2a_wide_scene(void) { return nv2a_widescreen() && g_wide_scene; }
+/* The stretch look (skeammer-style), a Graphics page choice: present
+ * the untouched 4:3 frame stretched to fill 16:9 and do none of the
+ * port's own widening -- no camera or culling change (recomp_manual.c
+ * follows nv2a_wide_scene), no 2D squeeze, no HUD anchoring, no
+ * framed-3D move. Menus, loading screens and the title fill the
+ * screen, and 3D geometry stretches with everything else. Kept as
+ * wide_stretch= in the settings; JSRF_WIDE_STRETCH in the options
+ * file says first when it is there (value-read: =0 is off), and the
+ * menu row writes both, so the two never disagree after a toggle. */
+static volatile int g_wide_stretch = -1;
+int nv2a_wide_stretch(void);
+int nv2a_wide_stretch(void)
+{
+    if (g_wide_stretch < 0) {
+        const char *v = getenv("JSRF_WIDE_STRETCH");
+        g_wide_stretch = v ? atoi(v) != 0 : sdl_cfg_get("wide_stretch", 0) != 0;
+        if (g_wide_stretch) fprintf(stderr, "[WIDE] stretch: the 4:3 frame fills 16:9; "
+                                "no camera widening or 2D squeeze\n");
+    }
+    return g_wide_stretch;
+}
+void nv2a_set_wide_stretch(int on);
+void nv2a_set_wide_stretch(int on)
+{
+    g_wide_stretch = on ? 1 : 0;
+    sdl_cfg_set("wide_stretch", g_wide_stretch);
+#if defined(__SWITCH__)
+    switch_options_set("JSRF_WIDE_STRETCH", g_wide_stretch, 0);
+#endif
+    fprintf(stderr, "[WIN] stretch to fill the screen: %s\n", on ? "on" : "off");
+}
+int nv2a_wide_scene(void) { return !nv2a_wide_stretch() && nv2a_widescreen() && g_wide_scene; }
 /* The shape a widened scene is shown at, width over height: 16:9 unless a
  * platform asks for its screen's own (the iPhone's "Fill the screen", about
  * 19.5:9). The camera and its culling (recomp_manual.c), the 2D squeeze and
