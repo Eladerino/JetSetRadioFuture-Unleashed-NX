@@ -92,9 +92,8 @@ from your own copy of the game.
   stretch to fill screen, SMAA, MSAA, anisotropic filtering, shadow
   volumes), a right-stick camera choice (Camera, Camera (tracking),
   or Camera (locked), which holds the view in the direction you
-  leave it) with toggles for the camera easing back when the stick
-  is released and, experimentally, for steering that follows the
-  locked view, and a Nintendo layout option that
+  leave it), a toggle for the camera easing back when the stick is
+  released, and a Nintendo layout option that
   swaps A/B and X/Y so the face buttons work by their printed
   names (it is `nintendo_layout` in `options.txt`). A Developer
   page holds a live status readout and the engine's logging and
