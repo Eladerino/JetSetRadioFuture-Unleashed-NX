@@ -54,16 +54,35 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 - Upstream v0.6.1 is merged: in widescreen the HUD sits at the
   screen's edges and the boost's heat haze covers the whole
   screen. Both shipped in v0.2.0.
+- The picture fills the screen by default in v0.3.0: the 4:3
+  image stretched to 16:9, title and menus included, with the
+  true widescreen view one menu choice away (Graphics >
+  Stretch to fill screen, off).
+- The right-stick camera is a Controller choice in v0.3.0:
+  Camera, Camera (tracking, from upstream), and Camera
+  (locked), which holds the view in the direction it was left
+  in. Toggles beside it cover the ease-back when the stick is
+  released and, experimentally, steering that follows the
+  locked view.
+- The guest heap allocator takes a lock (v0.3.0): guest
+  threads allocating at the same time could corrupt its
+  block table (host test in tests/heap_lock).
+- When the frame watchdog trips, its dump names both sides
+  of the GPU wait (v0.3.0), so a freeze log says which side
+  lost the wake.
 - Performance on the reference clocks (CPU 1963 / GPU 1152 /
-  mem 2366 MHz, v0.2.0 release measurements): the garage holds
+  mem 2366 MHz; measured in the v0.2.0 cycle, unchanged by
+  v0.3.0): the garage holds
   the 60 fps cap, Shibuya Terminal and Dogenzaka Hill sit near
   60 with their busiest views around 50, Chuo Street around 57,
   and 99th Street, the heaviest area so far, around 49 with
   dips into the low 30s in its densest views. At stock clocks
-  the same areas run slower.
+  the same areas run slower, and stock-clock measurements are
+  still owed.
 - Open items: an intermittent red/blue channel split last seen
-  before draw validation landed; the draw-distance census
-  (RECOMP_GL_DEPTHLOG) run over 99th Street and Shibuya that
-  decides the shorter draw distance idea; and the GL worker
-  thread measurement (RECOMP_GL_SPLIT) that prices Mesa's share
-  of a heavy frame. Detail in the testing notes.
+  before draw validation landed; one unexplained freeze in
+  testing (a lost wake in the GPU completion path; the
+  watchdog now names the wait if it returns); the stock-clock
+  measurements; and a profile-guided build of the generated
+  code (PGO, then LTO), planned but not yet run. Detail in
+  the testing notes.
