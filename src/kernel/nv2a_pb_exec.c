@@ -1411,7 +1411,9 @@ out:
  * vertex buffer the title is about to rewrite, the pushbuffer segment it is
  * about to reuse -- had not been read yet, and this executor read it a few
  * milliseconds later, after the title had moved on. RECOMP_PB_SEMLOG=1 logs
- * the offsets and values so the block can be identified.
+ * the semaphore channel's changes and firsts (the block in
+ * nv2a_pb_exec_method) so the block can be identified and the largest
+ * offset a release lands at is on record.
  */
 static uint32_t s_sem_offset, s_sem_handle, s_sem_base;
 /* The last fence executed: the word it wrote, the value, where its release
@@ -1526,15 +1528,41 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         xbox_nv2a_software_method(subch, param);
     }
     if (subch == 0 && (method == 0x1D6C || method == 0x1D70 || method == 0x01A4)) {
-        static int lg = -1, shown;
+        static int lg = -1;
         if (lg < 0) lg = getenv("RECOMP_PB_SEMLOG") ? 1 : 0;
-        if (method == 0x1D6C) s_sem_offset = param;
+        /* SEMLOG logs changes and firsts, never a flat first-N: the boot
+         * channel pulses a single offset dozens of times before the first
+         * area loads, and run 32's flat sixty-call budget died there, so
+         * the releases gameplay makes were never seen. What the semaphore
+         * bound needs is every context, every offset a release lands at,
+         * and the largest of those, and that set is small. */
+        if (lg && method == 0x01A4)
+            { fprintf(stderr, "  [SEM] SET_CONTEXT_DMA_SEMAPHORE = 0x%08X\n", param); fflush(stderr); }
+        if (method == 0x1D6C) {
+            static int off_shown;
+            if (lg && (!off_shown || param != s_sem_offset))
+                { fprintf(stderr, "  [SEM] SET_SEMAPHORE_OFFSET = 0x%08X\n", param); fflush(stderr); off_shown = 1; }
+            s_sem_offset = param;
+        }
         if (method == 0x01A4) { s_sem_handle = param; s_sem_base_known = 0; }
-        if (lg && shown < 60) { shown++;
-            fprintf(stderr, "  [SEM] %s = 0x%08X\n",
-                    method == 0x1D6C ? "SET_SEMAPHORE_OFFSET"
-                  : method == 0x1D70 ? "BACK_END_WRITE_SEMAPHORE_RELEASE"
-                  : "SET_CONTEXT_DMA_SEMAPHORE", param); fflush(stderr); }
+        if (lg && method == 0x1D70) {
+            static uint32_t rel_off[64];
+            static int rel_n, rel_max_set;
+            static uint32_t rel_max;
+            int i, fresh = 1;
+            for (i = 0; i < rel_n; i++) if (rel_off[i] == s_sem_offset) fresh = 0;
+            if (fresh && rel_n < 64) {
+                rel_off[rel_n++] = s_sem_offset;
+                fprintf(stderr, "  [SEM] first release at offset 0x%08X, value 0x%08X\n",
+                        s_sem_offset, param);
+            }
+            if (!rel_max_set) { rel_max = s_sem_offset; rel_max_set = 1; }
+            else if (s_sem_offset > rel_max) {
+                rel_max = s_sem_offset;
+                fprintf(stderr, "  [SEM] largest release offset so far = 0x%08X\n", rel_max);
+            }
+            fflush(stderr);
+        }
         if (method == 0x1D70) {
             /* Execute the fence: the GPU has reached this point in the
              * stream -- every draw before it has been issued -- so the value
