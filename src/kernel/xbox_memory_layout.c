@@ -1041,7 +1041,12 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             volatile uint32_t *get =
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
-            uint32_t p = *put;
+            /* Acquire, as the eager copy pairs its reads (pb_eager_poll):
+             * the copy below is taken on this value, and a PUT seen before
+             * the words it covers are visible is a torn tail in the copy --
+             * at worst a stale word that decodes as a jump and ends the
+             * walk early (runs 29 and 37 lose their fences that way). */
+            uint32_t p = __atomic_load_n(put, __ATOMIC_ACQUIRE);
             /* With the flush-ack thread on, copy what is about to be
              * acknowledged before GET says so (nv2a_pb_scan.c), and walk
              * exactly that much below. */
@@ -1140,9 +1145,15 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 : *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             if (put != s_pb_last_put || (now_ms - last_put_ms) > 2000) {
                 int idle = put == s_pb_last_put, reported = 0;
+                /* Where the walk below provably got to: PUT, unless it
+                 * stopped short (nv2a_pb_walk_range), in which case the
+                 * bookmark stays at the stop and the next lap walks the
+                 * span again from there instead of abandoning its tail. */
+                uint32_t walked_to = put;
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern uint32_t nv2a_pb_scan(uint32_t, uint32_t);
+                    extern int nv2a_pb_walk_range(uint32_t, uint32_t, uint32_t *);
                     extern void nv2a_pb_scan_report(void);
                     static DWORD last_report;
 
@@ -1161,8 +1172,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      * OR-ing its base is the documented round trip, not a
                      * guess. */
                     if (s_pb_last_put && put > s_pb_last_put) {
-                        nv2a_pb_scan(XBOX_CONTIG_BASE | (s_pb_last_put & 0x0FFFFFFFu),
-                                     XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
+                        uint32_t stop = 0;
+                        if (!nv2a_pb_walk_range(XBOX_CONTIG_BASE | (s_pb_last_put & 0x0FFFFFFFu),
+                                                XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu), &stop))
+                            walked_to = stop & 0x0FFFFFFFu;
                     } else if (s_pb_last_put && put < s_pb_last_put) {
                         /* The ring wrapped: PUT went back to its start.
                          * The tail from the old PUT to the jump used to be
@@ -1185,8 +1198,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                         uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
                         uint32_t j = nv2a_pb_scan(from, from + 0x100000u);
                         if (j) {
+                            uint32_t stop = 0;
                             j = XBOX_CONTIG_BASE | (j & 0x0FFFFFFFu);
-                            if (j < to) nv2a_pb_scan(j, to);
+                            if (j < to && !nv2a_pb_walk_range(j, to, &stop))
+                                walked_to = stop & 0x0FFFFFFFu;
                         }
                     }
                     /* Periodic, because what the title submits at init is not
@@ -1198,7 +1213,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                         reported = 1;
                     }
                 }
-                s_pb_last_put = put; last_put_ms = now_ms;
+                s_pb_last_put = walked_to; last_put_ms = now_ms;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET
                  * tells those apart -- D3D waits for GET to reach PUT before it

@@ -512,6 +512,18 @@ static inline uint32_t pb_word(const uint8_t *mem, uint32_t va)
 static int s_in_sub;
 static uint32_t pb_walk_sub(uint32_t target_va);
 
+/* Where the most recent scan stopped short, and the word that stopped
+ * it (a jump): read by nv2a_pb_walk_range in the same moment, on the
+ * one thread that walks. A scan that reaches its end leaves these
+ * stale, and walk_range only reads them when the scan handed a jump
+ * back, which is the stop they describe. */
+static uint32_t s_scan_stop_va, s_scan_stop_word;
+uint32_t nv2a_pb_scan_stop(uint32_t *word)
+{
+    if (word) *word = s_scan_stop_word;
+    return s_scan_stop_va;
+}
+
 uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
@@ -582,6 +594,8 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
              * target, not here. */
             jumps++;
             jump_to = ((w & 3u) == 1u) ? (w & ~3u) : (w & 0x1FFFFFFCu);
+            s_scan_stop_va = va - 4;
+            s_scan_stop_word = w;
             break;
         }
         if ((w & 3u) == 2u) {
@@ -715,4 +729,75 @@ static uint32_t pb_walk_sub(uint32_t target_va)
         j = nv2a_pb_scan(t, t + 0x400000u);
     }
     return s_tot_words - before;
+}
+
+/* The ack loop's walk of one submitted span (xbox_memory_layout.c).
+ *
+ * The raw scan stops at the first jump and hands the target back,
+ * and both of the loop's callers used to drop it on the floor: the
+ * rest of the span -- the tail D3D parks its fence releases and its
+ * wake method in -- was never walked, and the loop's bookmark still
+ * advanced to PUT, so it was never walked later either. A game
+ * thread asleep in D3D's make-space wait (0x0019151B) on a fence
+ * that sat in such a tail is runs 29 and 37.
+ *
+ * This walk follows a jump that lands ahead of the stop and inside
+ * the span, the geometries a submitted span legitimately contains.
+ * Anything else -- a jump out of the span, a jump back, a torn word
+ * that decodes as a jump -- ends the walk honestly: it returns 0
+ * with the stop's address, and the loop leaves its bookmark there
+ * instead of at PUT, so the next lap copies and walks the span
+ * again from the stop. A torn copy heals itself that way (the words
+ * are fresh by then); a real one is re-examined, not abandoned.
+ * Releases re-executed by such a re-walk are idempotent, and the
+ * resume point is the stop word itself, never the span's start, so
+ * nothing already walked runs twice.
+ *
+ * RECOMP_PB_WALKFIX=0 is the old behaviour (scan once, drop the
+ * jump), for A/B. */
+volatile unsigned long g_pb_walk_stops, g_pb_walk_follows;
+volatile uint32_t g_pb_walk_stop_va, g_pb_walk_stop_word;
+
+int nv2a_pb_walk_range(uint32_t from_va, uint32_t to_va, uint32_t *stop_va)
+{
+    static int on = -1;
+    uint32_t va = from_va;
+    int hops = 0;
+    if (on < 0) { const char *e = getenv("RECOMP_PB_WALKFIX");
+                  on = e ? atoi(e) != 0 : 1; }
+    if (!on) {
+        (void)nv2a_pb_scan(from_va, to_va);
+        *stop_va = to_va;
+        return 1;
+    }
+    for (;;) {
+        uint32_t j = nv2a_pb_scan(va, to_va);
+        uint32_t stop, word, t;
+        if (!j) { *stop_va = to_va; return 1; }
+        stop = nv2a_pb_scan_stop(&word);
+        t = 0x80000000u | (j & 0x0FFFFFFFu);
+        if (hops < 64 && t > stop && t < to_va) {
+            g_pb_walk_follows++;
+            va = t;
+            hops++;
+            continue;
+        }
+        g_pb_walk_stops++;
+        g_pb_walk_stop_va = stop;
+        g_pb_walk_stop_word = word;
+        *stop_va = stop;
+        return 0;
+    }
+}
+
+/* The freeze watchdog's line (nv2a_pb_exec.c): whether the walk has
+ * been losing tails, and the last word it lost one to. */
+void nv2a_pb_walk_dump(void)
+{
+    if (!g_pb_walk_stops && !g_pb_walk_follows) return;
+    fprintf(stderr, "  [FROZEN] pushbuffer walk: %lu early stops "
+                    "(last at ring 0x%08X, word 0x%08X), %lu jumps followed\n",
+            g_pb_walk_stops, g_pb_walk_stop_va, g_pb_walk_stop_word,
+            g_pb_walk_follows);
+    fflush(stderr);
 }

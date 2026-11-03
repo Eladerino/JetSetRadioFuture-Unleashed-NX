@@ -1458,6 +1458,7 @@ void nv2a_pb_exec_frozen_dump(void)
             copy, g_pb_cmd_va, eager ? " (eager)" : "",
             s_sem_handle, s_sem_base, s_sem_offset, sem_va, sem_val);
     fflush(stderr);
+    { extern void nv2a_pb_walk_dump(void); nv2a_pb_walk_dump(); }
 }
 
 /* The physical base of a DMA object, by its handle, through the RAMHT the
