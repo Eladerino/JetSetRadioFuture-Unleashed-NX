@@ -515,6 +515,8 @@ static void vc_report(const char *when);
 int nv2a_gfx_thread_split(double ms[6], unsigned long n[6],
                           double *stall_ms, uint64_t *frames);
 static GlProfile g_prof;
+static unsigned long g_esh_skipped;  /* small uniforms the executor's shadow
+                                      * kept off the device entirely (esh_same) */
 static int g_prof_on = -1;
 
 static double prof_now(void)
@@ -731,6 +733,11 @@ static void prof_report(void)
             prev_sent = sent; prev_skip = skip;
         }
 #endif
+        { static unsigned long prev_esh;
+          fprintf(stderr, "[GLPROF]   executor uniform shadow: %lu skipped "
+                  "before the ring\n",
+                  (unsigned long)((g_esh_skipped - prev_esh) / dt));
+          prev_esh = g_esh_skipped; }
         {
             static double prev_pb; static unsigned long prev_words;
             fprintf(stderr,
@@ -940,6 +947,8 @@ static struct {
     uint8_t  uses_a0;   /* indexes the constant file through the address register */
     uint8_t  a0_input;  /* the v register the index comes from, 0xFF if unknown */
     uint32_t csync;     /* constants stamped before this it already has; 0 none */
+    uint64_t ush_have;  /* small uniforms this program already holds (esh_same) */
+    uint32_t ush_v[NV2A_U_COUNT][4]; /* their values, as last sent */
     char    *dis;       /* disassembly, kept only when a dump is armed */
 } g_pcache[PROG_CACHE];
 
@@ -1103,12 +1112,54 @@ static void const_changed(uint32_t i)
 /* Uniforms, by name (nv2a_backend.h), for the program in use. `uses` is
  * whether the program at a cache slot reads one at all: work for one it does
  * not is skipped, as it always was when a GL location came back -1. */
+
+/* The device skips a small uniform whose value the program already holds
+ * (the per-program shadow in nv2a_gfx_gl.c) -- but only after the call has
+ * crossed to it: threaded, that is a ring record written, walked and
+ * dispatched to be compared and thrown away, and in a busy area that
+ * happens thousands of times a frame against the sends that land. So the
+ * same shadow is kept here, per program slot, and a send the program
+ * provably already has never leaves this thread. The two shadows cannot
+ * disagree: this one is seeded only by sends actually made, it is reset
+ * where the slot's program is (the fill beside csync, whose reset it
+ * shares), and a program object's lifetime is its slot's. Values over
+ * 16 bytes (arrays, matrices, the constant file) are never shadowed on
+ * either side and go through the device calls directly, and no uniform
+ * here is sent both ways, so the device's forget-on-a-big-send has no
+ * counterpart to miss. RECOMP_GL_UNIFORM_SKIP=0 turns both shadows off. */
+static int esh_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("RECOMP_GL_UNIFORM_SKIP");
+                  on = !(e && e[0] == '0'); }
+    return on;
+}
+/* 1 if the current slot's program already holds these bytes for id;
+ * otherwise records them as what it will hold and returns 0. */
+static int esh_same(int id, const void *v, size_t bytes)
+{
+    int slot = g_cur_slot;
+    uint64_t bit;
+    if (slot < 0 || !esh_on()) return 0;
+    bit = 1ull << id;
+    if ((g_pcache[slot].ush_have & bit) &&
+        !memcmp(g_pcache[slot].ush_v[id], v, bytes)) { g_esh_skipped++; return 1; }
+    memcpy(g_pcache[slot].ush_v[id], v, bytes);
+    g_pcache[slot].ush_have |= bit;
+    return 0;
+}
 static int  uses(int slot, int id) { return G->prog_uses(g_pcache[slot].prog, id); }
-static void uni1f(int id, float a) { G->uniform_f(id, &a, 1); }
+static void uni1f(int id, float a) { if (!esh_same(id, &a, 4)) G->uniform_f(id, &a, 1); }
 static void uni2f(int id, float a, float b)
-{ float v[2]; v[0] = a; v[1] = b; G->uniform_f(id, v, 1); }
+{ float v[2]; v[0] = a; v[1] = b; if (!esh_same(id, v, 8)) G->uniform_f(id, v, 1); }
 static void uni4f(int id, float a, float b, float c, float d)
-{ float v[4]; v[0] = a; v[1] = b; v[2] = c; v[3] = d; G->uniform_f(id, v, 1); }
+{ float v[4]; v[0] = a; v[1] = b; v[2] = c; v[3] = d;
+  if (!esh_same(id, v, 16)) G->uniform_f(id, v, 1); }
+/* A vec4 already in an array (the viewport, the eye, the fog plane). */
+static void uni4fa(int id, const float *v)
+{ if (!esh_same(id, v, 16)) G->uniform_f(id, v, 1); }
+static void xuniform_i(int id, int v)
+{ if (!esh_same(id, &v, 4)) G->uniform_i(id, v); }
 
 /* Find a compiled program by hash, or -1. Open addressing: a run of used slots
  * with different hashes is a collision chain, and an empty slot ends it. */
@@ -4034,6 +4085,7 @@ static int program_for_current(void)
     g_pcache[slot].last_draw = S.draws;
     g_pcache[slot].prog   = prog;
     g_pcache[slot].csync  = 0;     /* a new program has no constants yet */
+    g_pcache[slot].ush_have = 0;   /* and none of its uniforms (esh_same) */
     g_pcache[slot].inputs = vp.inputs_read;
     /* Which input feeds the address register.
      *
@@ -7411,13 +7463,13 @@ static void do_draw_body(void)
                         mode = v ? atoi(v) : 0; }
       use = (mode == 9) ? (S.xf_mode == NV2A_XF_MODE_FIXED ? 0 : 1) : mode;
       if (uses(slot, NV2A_U_POSMODE))
-          G->uniform_i(NV2A_U_POSMODE, use); }
+          xuniform_i(NV2A_U_POSMODE, use); }
     /* Whether the fog register carries a real factor or a flat 1.0, and how
      * a fog distance becomes that factor. Uniforms belong to the program
      * object, so these go in per draw like the rest -- the last three only
      * with fog on, since with it off the shader never reads them. */
     if (uses(slot, NV2A_U_FOGENABLE))
-        G->uniform_i(NV2A_U_FOGENABLE, S.fog_enable ? 1 : 0);
+        xuniform_i(NV2A_U_FOGENABLE, S.fog_enable ? 1 : 0);
     if (S.fog_enable && uses(slot, NV2A_U_FOGMODE)) {
         /* NV097_SET_FOG_MODE, folded for the shader: 0 linear, 1 exp,
          * 2 exp2, plus 4 for the forms that take the absolute value. */
@@ -7430,12 +7482,12 @@ static void do_draw_body(void)
         case 0x0804: m = 4; break;   /* LINEAR_ABS */
         default:     m = 0; break;   /* LINEAR (0x2601) */
         }
-        G->uniform_i(NV2A_U_FOGMODE, m);
+        xuniform_i(NV2A_U_FOGMODE, m);
     }
     if (S.fog_enable && uses(slot, NV2A_U_FOGPARAM))
         uni2f(NV2A_U_FOGPARAM, S.fog_params[0], S.fog_params[1]);
     if (S.fog_enable && uses(slot, NV2A_U_FOGPLANE))
-        G->uniform_f(NV2A_U_FOGPLANE, S.fog_plane, 1);
+        uni4fa(NV2A_U_FOGPLANE, S.fog_plane);
     /*
      * RECOMP_GL_DRAWID: paint each draw with its own index instead of its
      * colour, so the finished frame says which draw owns which pixel.
@@ -7608,7 +7660,7 @@ static void do_draw_body(void)
         G->uniform_f(NV2A_U_LTSPOTDIR, &S.light_spot_dir[0][0], 8);
         { float eye[4]; memcpy(eye, S.eye_position, sizeof eye);
           if (eye[3] == 0.0f) eye[3] = 1.0f;
-          G->uniform_f(NV2A_U_LTEYE, eye, 1); }
+          uni4fa(NV2A_U_LTEYE, eye); }
         /* The exponent: the title hands the hardware six coefficients of
          * its own approximation (NV097_SET_SPECULAR_PARAMS), which xemu
          * fits back to an exponent. Not reconstructed here yet -- every lit
@@ -7618,7 +7670,7 @@ static void do_draw_body(void)
     if (g_zrev && S.xf_mode == NV2A_XF_MODE_FIXED && uses(slot, NV2A_U_ZREV)) {
         float r[4];
         zrev_row(r);
-        G->uniform_f(NV2A_U_ZREV, r, 1);
+        uni4fa(NV2A_U_ZREV, r);
     }
     if (uses(slot, NV2A_U_FFMAT)) {
         if (g_wide_fill) {
@@ -7646,7 +7698,7 @@ static void do_draw_body(void)
                             keep = v && *v && *v != '0'; }
             memcpy(o, S.vp_off_reg, sizeof o);
             if (!keep) { o[0] -= 0.53125f; o[1] -= 0.53125f; }
-            G->uniform_f(NV2A_U_FFVPOFF, o, 1);
+            uni4fa(NV2A_U_FFVPOFF, o);
         }
         if (uses(slot, NV2A_U_FFTEXMAT))
             G->uniform_f(NV2A_U_FFTEXMAT, &S.u.ff_texmat[0][0], 16);
@@ -7748,8 +7800,8 @@ static void do_draw_body(void)
                     S.u.vp_off[0], S.u.vp_off[1], S.u.vp_off[2], S.u.vp_off[3],
                     S.xf_mode);
         }
-        G->uniform_f(NV2A_U_VPSCALE, vp_scale_eff, 1);
-        G->uniform_f(NV2A_U_VPOFF, S.u.vp_off, 1);
+        uni4fa(NV2A_U_VPSCALE, vp_scale_eff);
+        uni4fa(NV2A_U_VPOFF, S.u.vp_off);
         uni2f(NV2A_U_VPSURFACE, (float)g_fbo_w, (float)g_fbo_h);
         {   /* Where the viewport is on the surface, for a vertex program's
              * screen-space oPos (see the epilogue): its centre -- the offset
@@ -7766,7 +7818,7 @@ static void do_draw_body(void)
                 r[0] = (float)g_fbo_w * 0.5f; r[1] = (float)g_fbo_h * 0.5f;
                 r[2] = (float)g_fbo_w * 0.5f; r[3] = (float)g_fbo_h * 0.5f;
             }
-            G->uniform_f(NV2A_U_VPRECT, r, 1);
+            uni4fa(NV2A_U_VPRECT, r);
         }
         uni1f(NV2A_U_WIDESHIFT, wshift);
         memcpy(g_last.vp_scale, vp_scale_eff, sizeof vp_scale_eff);
@@ -7824,7 +7876,7 @@ static void do_draw_body(void)
              * copied into the frame -- so during a boost the world was drawn
              * upside down under a HUD that was the right way up. */
             if (uses(slot, (NV2A_U_TEX0 + st)))
-                G->uniform_i((NV2A_U_TEX0 + st), st);
+                xuniform_i((NV2A_U_TEX0 + st), st);
             flip = (sslot >= 0 && G->rt_bottom_up);
             if (uses(slot, (NV2A_U_TEXSCALE0 + st)))
                 uni2f((NV2A_U_TEXSCALE0 + st), sx, flip ? -sy : sy);
@@ -7897,7 +7949,7 @@ static void do_draw_body(void)
         if (noalpha < 0) noalpha = getenv("RECOMP_GL_NOALPHATEST") ? 1 : 0;
         af = (S.alpha_test && !noalpha) ? (S.alpha_func - 0x0200 + 1) : 0;
         if (af != g_last.alpha_func || S.alpha_ref != g_last.alpha_ref) {
-            G->uniform_i(NV2A_U_ALPHAFUNC, af);
+            xuniform_i(NV2A_U_ALPHAFUNC, af);
             uni1f(NV2A_U_ALPHAREF, S.alpha_ref);
             g_last.alpha_func = af; g_last.alpha_ref = S.alpha_ref;
         }
@@ -9117,13 +9169,13 @@ static void do_draw_body(void)
                   if (S.cull_enable) glEnable(GL_CULL_FACE);
                   else glDisable(GL_CULL_FACE);
                   if (uses(slot, NV2A_U_ALPHAFUNC))
-                      G->uniform_i(NV2A_U_ALPHAFUNC, af);
+                      xuniform_i(NV2A_U_ALPHAFUNC, af);
                   /* Every pass uses "greater than t" so the counts are
                    * directly comparable; culling stays off throughout so a
                    * back face does not masquerade as a transparent one. */
                   glDisable(GL_CULL_FACE);
                   if (uses(slot, NV2A_U_ALPHAFUNC))
-                      G->uniform_i(NV2A_U_ALPHAFUNC, 0);
+                      xuniform_i(NV2A_U_ALPHAFUNC, 0);
                   glEnable(GL_DEPTH_TEST);
                   glDepthFunc(dfn[pass]);
 
@@ -9163,7 +9215,7 @@ static void do_draw_body(void)
               if (S.cull_enable) glEnable(GL_CULL_FACE);
               else glDisable(GL_CULL_FACE);
               if (uses(slot, NV2A_U_ALPHAFUNC)) {
-                  G->uniform_i(NV2A_U_ALPHAFUNC, af);
+                  xuniform_i(NV2A_U_ALPHAFUNC, af);
                   uni1f(NV2A_U_ALPHAREF, S.alpha_ref);
               }
               glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -9250,7 +9302,7 @@ static void do_draw_body(void)
             xr.depth_func = 0x0207;              /* ALWAYS */
             G->state(&xr);
             if (uses(slot, NV2A_U_ALPHAFUNC))
-                G->uniform_i(NV2A_U_ALPHAFUNC, 0);
+                xuniform_i(NV2A_U_ALPHAFUNC, 0);
             PROF_T0(); G->draw(mode, out_n); PROF_ADD(draw);
             G->state_invalidate();
             g_last.alpha_func   = -1;
