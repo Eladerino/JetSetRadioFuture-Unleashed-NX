@@ -517,6 +517,8 @@ int nv2a_gfx_thread_split(double ms[6], unsigned long n[6],
 static GlProfile g_prof;
 static unsigned long g_esh_skipped;  /* small uniforms the executor's shadow
                                       * kept off the device entirely (esh_same) */
+static unsigned long g_texbind_skipped;  /* texture binds the executor's
+                                      * memory kept off the device (tex_bind) */
 static int g_prof_on = -1;
 
 static double prof_now(void)
@@ -737,7 +739,12 @@ static void prof_report(void)
           fprintf(stderr, "[GLPROF]   executor uniform shadow: %lu skipped "
                   "before the ring\n",
                   (unsigned long)((g_esh_skipped - prev_esh) / dt));
-          prev_esh = g_esh_skipped; }
+          prev_esh = g_esh_skipped;
+          { static unsigned long prev_tb;
+            fprintf(stderr, "[GLPROF]   executor texture binds: %lu skipped "
+                    "as already bound\n",
+                    (unsigned long)((g_texbind_skipped - prev_tb) / dt));
+            prev_tb = g_texbind_skipped; } }
         {
             static double prev_pb; static unsigned long prev_words;
             fprintf(stderr,
@@ -1160,6 +1167,45 @@ static void uni4fa(int id, const float *v)
 { if (!esh_same(id, v, 16)) G->uniform_f(id, v, 1); }
 static void xuniform_i(int id, int v)
 { if (!esh_same(id, &v, 4)) G->uniform_i(id, v); }
+
+/* What each texture unit already holds, as this thread last bound it.
+ *
+ * The stage setup binds all four units on every draw, changed or not:
+ * four records a draw, some nineteen hundred a frame in a busy area, most
+ * of them the texture already there. The device writes units 0 to 3 only
+ * through these binds (its own uploads, copies and presents go through a
+ * scratch unit), so what was last sent is what is bound, and a bind of
+ * what is already there can simply not be sent. The memory is forgotten
+ * wherever a bound texture can stop existing: a cache drop frees its
+ * texture (tcache_drop), and a render target's teardown deletes the
+ * texture a surface is sampled through, so that path forgets all four.
+ * Forgetting only ever costs a re-bind. RECOMP_GL_TEXBIND_SKIP=0 sends
+ * them all, as before. */
+static uint32_t g_tex_bound[4];
+static int      g_tex_bound_known;   /* a bit per unit: the entry is real */
+static int texbind_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("RECOMP_GL_TEXBIND_SKIP");
+                  on = !(e && e[0] == '0'); }
+    return on;
+}
+static void tex_bind(int st, uint32_t tex)
+{
+    if (texbind_on() && (g_tex_bound_known & (1 << st))
+        && g_tex_bound[st] == tex) { g_texbind_skipped++; return; }
+    G->texture(st, tex);
+    g_tex_bound[st] = tex;
+    g_tex_bound_known |= 1 << st;
+}
+static void texbind_forget(uint32_t tex)
+{
+    int st;
+    for (st = 0; st < 4; st++)
+        if ((g_tex_bound_known & (1 << st)) && g_tex_bound[st] == tex)
+            g_tex_bound_known &= ~(1 << st);
+}
+static void texbind_forget_all(void) { g_tex_bound_known = 0; }
 
 /* Find a compiled program by hash, or -1. Open addressing: a run of used slots
  * with different hashes is a collision chain, and an empty slot ends it. */
@@ -3419,6 +3465,7 @@ static void surface_bind(uint32_t offset, uint32_t w, uint32_t h)
          * title keeps its shadow counts there -- at the raster's size. */
         uint32_t rt;
         if (g_surf[slot].rt) {
+            texbind_forget_all();   /* its texture dies with the target */
             G->target_free(g_surf[slot].rt);
             g_surf[slot].rt = 0;
             g_surf[slot].used = 0;
@@ -4543,6 +4590,7 @@ static uint32_t tex_content(uint32_t color, uint32_t height, uint32_t pitch,
 static void tcache_drop(uint32_t k)
 {
     if (g_tcache[k].used && g_tcache[k].tex) {
+        texbind_forget(g_tcache[k].tex);   /* a freed texture is unbound */
         G->tex_free(g_tcache[k].tex);
         g_prof.tex_held--;
         g_prof.tex_held_bytes -= (unsigned long long)g_tcache[k].held;
@@ -7857,7 +7905,7 @@ static void do_draw_body(void)
                     }
                 }
             }
-            G->texture(st, tex);
+            tex_bind(st, tex);
             /* A surface this backend rendered holds its picture the GL way
              * up: the vertex stage sends screen y = 0 to NDC +1, so the top
              * row of the picture is the LAST row of the framebuffer. A
@@ -7883,7 +7931,7 @@ static void do_draw_body(void)
             if (uses(slot, (NV2A_U_TEXOFF0 + st)))
                 uni2f((NV2A_U_TEXOFF0 + st), 0.0f, flip ? 1.0f : 0.0f);
             if (uses(slot, (NV2A_U_BUMPMAT0 + st)))
-                G->uniform_f((NV2A_U_BUMPMAT0 + st), S.tex[st].bump_mat, 1);
+                uni4fa((NV2A_U_BUMPMAT0 + st), S.tex[st].bump_mat);
             if (uses(slot, (NV2A_U_BUMPSCALE0 + st)))
                 uni1f((NV2A_U_BUMPSCALE0 + st), S.tex[st].bump_scale);
             if (uses(slot, (NV2A_U_BUMPOFF0 + st)))
