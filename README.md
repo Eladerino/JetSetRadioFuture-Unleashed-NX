@@ -36,6 +36,21 @@ only. No game data is included or distributed; see
 
 Full credits are in the [Credits](#credits) section below.
 
+## Screenshots
+
+The in-game menu on the Switch build, opened with Minus, and the game
+running in Shibuya Terminal with the frame rate counter on:
+
+![The File page of the in-game menu, showing the build version](docs/images/menu-file.jpg)
+
+![The Display page of the in-game menu](docs/images/menu-display.jpg)
+
+![The Music page of the in-game menu](docs/images/menu-music.jpg)
+
+![The Developer page of the in-game menu](docs/images/menu-developer.jpg)
+
+![Shibuya Terminal with the frame rate counter on](docs/images/gameplay-fps.jpg)
+
 ## Nintendo Switch port
 
 The easy path is the release: download it, copy it to the SD card, add the
