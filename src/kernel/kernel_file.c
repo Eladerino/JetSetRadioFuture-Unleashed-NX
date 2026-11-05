@@ -57,6 +57,62 @@ static ULONG partition_unwritten_bytes(HANDLE h, ULONGLONG pos, ULONG want)
     return (end - pos < want) ? (ULONG)(end - pos) : want;
 }
 
+/* Running file I/O totals for the renderer's [hitch] line (xbox_io_totals),
+ * pulled from skeammer's jsrf-nx (kernel_bridge.c) with his permission --
+ * credit: skeammer: calls, bytes and host microseconds of reads, writes and
+ * opens, so a screen held still on a loading screen says how much of the
+ * stall was the SD card and how much the game's own work. Unlocked: a count
+ * lost to a race between two threads costs a diagnostic nothing. His
+ * bridges counted around the same xbox_Nt* calls; here the counting sits
+ * inside the POSIX backend's functions themselves (the backend the Switch
+ * build uses), and his IO_OTHER(stmt) macro is used the same way. */
+static struct {
+    uint64_t reads, read_bytes, read_us;
+    uint64_t writes, write_bytes, write_us;
+    uint64_t opens, open_us;
+    uint64_t others, other_us;      /* directory scans, attributes, deletes... */
+} s_io_tot;
+
+#if !defined(_WIN32)
+#include <time.h>                   /* clock_gettime for io_now_us */
+#endif
+static uint64_t io_now_us(void)
+{
+#if defined(_WIN32)
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart)
+        QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)(c.QuadPart / f.QuadPart) * 1000000u
+         + (uint64_t)(c.QuadPart % f.QuadPart) * 1000000u / (uint64_t)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+#endif
+}
+
+/* Time one of the file calls that are neither a read, a write nor an open. */
+#define IO_OTHER(stmt) do {                                             \
+        uint64_t io_t0_ = io_now_us();                                  \
+        stmt;                                                           \
+        s_io_tot.others++;                                              \
+        s_io_tot.other_us += io_now_us() - io_t0_;                      \
+    } while (0)
+
+/* out[] = reads, bytes read, read us, writes, bytes written, write us,
+ * opens (NtCreateFile and NtOpenFile, failed ones too), open us, other file
+ * calls (directory queries, attribute and volume queries, set-information --
+ * which is how a delete arrives -- deletes, flushes), their us. */
+void xbox_io_totals(uint64_t out[10])
+{
+    out[0] = s_io_tot.reads;  out[1] = s_io_tot.read_bytes;  out[2] = s_io_tot.read_us;
+    out[3] = s_io_tot.writes; out[4] = s_io_tot.write_bytes; out[5] = s_io_tot.write_us;
+    out[6] = s_io_tot.opens;  out[7] = s_io_tot.open_us;
+    out[8] = s_io_tot.others; out[9] = s_io_tot.other_us;
+}
+
 /* ======================================================================== */
 #if defined(_WIN32)
 /* ====================  Win32 backend  =================================== */
@@ -886,6 +942,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
 
     if (!FileHandle || !ObjectAttributes)
         return STATUS_INVALID_PARAMETER;
+    uint64_t io_t0_ = io_now_us();
 
     const char* xbox_path = get_xbox_path(ObjectAttributes);
     extern int g_xbox_translate_want_dir;
@@ -894,6 +951,8 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     g_xbox_translate_want_dir = 0;
     if (!tr) {
         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
+        s_io_tot.opens++;
+        s_io_tot.open_us += io_now_us() - io_t0_;
         return STATUS_OBJECT_PATH_NOT_FOUND;
     }
 
@@ -936,6 +995,8 @@ NTSTATUS __stdcall xbox_NtCreateFile(
             IoStatusBlock->Status = st;
             IoStatusBlock->Information = 0;
         }
+        s_io_tot.opens++;
+        s_io_tot.open_us += io_now_us() - io_t0_;
         return st;
     }
 
@@ -947,6 +1008,8 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     fprintf(stderr, "  [FILE] open %s -> %s (handle=%p, opts=0x%X)\n", xbox_path, host_path, *FileHandle, CreateOptions);
     { extern void xbox_file_open_hook(const char *) __attribute__((weak));
       if (xbox_file_open_hook) xbox_file_open_hook(xbox_path); }
+    s_io_tot.opens++;
+    s_io_tot.open_us += io_now_us() - io_t0_;
     return STATUS_SUCCESS;
 }
 
@@ -960,6 +1023,7 @@ NTSTATUS __stdcall xbox_NtReadFile(
     (void)ApcRoutine; (void)ApcContext;
     if (!IoStatusBlock)
         return STATUS_INVALID_PARAMETER;
+    uint64_t io_t0_ = io_now_us();
 
     int fd = w32_handle_fd(FileHandle);
     if (fd < 0) {
@@ -1016,6 +1080,9 @@ NTSTATUS __stdcall xbox_NtReadFile(
     /* Counted so the periodic kernel summary can say whether a title sitting
      * on a loading screen is loading. */
     if (n > 0) { g_read_bytes += (unsigned long long)n; g_read_calls++; }
+    s_io_tot.reads++;
+    s_io_tot.read_bytes += (uint64_t)IoStatusBlock->Information;
+    s_io_tot.read_us += io_now_us() - io_t0_;
     if (n == 0 && Length > 0) {
         IoStatusBlock->Status = STATUS_END_OF_FILE;
         return STATUS_END_OF_FILE;
@@ -1033,6 +1100,7 @@ NTSTATUS __stdcall xbox_NtWriteFile(
     (void)ApcRoutine; (void)ApcContext;
     if (!IoStatusBlock)
         return STATUS_INVALID_PARAMETER;
+    uint64_t io_t0_ = io_now_us();
 
     int fd = w32_handle_fd(FileHandle);
     if (fd < 0) {
@@ -1053,6 +1121,9 @@ NTSTATUS __stdcall xbox_NtWriteFile(
 
     IoStatusBlock->Status = STATUS_SUCCESS;
     IoStatusBlock->Information = (ULONG_PTR)n;
+    s_io_tot.writes++;
+    s_io_tot.write_bytes += (uint64_t)n;
+    s_io_tot.write_us += io_now_us() - io_t0_;
     if (Event) SetEvent(Event);
     return STATUS_SUCCESS;
 }
@@ -1070,27 +1141,29 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
 
 NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     char host_path[MAX_PATH];
     const char* xbox_path = get_xbox_path(ObjectAttributes);
     if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
-        return STATUS_OBJECT_PATH_NOT_FOUND;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_OBJECT_PATH_NOT_FOUND);
     XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %s", host_path);
-    if (unlink(host_path) == 0) return STATUS_SUCCESS;
-    if (rmdir(host_path)  == 0) return STATUS_SUCCESS;
-    return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (unlink(host_path) == 0) return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
+    if (rmdir(host_path)  == 0) return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
+    return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_OBJECT_NAME_NOT_FOUND);
 }
 
 NTSTATUS __stdcall xbox_NtQueryInformationFile(
     HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
     PVOID FileInformation, ULONG Length, XBOX_FILE_INFORMATION_CLASS FileInformationClass)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     (void)Length;
     if (!IoStatusBlock || !FileInformation)
-        return STATUS_INVALID_PARAMETER;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_PARAMETER);
 
     int fd = w32_handle_fd(FileHandle);
     if (fd < 0)
-        return STATUS_INVALID_HANDLE;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_HANDLE);
 
     struct stat st;
     if (FileInformationClass != XboxFilePositionInformation) {
@@ -1099,10 +1172,10 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
          * truth, and for a file the path and the fd agree. */
         const char *sp = w32_handle_path(FileHandle);
         if (!(sp && stat(sp, &st) == 0) && fstat(fd, &st) != 0)
-            return STATUS_UNSUCCESSFUL;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_UNSUCCESSFUL);
 #else
         if (fstat(fd, &st) != 0)
-            return STATUS_UNSUCCESSFUL;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_UNSUCCESSFUL);
 #endif
     }
 
@@ -1116,7 +1189,7 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
             info->FileAttributes = mode_to_xbox_attrs(st.st_mode);
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(XBOX_FILE_BASIC_INFORMATION);
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         case XboxFileStandardInformation: {
             PXBOX_FILE_STANDARD_INFORMATION info = (PXBOX_FILE_STANDARD_INFORMATION)FileInformation;
@@ -1127,16 +1200,16 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
             info->Directory = S_ISDIR(st.st_mode) ? TRUE : FALSE;
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(XBOX_FILE_STANDARD_INFORMATION);
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         case XboxFilePositionInformation: {
             PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
             off_t pos = lseek(fd, 0, SEEK_CUR);
-            if (pos < 0) return STATUS_UNSUCCESSFUL;
+            if (pos < 0) return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_UNSUCCESSFUL);
             info->CurrentByteOffset.QuadPart = pos;
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(XBOX_FILE_POSITION_INFORMATION);
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         case XboxFileNetworkOpenInformation: {
             PXBOX_FILE_NETWORK_OPEN_INFORMATION info = (PXBOX_FILE_NETWORK_OPEN_INFORMATION)FileInformation;
@@ -1149,12 +1222,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
             info->FileAttributes = mode_to_xbox_attrs(st.st_mode);
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(XBOX_FILE_NETWORK_OPEN_INFORMATION);
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         default:
             xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                 "NtQueryInformationFile: unhandled class %d", FileInformationClass);
-            return STATUS_NOT_IMPLEMENTED;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_NOT_IMPLEMENTED);
     }
 }
 
@@ -1162,29 +1235,30 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
     HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
     PVOID FileInformation, ULONG Length, XBOX_FILE_INFORMATION_CLASS FileInformationClass)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     (void)Length;
     if (!IoStatusBlock || !FileInformation)
-        return STATUS_INVALID_PARAMETER;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_PARAMETER);
 
     int fd = w32_handle_fd(FileHandle);
     if (fd < 0)
-        return STATUS_INVALID_HANDLE;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_HANDLE);
     if (getenv("JSRF_DBG")) fprintf(stderr, "  [FILE] NtSetInformationFile class %d len %u fd %d\n", (int)FileInformationClass, (unsigned)Length, fd);
 
     switch (FileInformationClass) {
         case XboxFilePositionInformation: {
             PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
             if (lseek(fd, (off_t)info->CurrentByteOffset.QuadPart, SEEK_SET) < 0)
-                return STATUS_UNSUCCESSFUL;
+                return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_UNSUCCESSFUL);
             IoStatusBlock->Status = STATUS_SUCCESS;
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         case XboxFileEndOfFileInformation: {
             PXBOX_FILE_END_OF_FILE_INFORMATION info = (PXBOX_FILE_END_OF_FILE_INFORMATION)FileInformation;
             if (ftruncate(fd, (off_t)info->EndOfFile.QuadPart) != 0)
-                return STATUS_UNSUCCESSFUL;
+                return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_UNSUCCESSFUL);
             IoStatusBlock->Status = STATUS_SUCCESS;
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         case XboxFileDispositionInformation: {
             PXBOX_FILE_DISPOSITION_INFORMATION info = (PXBOX_FILE_DISPOSITION_INFORMATION)FileInformation;
@@ -1195,12 +1269,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
                 if (p) unlink(p);
             }
             IoStatusBlock->Status = STATUS_SUCCESS;
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         case XboxFileBasicInformation:
             /* Setting file times is non-essential for the game; accept it. */
             IoStatusBlock->Status = STATUS_SUCCESS;
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         default:
             /* stderr, not xbox_log: WARN is filtered out by default, and an
              * unimplemented info class is exactly the kind of silent gap that
@@ -1210,7 +1284,7 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
             fprintf(stderr, "  [FILE] NtSetInformationFile: unhandled class %d\n",
                     (int)FileInformationClass);
             fflush(stderr);
-            return STATUS_NOT_IMPLEMENTED;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_NOT_IMPLEMENTED);
     }
 }
 
@@ -1218,9 +1292,10 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
     HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
     PVOID FsInformation, ULONG Length, XBOX_FS_INFORMATION_CLASS FsInformationClass)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     (void)Length;
     if (!IoStatusBlock || !FsInformation)
-        return STATUS_INVALID_PARAMETER;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_PARAMETER);
 
     switch (FsInformationClass) {
         case XboxFileFsSizeInformation: {
@@ -1270,40 +1345,42 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
               } }
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(XBOX_FILE_FS_SIZE_INFORMATION);
-            return STATUS_SUCCESS;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
         }
         default:
             xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
                 "NtQueryVolumeInformationFile: unhandled class %d", FsInformationClass);
-            return STATUS_NOT_IMPLEMENTED;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_NOT_IMPLEMENTED);
     }
 }
 
 NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     int fd = w32_handle_fd(FileHandle);
     if (fd >= 0) fsync(fd);
     if (IoStatusBlock) {
         IoStatusBlock->Status = STATUS_SUCCESS;
         IoStatusBlock->Information = 0;
     }
-    return STATUS_SUCCESS;
+    return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
 }
 
 NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
     PXBOX_FILE_NETWORK_OPEN_INFORMATION FileInformation)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     char host_path[MAX_PATH];
     struct stat st;
 
     if (!FileInformation)
-        return STATUS_INVALID_PARAMETER;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_PARAMETER);
     const char* xbox_path = get_xbox_path(ObjectAttributes);
     if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
-        return STATUS_OBJECT_PATH_NOT_FOUND;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_OBJECT_PATH_NOT_FOUND);
     if (stat(host_path, &st) != 0)
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_OBJECT_NAME_NOT_FOUND);
 
     unix_to_filetime(st.st_ctime, 0, &FileInformation->CreationTime);
     unix_to_filetime(st.st_atime, 0, &FileInformation->LastAccessTime);
@@ -1312,7 +1389,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
     FileInformation->EndOfFile.QuadPart = st.st_size;
     FileInformation->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
     FileInformation->FileAttributes = mode_to_xbox_attrs(st.st_mode);
-    return STATUS_SUCCESS;
+    return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
 }
 
 /* Directory enumeration state, keyed by the directory's Nt handle. */
@@ -1359,9 +1436,10 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
     PXBOX_ANSI_STRING FileName, BOOLEAN RestartScan)
 {
+    uint64_t io_t0_ = io_now_us();   /* [perf] I/O totals (skeammer) */
     (void)Event; (void)ApcRoutine; (void)ApcContext;
     if (!IoStatusBlock || !FileInformation)
-        return STATUS_INVALID_PARAMETER;
+        return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_INVALID_PARAMETER);
 
     if (!s_dir_cs_init) { InitializeCriticalSection(&s_dir_cs); s_dir_cs_init = TRUE; }
     EnterCriticalSection(&s_dir_cs);
@@ -1394,7 +1472,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
         if (!ctx->dir) {
             LeaveCriticalSection(&s_dir_cs);
             IoStatusBlock->Status = STATUS_NO_MORE_FILES;
-            return STATUS_NO_MORE_FILES;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_NO_MORE_FILES);
         }
         if (FileName && FileName->Buffer && FileName->Length > 0) {
             USHORT n = FileName->Length;
@@ -1418,7 +1496,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
             ctx->handle = NULL;
             LeaveCriticalSection(&s_dir_cs);
             IoStatusBlock->Status = STATUS_NO_MORE_FILES;
-            return STATUS_NO_MORE_FILES;
+            return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_NO_MORE_FILES);
         }
         if (fnmatch(ctx->pattern, de->d_name, FNM_CASEFOLD) == 0)
             break;
@@ -1454,7 +1532,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
         fprintf(stderr, "  [DIR] %s: %s size=%lld attrs=0x%X (hdr %u, len %u)\n",
                 dpath ? dpath : "?", de->d_name, (long long)st.st_size,
                 (unsigned)entry->FileAttributes, (unsigned)header_size, Length);
-    return STATUS_SUCCESS;
+    return (s_io_tot.others++, s_io_tot.other_us += io_now_us() - io_t0_, STATUS_SUCCESS);
 }
 
 #endif /* _WIN32 */

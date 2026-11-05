@@ -838,6 +838,15 @@ static void perf_reporter(void *arg)
             pi[c] = i; pt[c] = t;
         }
         if (round) fprintf(stderr, "%s\n", line);
+#if defined(JSRF_DEKO3D)
+        if (round) {
+            /* 4096, as in skeammer's caller: his full [perf] report is
+             * several lines and does not fit in less. */
+            static char renderer[4096];
+            nv2a_dk_perf(renderer, sizeof renderer, 2.0);
+            fprintf(stderr, "%s\n", renderer);
+        }
+#endif
         if (round % 15 == 0) log_clocks();
     }
 }

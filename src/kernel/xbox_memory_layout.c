@@ -297,6 +297,30 @@ static DWORD WINAPI nv2a_flush_ack_thread(LPVOID param)
     }
     return 0;
 }
+/* Executor load counters for the renderer's [perf] report, pulled from
+ * skeammer's jsrf-nx (xbox_memory_layout.c: nv2a_exec_busy_us,
+ * nv2a_kick_count, nv2a_exec_sleep_us, nv2a_exec_poll_hits,
+ * nv2a_exec_sleeps) with his permission -- credit: skeammer. Adapted to
+ * this tree, whose executor is the ack thread below: "busy" is its time in
+ * a lap's pushbuffer walk, a "kick" is xbox_nv2a_kick, a "sleep" is one of
+ * its waits at the bottom of the loop, and a "poll hit" is new work the
+ * eager copy took while a walk was in progress (pb_eager_poll). Counting
+ * only: nothing here changes when the thread runs or what it does. */
+static volatile uint64_t s_exec_busy_us;
+uint64_t nv2a_exec_busy_us(void) { return s_exec_busy_us; }
+static volatile uint32_t s_kicks;
+uint32_t nv2a_kick_count(void) { return s_kicks; }
+static volatile uint64_t s_exec_sleep_us;
+uint64_t nv2a_exec_sleep_us(void) { return s_exec_sleep_us; }
+static volatile uint32_t s_exec_poll_hits, s_exec_sleeps;
+uint32_t nv2a_exec_poll_hits(void) { return s_exec_poll_hits; }
+uint32_t nv2a_exec_sleeps(void) { return s_exec_sleeps; }
+static uint64_t exec_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
 static void nv2a_flush_ack_start(void *regs)
 {
     const char *e = getenv("RECOMP_NV2A_FLUSH_ACK");
@@ -311,6 +335,7 @@ void xbox_nv2a_kick(void)
 {
     if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
     if (!s_kick_on) return;
+    s_kicks++;
     nv2a_kick_signal();
 }
 void xbox_nv2a_hurry(int on)
@@ -328,6 +353,12 @@ void xbox_nv2a_hurry(int on)
 #else
 void xbox_nv2a_kick(void) { }
 void xbox_nv2a_hurry(int on) { (void)on; }
+/* No ack thread in this configuration: the [perf] counters read as zero. */
+uint64_t nv2a_exec_busy_us(void) { return 0; }
+uint32_t nv2a_kick_count(void) { return 0; }
+uint64_t nv2a_exec_sleep_us(void) { return 0; }
+uint32_t nv2a_exec_poll_hits(void) { return 0; }
+uint32_t nv2a_exec_sleeps(void) { return 0; }
 #endif
 
 /*
@@ -999,6 +1030,7 @@ static void pb_eager_poll(void)
     volatile uint32_t *get = (volatile uint32_t *)((char *)s_pb_regs + NV2A_USER_DMA_GET);
     uint32_t p = __atomic_load_n(put, __ATOMIC_ACQUIRE);
     if (p == s_pb_take_put || !pb_eager_take(p, 0)) return;
+    s_exec_poll_hits++;   /* new commands seen while the walk was watching */
     __atomic_store_n(get, p, __ATOMIC_RELEASE);
 }
 
@@ -1087,6 +1119,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         counter_mirrors_tick();
         frame_counters_tick();
         framebuffer_probe_tick();
+        { uint64_t exec_walk_t0 = exec_now_us();
 
         /* Which framebuffer the display would be scanning out.
          *
@@ -1251,6 +1284,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 }
             }
         }
+        s_exec_busy_us += exec_now_us() - exec_walk_t0; }
         if (s_nv2a_trace) {
             static uint32_t last_start = 0xFFFFFFFFu;
             uint32_t start = *(volatile uint32_t *)((char *)regs + 0x600800);
@@ -1299,8 +1333,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                  * lap, not after a wait. */
                 if (s_pb_eager == 2 && s_pb_rng_out != s_pb_rng_in) ;
                 else if (s_kick_on && s_hurry) sched_yield();
-                else if (s_kick_on) nv2a_ack_wait(us);
-                else { struct timespec ts = { 0, (long)us * 1000L }; nanosleep(&ts, NULL); }
+                else if (s_kick_on) { uint64_t t0 = exec_now_us(); nv2a_ack_wait(us);
+                                      s_exec_sleeps++; s_exec_sleep_us += exec_now_us() - t0; }
+                else { struct timespec ts = { 0, (long)us * 1000L };
+                       uint64_t t0 = exec_now_us(); nanosleep(&ts, NULL);
+                       s_exec_sleeps++; s_exec_sleep_us += exec_now_us() - t0; }
             }
             else Sleep(0);
 #else
