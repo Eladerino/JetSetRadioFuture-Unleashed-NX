@@ -183,6 +183,106 @@ extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
 extern RECOMP_TLS double g_fp_stack[8];
 extern RECOMP_TLS int g_fp_top;
 
+/* ================================================================
+ * Support for skeammer's guest-code passes (used with his permission)
+ *
+ * The passes in regen/ (jsrf_reg_locals.py, jsrf_fp_locals.py and
+ * friends, skeammer's work) rewrite lifted functions to keep the guest
+ * registers in C locals. They key on the small vocabulary below: an
+ * entry anchor, leaf load/store helpers for the registers they
+ * localise, an x87 input barrier, and two marker macros. The helper
+ * bodies use the g_<reg> names only, so the `#define eax g_eax`-style
+ * register aliases further down this header cannot rewrite a token
+ * inside them.
+ * ================================================================ */
+
+/* Entry anchor for jsrf_reg_locals.py: its --entry-only form
+ * (jsrf_preempt.py) inserts `RECOMP_PREEMPT();` as the first statement
+ * of every lifted function, and the pass rewrites only functions that
+ * carry the line. This runtime has no GIL for the anchor to check --
+ * RECOMP_BACK_EDGE is the real yield -- so the anchor is deliberately
+ * empty. */
+#define RECOMP_PREEMPT() ((void)0)
+
+/* Leaf load/store helpers: what the passes load the locals from and
+ * spill them back through, so a spill/reload is one access rather than
+ * a call. On the Switch the registers are one block in a fixed order
+ * (src/kernel/xbox_memory_layout.c), reached from &g_eax at the
+ * offsets below -- eax 0, ecx 4, edx 8, ebx 12, esi 16, edi 20,
+ * esp 24, fp_top 28 (as int32_t), fp_stack at 32 -- so the helpers go
+ * through those offsets; everywhere else they name the thread-locals
+ * directly. Design: skeammer's. */
+#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
+static inline uint32_t recomp_leaf_ld_eax(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 0); }
+static inline void recomp_leaf_st_eax(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 0) = v; }
+static inline uint32_t recomp_leaf_ld_ecx(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 4); }
+static inline void recomp_leaf_st_ecx(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 4) = v; }
+static inline uint32_t recomp_leaf_ld_edx(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 8); }
+static inline void recomp_leaf_st_edx(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 8) = v; }
+static inline uint32_t recomp_leaf_ld_ebx(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 12); }
+static inline void recomp_leaf_st_ebx(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 12) = v; }
+static inline uint32_t recomp_leaf_ld_esi(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 16); }
+static inline void recomp_leaf_st_esi(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 16) = v; }
+static inline uint32_t recomp_leaf_ld_edi(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 20); }
+static inline void recomp_leaf_st_edi(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 20) = v; }
+static inline uint32_t recomp_leaf_ld_esp(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 24); }
+static inline void recomp_leaf_st_esp(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 24) = v; }
+static inline double *recomp_fp_base(void) { return (double *)((char *)(void *)&g_eax + 32); }
+static inline int recomp_fp_top_ld(void) { return (int)*(const int32_t *)((const char *)(const void *)&g_eax + 28); }
+static inline void recomp_fp_top_st(int v) { *(int32_t *)((char *)(void *)&g_eax + 28) = (int32_t)v; }
+#else
+static inline uint32_t recomp_leaf_ld_eax(void) { return g_eax; }
+static inline void recomp_leaf_st_eax(uint32_t v) { g_eax = v; }
+static inline uint32_t recomp_leaf_ld_ecx(void) { return g_ecx; }
+static inline void recomp_leaf_st_ecx(uint32_t v) { g_ecx = v; }
+static inline uint32_t recomp_leaf_ld_edx(void) { return g_edx; }
+static inline void recomp_leaf_st_edx(uint32_t v) { g_edx = v; }
+static inline uint32_t recomp_leaf_ld_ebx(void) { return g_ebx; }
+static inline void recomp_leaf_st_ebx(uint32_t v) { g_ebx = v; }
+static inline uint32_t recomp_leaf_ld_esi(void) { return g_esi; }
+static inline void recomp_leaf_st_esi(uint32_t v) { g_esi = v; }
+static inline uint32_t recomp_leaf_ld_edi(void) { return g_edi; }
+static inline void recomp_leaf_st_edi(uint32_t v) { g_edi = v; }
+static inline uint32_t recomp_leaf_ld_esp(void) { return g_esp; }
+static inline void recomp_leaf_st_esp(uint32_t v) { g_esp = v; }
+static inline double *recomp_fp_base(void) { return g_fp_stack; }
+static inline int recomp_fp_top_ld(void) { return g_fp_top; }
+static inline void recomp_fp_top_st(int v) { g_fp_top = v; }
+#endif
+
+/* Every value the fp_locals pass pushes onto its local x87 stack goes
+ * through here: an empty-asm barrier the compiler cannot see through.
+ * Without it GCC folds an fld/fstp pair into a plain copy, and a
+ * signalling NaN comes back un-quieted where the x87 would have
+ * quieted it on the load -- skeammer's difftest caught exactly that,
+ * and no flag stops the fold (-fsignaling-nans included), so the
+ * barrier is the fix. On other compilers the value passes through
+ * unchanged. */
+static inline double recomp_x87_in(double v) {
+#if defined(__GNUC__) || defined(__clang__)
+#  if defined(__aarch64__)
+    __asm__ volatile ("" : "+w" (v));
+#  elif defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile ("" : "+x" (v));
+#  else
+    __asm__ volatile ("" ::: "memory");
+#  endif
+#endif
+    return v;
+}
+
+/* Marker only: jsrf_reg_locals.py's --apply guard checks that this
+ * string (and recomp_leaf_ld_) exists in the header before it will
+ * rewrite anything. In skeammer's runtime his icall macro calls it on
+ * the fail path to resynchronise the locals. Here it is deliberately
+ * empty and nothing calls it: the RECOMP_ICALL* fail paths store
+ * through the recomp_leaf_st_* helpers instead (see the note at
+ * RECOMP_ICALL), which lands the write in the global register file
+ * directly. A spill-wrap alone could not do that job -- the pass's
+ * trailing RELOAD reloads the locals from the globals, discarding
+ * any fail-path store that only reached the locals. */
+#define RECOMP_ICALL_FAIL_SYNC() ((void)0)
+
 /**
  * SEH frame pointer bridge.
  *
@@ -1066,12 +1166,31 @@ static inline void recomp_w64(uint32_t a, uint64_t v) {
 
 #ifndef RECOMP_XMM_DEFINED
 #define RECOMP_XMM_DEFINED
+/* RECOMP_XMM_VECTOR: with GCC or Clang the union also holds the four
+ * lanes as one vector (skeammer's form, from his
+ * xbox_memory_layout.h), so an SSE value stays in one SIMD register
+ * instead of being lane-wise bit-inserted, and the packed helpers
+ * below become single vector ops. Both definitions of the union agree
+ * on size 16 and alignment 16. -DRECOMP_XMM_NO_VECTOR gives the plain
+ * union. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(RECOMP_XMM_NO_VECTOR)
+#define RECOMP_XMM_VECTOR 1
+typedef float recomp_v4sf __attribute__((vector_size(16)));
+typedef uint32_t recomp_v4su __attribute__((vector_size(16)));
+typedef int32_t recomp_v4si __attribute__((vector_size(16)));
+#else
+#define RECOMP_XMM_VECTOR 0
+#endif
 typedef union RecompXmm {
     float    f[4];
     double   d[2];
     uint32_t u[4];
     int32_t  i[4];
     uint64_t q[2];
+#if RECOMP_XMM_VECTOR
+    recomp_v4sf vf;
+    recomp_v4su vu;
+#endif
 } RecompXmm;
 #endif
 
@@ -1155,6 +1274,25 @@ static inline RecompXmm XMM_MOVE_HIGH_TO_LOW(RecompXmm a, RecompXmm b) {
         return r;                                                         \
     }
 
+/* With RECOMP_XMM_VECTOR the packed helpers are one vector op each
+ * (skeammer's form); the lane-wise definitions below them are the same
+ * semantics spelt out per lane, and are what a build without the
+ * vector union gets. Exactly one definition of each helper exists in
+ * either mode. The bit-exact equivalence of the two forms is what
+ * regen/xmm_vector/ (skeammer's) checks. */
+#if RECOMP_XMM_VECTOR
+static inline RecompXmm XMM_ADD(RecompXmm a, RecompXmm b) { RecompXmm r; r.vf = a.vf + b.vf; return r; }
+static inline RecompXmm XMM_SUB(RecompXmm a, RecompXmm b) { RecompXmm r; r.vf = a.vf - b.vf; return r; }
+static inline RecompXmm XMM_MUL(RecompXmm a, RecompXmm b) { RecompXmm r; r.vf = a.vf * b.vf; return r; }
+static inline RecompXmm XMM_DIV(RecompXmm a, RecompXmm b) { RecompXmm r; r.vf = a.vf / b.vf; return r; }
+/* MINPS/MAXPS return the second operand when the lanes are unordered or
+ * equal -- that is the hardware's tie-break, not a C fmin/fmax. The
+ * mask select keeps the same tie-break bit-for-bit: the mask is all-ones
+ * exactly when the lane-wise form picks a, and the select copies the
+ * chosen operand's bits unchanged. */
+static inline RecompXmm XMM_MIN(RecompXmm a, RecompXmm b) { RecompXmm r; recomp_v4su m = (recomp_v4su)(a.vf < b.vf); r.vu = (a.vu & m) | (b.vu & ~m); return r; }
+static inline RecompXmm XMM_MAX(RecompXmm a, RecompXmm b) { RecompXmm r; recomp_v4su m = (recomp_v4su)(a.vf > b.vf); r.vu = (a.vu & m) | (b.vu & ~m); return r; }
+#else
 RECOMP_XMM_LANEWISE(XMM_ADD, a.f[i] + b.f[i])
 RECOMP_XMM_LANEWISE(XMM_SUB, a.f[i] - b.f[i])
 RECOMP_XMM_LANEWISE(XMM_MUL, a.f[i] * b.f[i])
@@ -1163,6 +1301,7 @@ RECOMP_XMM_LANEWISE(XMM_DIV, a.f[i] / b.f[i])
  * equal -- that is the hardware's tie-break, not a C fmin/fmax. */
 RECOMP_XMM_LANEWISE(XMM_MIN, (a.f[i] < b.f[i]) ? a.f[i] : b.f[i])
 RECOMP_XMM_LANEWISE(XMM_MAX, (a.f[i] > b.f[i]) ? a.f[i] : b.f[i])
+#endif
 
 #define RECOMP_XMM_BITWISE(name, expr)                                    \
     static inline RecompXmm name(RecompXmm a, RecompXmm b) {              \
@@ -1171,6 +1310,22 @@ RECOMP_XMM_LANEWISE(XMM_MAX, (a.f[i] > b.f[i]) ? a.f[i] : b.f[i])
         return r;                                                         \
     }
 
+#if RECOMP_XMM_VECTOR
+static inline RecompXmm XMM_AND(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = a.vu & b.vu; return r; }
+static inline RecompXmm XMM_OR(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = a.vu | b.vu; return r; }
+static inline RecompXmm XMM_XOR(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = a.vu ^ b.vu; return r; }
+/* ANDNPS is ~dst & src, not dst & ~src. */
+static inline RecompXmm XMM_ANDN(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = (~a.vu) & b.vu; return r; }
+
+/* Compares produce an all-ones or all-zero mask per lane. EQ/LT/LE are
+ * the ordered forms (false when either lane is NaN); NEQ is the
+ * unordered form, so it is true when a lane is NaN. A vector compare
+ * yields exactly that mask per lane, cast to the unsigned view. */
+static inline RecompXmm XMM_CMP_EQ(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = (recomp_v4su)(a.vf == b.vf); return r; }
+static inline RecompXmm XMM_CMP_LT(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = (recomp_v4su)(a.vf < b.vf); return r; }
+static inline RecompXmm XMM_CMP_LE(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = (recomp_v4su)(a.vf <= b.vf); return r; }
+static inline RecompXmm XMM_CMP_NEQ(RecompXmm a, RecompXmm b) { RecompXmm r; r.vu = (recomp_v4su)(a.vf != b.vf); return r; }
+#else
 RECOMP_XMM_BITWISE(XMM_AND,  a.u[i] & b.u[i])
 RECOMP_XMM_BITWISE(XMM_OR,   a.u[i] | b.u[i])
 RECOMP_XMM_BITWISE(XMM_XOR,  a.u[i] ^ b.u[i])
@@ -1184,6 +1339,7 @@ RECOMP_XMM_BITWISE(XMM_CMP_EQ,  (a.f[i] == b.f[i]) ? 0xFFFFFFFFu : 0u)
 RECOMP_XMM_BITWISE(XMM_CMP_LT,  (a.f[i] <  b.f[i]) ? 0xFFFFFFFFu : 0u)
 RECOMP_XMM_BITWISE(XMM_CMP_LE,  (a.f[i] <= b.f[i]) ? 0xFFFFFFFFu : 0u)
 RECOMP_XMM_BITWISE(XMM_CMP_NEQ, (a.f[i] == b.f[i]) ? 0u : 0xFFFFFFFFu)
+#endif
 
 /* The full SSE compare predicate set, by CMPPS/CMPSS immediate:
  * 0 EQ, 1 LT, 2 LE, 3 UNORD, 4 NEQ, 5 NLT, 6 NLE, 7 ORD. The N forms are
@@ -1233,6 +1389,32 @@ static inline uint32_t XMM_MOVEMASK(RecompXmm a) {
          | (((a.u[2] >> 31) & 1u) << 2) | (((a.u[3] >> 31) & 1u) << 3);
 }
 
+#if RECOMP_XMM_VECTOR
+/** shufps: lanes 0-1 selected out of `a`, lanes 2-3 out of `b`. The
+ * index vector is built from the immediate at run time -- b's lanes
+ * offset by 4 in the joined vector -- so a runtime immediate works
+ * exactly as a constant one does. */
+static inline RecompXmm XMM_SHUFFLE(RecompXmm a, RecompXmm b, uint32_t imm) {
+    RecompXmm r;
+    recomp_v4su idx = { (imm >> 0) & 3u, (imm >> 2) & 3u,
+                        4u + ((imm >> 4) & 3u), 4u + ((imm >> 6) & 3u) };
+    r.vu = __builtin_shuffle(a.vu, b.vu, idx);
+    return r;
+}
+
+/** unpcklps / unpckhps: interleave the low or high halves. */
+static inline RecompXmm XMM_UNPACK_LOW(RecompXmm a, RecompXmm b) {
+    RecompXmm r;
+    r.vu = __builtin_shuffle(a.vu, b.vu, (recomp_v4su){ 0, 4, 1, 5 });
+    return r;
+}
+
+static inline RecompXmm XMM_UNPACK_HIGH(RecompXmm a, RecompXmm b) {
+    RecompXmm r;
+    r.vu = __builtin_shuffle(a.vu, b.vu, (recomp_v4su){ 2, 6, 3, 7 });
+    return r;
+}
+#else
 /** shufps: lanes 0-1 selected out of `a`, lanes 2-3 out of `b`. */
 static inline RecompXmm XMM_SHUFFLE(RecompXmm a, RecompXmm b, uint32_t imm) {
     RecompXmm r;
@@ -1253,6 +1435,7 @@ static inline RecompXmm XMM_UNPACK_HIGH(RecompXmm a, RecompXmm b) {
     r.u[0] = a.u[2]; r.u[1] = b.u[2]; r.u[2] = a.u[3]; r.u[3] = b.u[3];
     return r;
 }
+#endif
 
 /* ================================================================
  * Flag computation helpers
@@ -1709,6 +1892,68 @@ void xbox_GuestCpuPreempt(uint32_t va);
                  xbox_GuestCpuPreempt(va); \
          } } while (0)
 
+/* Copy-loop front door (skeammer's jsrf_copy_loops.py): the lifted MMX
+ * block-copy loop yields at its back edge on every turn, so a copy the
+ * front door takes as one memcpy still owes the guest one such yield,
+ * not one per turn. ENTER is the constant 1 -- take the fast path
+ * whenever the pass emitted the door; the emitted code does its own
+ * overlap check in C before the memcpy, so there is nothing left for
+ * ENTER to test. DONE performs that single tick: xbox_GuestCpuPreempt
+ * only stores its `va` argument as the watchdog's latest-back-edge
+ * sample (kernel_bridge.c) and never compares it, so 0 -- no loop's
+ * address -- is the honest value for a copy that has no back edge. */
+#define RECOMP_BLOCK_COPY_ENTER(turns) (1)
+#define RECOMP_BLOCK_COPY_DONE(turns) RECOMP_BACK_EDGE(0)
+
+/* Per-site indirect-call cache (design: skeammer's). Each
+ * RECOMP_ICALL_SAFE* expansion owns one static word: the high half is
+ * the guest VA it last resolved, the low half the resolved function's
+ * offset from &recomp_icall_resolve, so a hit is one atomic load, one
+ * compare and the call itself. Only generated-table results are ever
+ * stored in the word (see recomp_icall_resolve in recomp_manual.c):
+ * manual hooks and kernel thunks can change per call, so the resolver
+ * re-runs those lookups every time and never caches them. The helper
+ * is a do-block like the macros it serves, so a `break;` later in a
+ * SAFE macro still targets that macro's own block, unchanged. With
+ * the cache off (feedback builds, RECOMP_NO_ICALL_CACHE, or a
+ * non-GNU compiler) the helper is the original three-lookup chain;
+ * the site word is still declared and read, so neither form warns
+ * about it. */
+#if defined(__GNUC__) && !defined(RECOMP_ICALL_FEEDBACK) && !defined(RECOMP_NO_ICALL_CACHE)
+extern void (*recomp_icall_resolve(uint32_t xbox_va, uint64_t *site))(void);
+#define RECOMP_ICALL_RESOLVE(_va, _fn) do { \
+    static uint64_t _icall_site; \
+    uint64_t _w = __atomic_load_n(&_icall_site, __ATOMIC_RELAXED); \
+    if (_w != 0 && (uint32_t)(_w >> 32) == (uint32_t)(_va)) \
+        _fn = (recomp_func_t)(uintptr_t)((intptr_t)(uintptr_t)&recomp_icall_resolve + (int32_t)(uint32_t)_w); \
+    else \
+        _fn = recomp_icall_resolve((_va), &_icall_site); \
+} while (0)
+#else
+#define RECOMP_ICALL_RESOLVE(_va, _fn) do { \
+    static uint64_t _icall_site; \
+    { uint64_t _w = _icall_site; (void)_w; } \
+    _fn = recomp_lookup_manual(_va); \
+    if (!_fn) _fn = recomp_lookup(_va); \
+    if (!_fn) _fn = recomp_lookup_kernel(_va); \
+} while (0)
+#endif
+
+/* The RECOMP_ICALL* failure paths below store through the
+ * recomp_leaf_st_* helpers, never to g_esp/eax directly. Inside a
+ * jsrf_reg_locals.py-converted function the locals shadow g_esp/g_eax
+ * by name, and the pass wraps each icall statement in
+ * { RECOMP_RL_SPILL <call> RECOMP_RL_RELOAD }: the reload reloads every
+ * local from the globals, so a direct store on a failure path -- where
+ * no callee ran on the globals -- lands in the locals and is silently
+ * discarded, leaving esp low by 4 + argument bytes and eax unzeroed
+ * after a skipped call (measured: 74 functions diverging on exactly
+ * this in the difftest census). The helpers write the global register
+ * file itself, so the trailing reload imports the failure values; in
+ * unconverted code each helper is the plain global store it replaces,
+ * so the macros behave exactly as before there. The success paths are
+ * unchanged: the callee runs on the globals either way, which is what
+ * the spill before the call sets up. */
 /**
  * RECOMP_ICALL - Indirect call through the dispatch table.
  *
@@ -1734,19 +1979,19 @@ void xbox_GuestCpuPreempt(uint32_t va);
     /* Skip garbage VAs outside code section + kernel thunk range */ \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
-        g_esp += 4; eax = 0; break; \
+        recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); break; \
     } \
     recomp_func_t _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (g_icall_verbose) { uint32_t _e0 = g_esp, _ra = MEM32(g_esp); \
         if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); RECOMP_ABI_CALL(_va, _fn); } \
-        else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); recomp_icall_fail_log(_va); g_esp = (saved_esp); eax = 0; } \
+        else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); recomp_icall_fail_log(_va); recomp_leaf_st_esp(saved_esp); recomp_leaf_st_eax(0); } \
         recomp_icallv_record(_va, _e0, g_esp, eax, _ra); break; } \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
+           recomp_icall_fail_log(_va); recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); } \
 } while(0)
 
 /**
@@ -1809,19 +2054,17 @@ static __attribute__((noinline, unused)) uint32_t recomp_icall_skip_esp(uint32_t
     g_icall_count++; \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
-        g_esp = recomp_icall_skip_esp(saved_esp); eax = 0; break; \
+        recomp_leaf_st_esp(recomp_icall_skip_esp(saved_esp)); recomp_leaf_st_eax(0); break; \
     } \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
+    recomp_func_t _fn; RECOMP_ICALL_RESOLVE(_va, _fn); \
     if (g_icall_verbose) { uint32_t _e0 = g_esp, _ra = MEM32(g_esp); \
         if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); RECOMP_ABI_CALL(_va, _fn); } \
-        else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); recomp_icall_fail_log(_va); g_esp = recomp_icall_skip_esp(saved_esp); eax = 0; } \
+        else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); recomp_icall_fail_log(_va); recomp_leaf_st_esp(recomp_icall_skip_esp(saved_esp)); recomp_leaf_st_eax(0); } \
         recomp_icallv_record(_va, _e0, g_esp, eax, _ra); break; } \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp = recomp_icall_skip_esp(saved_esp); eax = 0; } \
+           recomp_icall_fail_log(_va); recomp_leaf_st_esp(recomp_icall_skip_esp(saved_esp)); recomp_leaf_st_eax(0); } \
 } while(0)
 
 /* Caller cleanup: a failed call pops only its return address. */
@@ -1833,15 +2076,13 @@ static __attribute__((noinline, unused)) uint32_t recomp_icall_skip_esp(uint32_t
     g_icall_count++; \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
-        g_esp += 4; eax = 0; break; \
+        recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); break; \
     } \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
+    recomp_func_t _fn; RECOMP_ICALL_RESOLVE(_va, _fn); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
+           recomp_icall_fail_log(_va); recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); } \
 } while(0)
 
 /**
@@ -1859,16 +2100,14 @@ static __attribute__((noinline, unused)) uint32_t recomp_icall_skip_esp(uint32_t
     g_icall_count++; \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
-        g_esp = (saved_esp); eax = 0; break; \
+        recomp_leaf_st_esp(saved_esp); recomp_leaf_st_eax(0); break; \
     } \
     RECOMP_ICALL_OBSERVE_SITE((site), _va); \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
+    recomp_func_t _fn; RECOMP_ICALL_RESOLVE(_va, _fn); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp = (saved_esp); eax = 0; } \
+           recomp_icall_fail_log(_va); recomp_leaf_st_esp(saved_esp); recomp_leaf_st_eax(0); } \
 } while(0)
 
 /* Caller cleanup: a failed call pops only its return address. */
@@ -1880,16 +2119,14 @@ static __attribute__((noinline, unused)) uint32_t recomp_icall_skip_esp(uint32_t
     g_icall_count++; \
     if (!RECOMP_ICALL_IS_CODE(_va)) { \
         recomp_icall_not_code_log(_va); \
-        g_esp += 4; eax = 0; break; \
+        recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); break; \
     } \
     RECOMP_ICALL_OBSERVE_SITE((site), _va); \
-    recomp_func_t _fn = recomp_lookup_manual(_va); \
-    if (!_fn) _fn = recomp_lookup(_va); \
-    if (!_fn) _fn = recomp_lookup_kernel(_va); \
+    recomp_func_t _fn; RECOMP_ICALL_RESOLVE(_va, _fn); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
+           recomp_icall_fail_log(_va); recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); } \
 } while(0)
 
 /**
@@ -1907,7 +2144,7 @@ static __attribute__((noinline, unused)) uint32_t recomp_icall_skip_esp(uint32_t
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); \
                RECOMP_ABI_CALL(_va, _fn); } \
     else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
-           recomp_icall_fail_log(_va); g_esp += 4; g_eax = 0; } \
+           recomp_icall_fail_log(_va); recomp_leaf_st_esp(recomp_leaf_ld_esp() + 4); recomp_leaf_st_eax(0); } \
 } while(0)
 
 /* ================================================================
