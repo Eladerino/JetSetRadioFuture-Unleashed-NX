@@ -185,10 +185,21 @@ if(JSRF_TABLES_NONE)
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/recomp_tables_none.c"
         PROPERTIES COMPILE_DEFINITIONS "${JSRF_TABLES_NONE}")
 endif()
+# The generated code always gets the semantic flags first: the lifted
+# code assumes x86 semantics -- wrapping overflow, type punning, and a
+# rounding at every step (no fused multiply-add). skeammer's build
+# established these three; the fp/simd locals passes require the first
+# outright, because with values in registers the compiler would
+# otherwise fuse a multiply and an add the Xbox rounded separately.
+# JSRF_GEN_OPT's options are appended after them when set, so a later
+# -O there still wins.
+set(JSRF_GEN_SEMANTIC_FLAGS "-ffp-contract=off;-fwrapv;-fno-strict-aliasing")
+set(JSRF_GEN_COMPILE_OPTIONS "${JSRF_GEN_SEMANTIC_FLAGS}")
 if(JSRF_GEN_OPT)
     separate_arguments(JSRF_GEN_OPT_LIST NATIVE_COMMAND "${JSRF_GEN_OPT}")
-    set_source_files_properties(${JSRF_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${JSRF_GEN_OPT_LIST}")
+    list(APPEND JSRF_GEN_COMPILE_OPTIONS ${JSRF_GEN_OPT_LIST})
 endif()
+set_source_files_properties(${JSRF_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${JSRF_GEN_COMPILE_OPTIONS}")
 # And the run's own log says it ([MANUAL] generated code: ..., from
 # recomp_manual.c), so a test run's log tells which build it came from.
 set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/recomp_manual.c" APPEND PROPERTY
