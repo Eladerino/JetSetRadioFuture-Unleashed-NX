@@ -428,6 +428,9 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags,
 /* ======================================================================== */
 
 #include <SDL.h>
+#if defined(XBOXRECOMP_DK_MENU)
+#include "../nv2a_dk/nv2a_dk_menu.h"
+#endif
 
 static SDL_GameController *g_pads[XBOX_MAX_CONTROLLERS];
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS];
@@ -553,6 +556,16 @@ static void menu_button_tick(SDL_GameController *c)
 }
 #endif
 
+#if defined(__SWITCH__)
+/* The debug server's injected controller state, provided by the
+ * server's glue when it is linked in (src/nv2a_dk/jsrf_debug_server.cpp):
+ * weak, so builds without the server pay a null check. It hands over
+ * libnx button bits and stick axes (-32767..32767, y up), writes only
+ * the sticks the core overrides into the array, and returns 1 while
+ * the server runs. SwitchWaker's shim pattern. */
+extern int jsrf_debug_input(uint64_t *buttons, int32_t sticks[4]) __attribute__((weak));
+#endif
+
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 {
     WORD out = 0;
@@ -570,6 +583,35 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
 #if defined(__SWITCH__) && defined(XBOXRECOMP_MENU)
     if (dwPort == 0) menu_button_tick(g_pads[0]);
+#endif
+#if defined(__SWITCH__) && defined(XBOXRECOMP_DK_MENU)
+    if (xbox_MenuIsOpen() > 0) {
+        SDL_GameController *c = g_pads[dwPort];
+        uint32_t keys = 0;
+        if (c && SDL_GameControllerGetAttached(c)) {
+            SDL_GameControllerUpdate();
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP))
+                keys |= DK_MENU_UP;
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_DOWN))
+                keys |= DK_MENU_DOWN;
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_LEFT))
+                keys |= DK_MENU_LEFT;
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
+                keys |= DK_MENU_RIGHT;
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B))
+                keys |= DK_MENU_SELECT;   /* right face button, printed A */
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A))
+                keys |= DK_MENU_CANCEL;   /* bottom face button, printed B */
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
+                keys |= DK_MENU_TAB_LEFT;
+            if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+                keys |= DK_MENU_TAB_RIGHT;
+        }
+        nv2a_dk_menu_input(keys);
+        g_controller_connected[dwPort] = TRUE;
+        pState->dwPacketNumber = ++g_packet[dwPort];
+        return ERROR_SUCCESS;
+    }
 #endif
 #if defined(XBOXRECOMP_MENU)
     /* While the menu is up, the game gets a connected, silent pad: the
@@ -635,6 +677,47 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     /* The window's keyboard (kb_merge, above). */
     if (kb_merge(dwPort, &out, analog, axes)) have_pad = 1;
+#if defined(__SWITCH__)
+    /* The debug server's presses, merged like a second pad on player
+     * one: while it runs the pad counts as connected, as in
+     * SwitchWaker. The face buttons are analog here; they land by the
+     * printed name, under the same layout rule as the physical pad
+     * above (the core's bits are libnx's: A is the printed A). The
+     * sticks arrive as axes in this function's own convention (y up);
+     * the hook overwrites only the ones the core overrides. */
+    if (dwPort == 0 && jsrf_debug_input) {
+        uint64_t inj = 0;
+        int32_t ist[4] = { axes[0], axes[1], axes[2], axes[3] };
+        if (jsrf_debug_input(&inj, ist)) {
+            have_pad = 1;
+            if (inj & (1ull << 12)) out |= XBOX_GAMEPAD_DPAD_LEFT;
+            if (inj & (1ull << 13)) out |= XBOX_GAMEPAD_DPAD_UP;
+            if (inj & (1ull << 14)) out |= XBOX_GAMEPAD_DPAD_RIGHT;
+            if (inj & (1ull << 15)) out |= XBOX_GAMEPAD_DPAD_DOWN;
+            if (inj & (1ull << 10)) out |= XBOX_GAMEPAD_START;
+            if (inj & (1ull << 11)) out |= XBOX_GAMEPAD_BACK;
+            if (inj & (1ull << 4))  out |= XBOX_GAMEPAD_LEFT_THUMB;
+            if (inj & (1ull << 5))  out |= XBOX_GAMEPAD_RIGHT_THUMB;
+            if (inj & (1ull << 6))  analog[4] = 255;   /* L (Black) */
+            if (inj & (1ull << 7))  analog[5] = 255;   /* R (White) */
+            if (inj & (1ull << 8))  analog[6] = 255;   /* ZL */
+            if (inj & (1ull << 9))  analog[7] = 255;   /* ZR */
+            if (nv_window_pref_nintendo_layout()) {
+                if (inj & (1ull << 0)) analog[0] = 255;   /* A */
+                if (inj & (1ull << 1)) analog[1] = 255;   /* B */
+                if (inj & (1ull << 2)) analog[2] = 255;   /* X */
+                if (inj & (1ull << 3)) analog[3] = 255;   /* Y */
+            } else {
+                if (inj & (1ull << 0)) analog[1] = 255;   /* A */
+                if (inj & (1ull << 1)) analog[0] = 255;   /* B */
+                if (inj & (1ull << 2)) analog[3] = 255;   /* X */
+                if (inj & (1ull << 3)) analog[2] = 255;   /* Y */
+            }
+            axes[0] = (short)ist[0]; axes[1] = (short)ist[1];
+            axes[2] = (short)ist[2]; axes[3] = (short)ist[3];
+        }
+    }
+#endif
 
     if (!have_pad) {
         g_controller_connected[dwPort] = FALSE;
