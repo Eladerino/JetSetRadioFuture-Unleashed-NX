@@ -677,6 +677,29 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                         params = (const uint32_t *)(s_snap + s_win[wi].off + (va - s_win[wi].lo));
                 }
             }
+            /* Deko3D can consume a whole header at once. This keeps the
+             * reference executor's transform-program and index fast paths
+             * when the existing acknowledgement thread supplies a packet. */
+#if defined(XBOXRECOMP_DEKO3D)
+            if (bulk && s_exec_enabled && params && count) {
+                uint32_t n = count;
+                int has_fence = 0;
+                if (n > (end_va - va) / 4) n = (end_va - va) / 4;
+                for (uint32_t i = 0; i < n; i++) {
+                    uint32_t m = noninc ? method : method + i * 4;
+                    if (s_scan_enabled) note(subch, m);
+                    if (m == 0x1D70u) has_fence = 1;
+                }
+                if (n && !has_fence) {
+                    extern void nv2a_pb_exec_run(uint32_t, uint32_t, int,
+                                                 const uint32_t *, uint32_t);
+                    nv2a_pb_exec_run(subch, method, noninc, params, n);
+                    va += n * 4;
+                    words += n;
+                    continue;
+                }
+            }
+#endif
             for (uint32_t i = 0; i < count && va < end_va; i++) {
                 uint32_t m = noninc ? method : method + i * 4;
                 /* The inventory is only ever printed under RECOMP_PB_SCAN, so
