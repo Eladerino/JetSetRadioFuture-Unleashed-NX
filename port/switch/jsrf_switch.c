@@ -541,6 +541,7 @@ static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "sample",       "JSRF_SAMPLE",         0 },
     { "log_direct",   "JSRF_LOG_DIRECT",     0 },
     { "log",          "JSRF_LOG",            0 },
+    { "dkserver",     "JSRF_DKSERVER",       0 },
     { "fast_gpu",     "RECOMP_NV2A_FLUSH_ACK", 0 },
     { "nintendo_layout", "RECOMP_NINTENDO_LAYOUT", 0 },
 #if defined(JSRF_DEKO3D)
@@ -727,6 +728,14 @@ static void prepare_game_folder(const char *game)
 }
 
 struct host_call { int (*host)(void); int rc; };
+
+#if defined(JSRF_DEKO3D)
+/* src/nv2a_dk/jsrf_debug_server.cpp: the debug server's boot and stop.
+ * Boot reads JSRF_DKSERVER itself and does nothing when it is off, so
+ * both calls are unconditional here. */
+void jsrf_debug_server_boot(const char *base);
+void jsrf_debug_server_stop(void);
+#endif
 
 /* ---- cores ----------------------------------------------------------
  *
@@ -1223,6 +1232,12 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
 #else
     fprintf(stderr, "[SWITCH] thread pointer: soft (libnx call)\n");
 #endif
+#if defined(JSRF_DEKO3D)
+    /* The debug server: starts only when dkserver=1 in options.txt
+     * (JSRF_DKSERVER) asks for it; the call is inert otherwise. Early
+     * enough that its log pump covers the whole session. */
+    jsrf_debug_server_boot(base);
+#endif
 
 #if defined(JSRF_DEKO3D)
     nv2a_dk_loader_start();
@@ -1257,6 +1272,9 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     }
     pthread_attr_destroy(&a);
     pthread_join(t, NULL);
+#if defined(JSRF_DEKO3D)
+    jsrf_debug_server_stop();
+#endif
     fprintf(stderr, "[SWITCH] the engine returned %d\n", call.rc);
     return call.rc;
 }
