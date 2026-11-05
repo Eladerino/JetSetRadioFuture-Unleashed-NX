@@ -299,7 +299,7 @@ void build_menu(int fb_w, int fb_h)
         ImGui::PushFont(nullptr, 34.0f * u);
         ImGui::TextColored(kTitle, "JSRF ");
         ImGui::SameLine(0.0f, 0.0f);
-        ImGui::TextColored(kOrange, "UNLEASHED");
+        ImGui::TextColored(kOrange, "UNLEASHED NX");
         float th = ImGui::GetTextLineHeight();
         ImGui::PopFont();
         ImGui::SetCursorPosY(y0 + th + 6.0f * u);
