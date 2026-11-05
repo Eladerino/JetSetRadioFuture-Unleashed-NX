@@ -38,8 +38,7 @@ Full credits are in the [Credits](#credits) section below.
 
 ## Screenshots
 
-The in-game menu on the Switch build, opened with Minus, and the game
-running in Shibuya Terminal with the frame rate counter on:
+The in-game menu on the Switch build, opened with Minus:
 
 ![The File page of the in-game menu, showing the build version](docs/images/menu-file.jpg)
 
