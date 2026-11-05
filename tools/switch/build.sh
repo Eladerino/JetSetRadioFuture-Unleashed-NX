@@ -246,22 +246,21 @@ write_default_options() {
         "widescreen=1" \
         "" \
         "# Stretch the 4:3 picture to fill the screen, title and menus" \
-        "# included, instead of widening the view. The same choice is" \
-        "# in the in-game menu, under Graphics (Stretch to fill screen)." \
+        "# included, instead of widening the view." \
         "JSRF_WIDE_STRETCH=1" \
         "" \
         "# Internal resolution: 1 = the Xbox's 640x480, 2 = twice that, up to 4." \
         "# Each step costs GPU time." \
         "scale=1" \
         "" \
-        "# Texture sharpness at an angle (anisotropic filtering): 1 = off, 4, 8, 16." \
+        "# GLES only: texture sharpness at an angle (anisotropic filtering), 1 to 16." \
         "aniso=4" \
         "" \
         "# Frame rate cap: 60 as on the Xbox. 0 removes the cap (testing only)." \
         "fps=60" \
         "" \
         "# Wait for the display's refresh before showing each frame." \
-        "# The same choice is in the in-game menu, under Display (Vsync)." \
+        "# This setting applies to the GLES build; Deko3D presents directly." \
         "RECOMP_VSYNC=0" \
         "" \
         "# ---- sound" \
@@ -270,10 +269,10 @@ write_default_options() {
         "" \
         "# ---- performance testing (leave at 0 for normal play)" \
         "" \
-        "# Keep compiled shaders between runs, so stutters only happen once." \
+        "# GLES only: keep compiled shaders between runs. Deko3D maintains its own pack." \
         "shader_cache=1" \
         "" \
-        "# Where each frame's time goes, written to the log every second." \
+        "# GLES profiling toggle; Deko3D writes basic renderer stats every two seconds." \
         "profile=0" \
         "" \
         "# Which functions each thread is busy in, every 10 seconds" \
@@ -290,7 +289,7 @@ write_default_options() {
         "# chasing a freeze; normally the log is written every 0.25 s." \
         "log_direct=0" \
         "" \
-        "# Log time spent busy-waiting (spinning). A Developer page switch." \
+        "# Log time spent busy-waiting (spinning)." \
         "JSRF_SPIN_LOG=0" \
         "" \
         "# 1 = let the game hand work to the GPU thread without waiting" \
@@ -299,24 +298,22 @@ write_default_options() {
         "" \
         "# In widescreen, draw full-screen effects (the boost smear and its" \
         "# like) across the whole frame instead of squeezing them into a" \
-        "# 4:3 box. A Developer page switch." \
+        "# 4:3 box." \
         "RECOMP_WIDE_FX_FULL=1" \
         "" \
         "# Check the vertex and texture caches' contents with the CPU's" \
-        "# CRC instructions (fast). 0 = the older software hash. A" \
-        "# Developer page switch." \
+        "# CRC instructions (fast). 0 = the older software hash." \
         "RECOMP_GL_CRC32HASH=1" \
         "" \
         "# With fast_gpu, copy the GPU command lists the game replays by" \
         "# reference before drawing them, so the game cannot rewrite one" \
-        "# halfway through. 0 = read them live. A Developer page switch." \
+        "# halfway through. 0 = read them live." \
         "RECOMP_PB_CALLSNAP=1" \
         "" \
         "# Seven switches are read by their presence alone, so" \
         "# they are NOT lines to set to 0 -- a RECOMP_PB_OVERLAP=0 line" \
         "# would turn it on. Add the line with =1 to turn one on; leave" \
-        "# the line out for off. The in-game menu writes and removes" \
-        "# the first four lines itself; the last three are log diagnostics:" \
+        "# the line out for off. These are log diagnostics:" \
         "#   RECOMP_PB_OVERLAP=1       count push-buffer overlap, in the log" \
         "#   RECOMP_GL_MERGEPROBE=1    probe merging draws, log the findings" \
         "#   RECOMP_PB_SEMLOG=1        log GPU semaphore waits and releases" \
@@ -327,12 +324,16 @@ write_default_options() {
         "" \
         "# 1 = the face buttons by their printed names (A confirms," \
         "# B goes back, X and Y likewise) instead of by Xbox position." \
-        "# The same choice is in the in-game menu, under Controller." \
         "nintendo_layout=0" \
         "" \
-        "# 1 = the frame rate in the top-left corner. The same choice" \
-        "# is in the in-game menu, under Display." \
+        "# 1 = the frame rate in the top-left corner." \
         "show_fps=0" \
+        "" \
+        "# With show_fps on, 1 adds a figure under the rate: the" \
+        "# longest frame gap in milliseconds, the average draws a" \
+        "# frame. Both 0 = the rate alone." \
+        "show_fps_ms=0" \
+        "show_fps_drw=0" \
         "" \
         "# Any other engine variable can go here too as NAME=value" \
         "# (RECOMP_... or JSRF_...). Two more developer ones:" \

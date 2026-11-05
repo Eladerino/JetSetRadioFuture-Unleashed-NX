@@ -33,12 +33,33 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 
 ## Current state
 
+- Switch builds select the Deko3D backend by default; it is the
+  shipping renderer, built and measured on Switch hardware (the
+  stock-clock baseline is in the testing notes). The existing GLES
+  renderer remains available with `DEKO3D=OFF tools/switch/build.sh ...`.
+- Deko3D compiles a title-specific shader pack on the console from the user's
+  `game/default.xbe`; the pack and recorded shader keys stay under
+  `sdmc:/switch/jsrf-unleashed/`.
+- The Deko3D build has its own in-game settings menu: seven pages
+  (File, Display, Graphics, Controller, Cheats, Music, Developer)
+  opened with Minus. Choices are kept in the settings file beside
+  the NRO and in `options.txt`; rows that only apply from the next
+  start are labelled (RESTART), the rest apply at once. The build
+  also reads `options.txt` directly, including the `scale` and
+  `show_fps` options.
+- A development debug server is built in but off by default.
+  `dkserver=1` in `options.txt`, or the Developer page's DEBUG
+  SERVER row, enables it from the next start: it serves the run
+  log, files under the app folder and controller input over TCP
+  6543 on the local network. It has no authentication, so leave
+  it off outside development.
+- Players can add their own music: `.ADX` files placed in the
+  `custom_tracks/` folder beside the NRO are checked when the menu
+  opens and appear on the Music page, played through the game's
+  own music path.
 - fast_gpu is the default on Switch (see the testing notes for
   the machinery and its guards). The serial path remains
   available with fast_gpu=0.
-- An in-game menu (hold Minus) carries the display, graphics
-  and controller settings; most apply live, and choices are
-  remembered between runs.
 - The renderer drops, and logs, any draw whose index range runs
   outside guest memory, instead of faulting in the vertex cache.
 - The lifted code keeps guest registers in host registers
@@ -46,11 +67,11 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 - The vertex and texture caches hash content with the aarch64
   CRC32 instructions where available
   (RECOMP_GL_CRC32HASH=0 reverts).
-- The GL backend skips small uniforms whose program already holds
+- The GLES backend skips small uniforms whose program already holds
   the value (RECOMP_GL_UNIFORM_SKIP=0 reverts).
-- The GL device runs on its own thread by default on Switch
-  (RECOMP_GL_THREAD), shipped in v0.2.0. fast_gpu above is a
-  separate switch and also stays on by default.
+- The Deko3D renderer records on its own thread by default; set
+  `RECOMP_DK_THREAD=0` to run it on the pushbuffer executor thread. The GLES
+  fallback retains its own `RECOMP_GL_THREAD` setting.
 - Upstream v0.6.1 is merged: in widescreen the HUD sits at the
   screen's edges and the boost's heat haze covers the whole
   screen. Both shipped in v0.2.0.
@@ -70,7 +91,7 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
 - When the frame watchdog trips, its dump names both sides
   of the GPU wait (v0.3.0), so a freeze log says which side
   lost the wake.
-- Performance on the reference clocks (CPU 1963 / GPU 1152 /
+- GLES performance on the reference clocks (CPU 1963 / GPU 1152 /
   mem 2366 MHz; measured in the v0.2.0 cycle, unchanged by
   v0.3.0): the garage holds
   the 60 fps cap, Shibuya Terminal and Dogenzaka Hill sit near
@@ -79,10 +100,8 @@ stability. Testing detail lives in docs/switch-testing-notes.md.
   dips into the low 30s in its densest views. At stock clocks
   the same areas run slower, and stock-clock measurements are
   still owed.
-- Open items: an intermittent red/blue channel split last seen
-  before draw validation landed; one unexplained freeze in
-  testing (a lost wake in the GPU completion path; the
-  watchdog now names the wait if it returns); the stock-clock
-  measurements; and a profile-guided build of the generated
-  code (PGO, then LTO), planned but not yet run. Detail in
-  the testing notes.
+- Open items: reproduce the intermittent red/blue
+  channel split last seen before draw validation, investigate the unexplained
+  GPU completion freeze, measure the GLES fallback at stock clocks, and try a
+  profile-guided generated-code build (PGO, then LTO). Details are in the
+  testing notes.

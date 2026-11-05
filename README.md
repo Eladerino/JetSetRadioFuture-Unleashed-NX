@@ -87,22 +87,15 @@ from your own copy of the game.
   GPU path, which is on by default on Switch; `fast_gpu=0` falls back
   to the serial path.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
-  together) to open it over the game. It holds the display settings
-  (render scale, frame rate, vsync), the graphics settings (widescreen,
-  stretch to fill screen, SMAA, MSAA, anisotropic filtering, shadow
-  volumes), a right-stick camera choice (Camera, or Camera
-  (tracking) from upstream), a toggle for the camera easing back
-  when the stick is released, and a Nintendo layout option that
-  swaps A/B and X/Y so the face buttons work by their printed
-  names (it is `nintendo_layout` in `options.txt`). A Developer
-  page holds a live status readout and the engine's logging and
-  diagnostic switches (the run log, the profiler, fast GPU, the
-  shader cache and more); those are written to `options.txt` and
-  take effect at the next start. Every row says what it does in a
-  tooltip while it is highlighted, the menu bar shows the current
-  frame rate and how to close the menu, and choices are remembered
-  between runs: the menu keeps `options.txt` itself up to date for
-  the settings it names. File > About lists the build and the credits.
+  together) to open the tabbed overlay. On the Deko3D Switch build, Display,
+  Cheats and Music have their own tabs, with the selected option's help text
+  beside it. The OpenGL menu also has File, Graphics, Controller and Developer
+  tabs, persistent help and confirmations. Cheats separates session-only
+  effects from map jumps that may affect save flow; Music selects one of the
+  game's whole DJ mixes for the next stream open. Its 14 map destinations
+  follow JuMatt's upstream 0.6.6 selector data. Display choices, session cheats
+  and the music override are temporary in the Deko3D menu; the OpenGL menu
+  stores its settings in `options.txt`. File > About lists the build and credits.
 - **Performance and overclocking:** the recommended settings are the
   shipped defaults (render scale 1x, SMAA off, MSAA off, anisotropic
   filtering 4x, shadow volumes drawn, the 60 fps cap, every
@@ -592,6 +585,8 @@ empty tables in their place.
 - Dear ImGui — the library the in-game menu is drawn with.
 - [JSRF-PC](https://github.com/spriteice/JSRF-PC) — the fork the
   in-game menu's design and code were adapted from.
+- [JuMatt/JetSetRadioFuture-Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed/commit/df1af3d0c01fd93800876183f73976ad4aa92e29) — the free-skate
+  map names and mission IDs follow its 0.6.6 selector.
 - [jsrf-nx](https://github.com/skeammer/jsrf-nx) — skeammer's Switch
   port of the same project: the stretch view's approach came from
   it, and its findings log has been a second set of measurements
