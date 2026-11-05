@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <math.h>
+#include <string.h>
 static double jsrf_now(void);   /* defined further down */
 
 #if defined(_WIN32)
@@ -319,6 +320,42 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     (void)xbox_va;
     return (recomp_func_t)0;
 }
+
+
+/* ── Per-site indirect-call cache resolver ─────────────────────
+ *
+ * Design: skeammer's (his src/recomp_manual.c), with one deliberate
+ * difference. The RECOMP_ICALL_SAFE* macros (recomp_types.h) keep one
+ * static word per call site and call this only on a miss; the word
+ * holds (guest VA << 32) | the int32 offset of the resolved function
+ * from &recomp_icall_resolve, stored atomically (relaxed) and only
+ * when the VA is nonzero and the offset fits int32 -- inside one
+ * binary it always does.
+ *
+ * Only generated-table results (recomp_lookup) are ever cached.
+ * Manual hooks are returned uncached -- a hand hook can be swapped or
+ * is itself stateful, so it must be re-looked-up every call -- and
+ * kernel thunks are returned uncached too, because a thunk lookup
+ * also selects which thunk runs. Caching either could serve a stale
+ * target forever; the table cannot change under a running build.
+ */
+#if defined(__GNUC__) && !defined(RECOMP_ICALL_FEEDBACK) && !defined(RECOMP_NO_ICALL_CACHE)
+recomp_func_t recomp_icall_resolve(uint32_t xbox_va, uint64_t *site)
+{
+    recomp_func_t fn = recomp_lookup_manual(xbox_va);
+    if (fn)
+        return fn;                       /* hand hooks: never cached */
+    fn = recomp_lookup(xbox_va);
+    if (fn) {
+        intptr_t d = (intptr_t)(uintptr_t)fn - (intptr_t)(uintptr_t)&recomp_icall_resolve;
+        if (xbox_va && d == (intptr_t)(int32_t)d)
+            __atomic_store_n(site, ((uint64_t)xbox_va << 32) | (uint32_t)(int32_t)d,
+                             __ATOMIC_RELAXED);
+        return fn;
+    }
+    return recomp_lookup_kernel(xbox_va);   /* thunks: never cached */
+}
+#endif
 
 /* ── ICALL failure logging ─────────────────────────────────── */
 
@@ -1538,18 +1575,231 @@ static void auto_load(void)
 }
 /* JSRF_TELEPORT="t:x,y,z" -- once, at time t, put the player at (x, y, z).
  * Test-only shortcut to a spot the autopilot cannot path to. */
+static volatile int s_menu_infinite_cans;
+static volatile uint32_t s_menu_teleport_pending;
+static volatile uint32_t s_menu_teleport_xyz[3];
+static volatile uint32_t s_menu_player_xyz[3];
+static volatile int s_menu_player_seen;
+static volatile uint32_t s_menu_map_request;
+static volatile int s_menu_map_available;
+
+int recomp_map_jump_available(void)
+{
+    return __atomic_load_n(&s_menu_map_available, __ATOMIC_ACQUIRE);
+}
+
+void recomp_map_jump_request(uint32_t mission)
+{
+    if (mission) __atomic_store_n(&s_menu_map_request, mission, __ATOMIC_RELEASE);
+}
+
+/* ---- on-demand BGM: the menu's track pick --------------------------------
+ *
+ * The Music page's Tracks row latches a BGM *table id* here (the master
+ * table at guest 0x1D3878: DJ sets, the licensed songs and the
+ * standalones share one id namespace). music_track_step(), inside the
+ * flow wrapper below, fires it through the game's own PlayBGM
+ * (sub_00116F50) under exactly the map jump's gating, so the guest's
+ * bookkeeping (current id at sndmgr+0x9C/+0xB8, the two alternating
+ * channels, the fade of the old stream) stays truthful -- unlike the
+ * kernel's filename substitution, which the game never hears about.
+ * The stored value is id + 1, so id 0 (title.adx) is a legal pick and
+ * 0 means "nothing latched". One shot per pick: the consumer exchanges
+ * the latch to 0 before it fires. */
+static volatile uint32_t s_menu_track_request;
+
+void recomp_music_track_request(uint32_t bgm_id)
+{
+    __atomic_store_n(&s_menu_track_request, bgm_id + 1u, __ATOMIC_RELEASE);
+}
+
+int recomp_music_track_pending(void)
+{
+    uint32_t v = __atomic_load_n(&s_menu_track_request, __ATOMIC_ACQUIRE);
+    return v ? (int)(v - 1u) : -1;
+}
+
+/* Take a latched pick back before it fires. Race-safe by the same
+ * atomic the consumer uses: it compare-exchanges the latch to 0
+ * before firing, so a 0 stored here either lands first (the pick
+ * never fires) or after the exchange (the pick is already firing
+ * and there is nothing left to cancel). */
+void recomp_music_track_cancel(void)
+{
+    if (recomp_music_track_pending() >= 0)
+        fprintf(stderr, "[TRACK] latched pick cancelled from the menu\n");
+    __atomic_store_n(&s_menu_track_request, 0u, __ATOMIC_RELEASE);
+}
+
+/* What the sound manager last landed on, kept by bgm_watch() further
+ * down (the [BGM] observer riding the sound manager's own per-frame
+ * update): the newest value written to sndmgr+0x9C (PlayBGM's flip
+ * path, and the stage dispatcher's direct-PlayStream path) or to
+ * sndmgr+0xB8 (PlayBGM's other-channel-ready fast path). Either write
+ * means "this id is what the game most recently asked to hear". */
+static volatile uint32_t s_bgm_now_id;
+static volatile int s_bgm_now_valid;
+static uint32_t s_bgm_sndmgr;   /* the sound manager's guest VA, from bgm_watch */
+
+uint32_t recomp_music_now_id(void)
+{
+    if (!__atomic_load_n(&s_bgm_now_valid, __ATOMIC_ACQUIRE)) return 0xFFFFFFFFu;
+    return __atomic_load_n(&s_bgm_now_id, __ATOMIC_ACQUIRE);
+}
+
+static volatile uint32_t s_bgm_now_seq;
+
+static void bgm_now_publish(uint32_t id)
+{
+    __atomic_store_n(&s_bgm_now_id, id, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_bgm_now_valid, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s_bgm_now_seq, 1u, __ATOMIC_RELEASE);
+}
+
+/* How many times the watcher has published a "now" id. A consumer
+ * that fires its own PlayBGM notes the count at fire time; a later
+ * publish of a different id is then provably the game moving on, not
+ * the watcher still holding the pre-fire value. */
+uint32_t recomp_music_now_seq(void)
+{
+    return __atomic_load_n(&s_bgm_now_seq, __ATOMIC_ACQUIRE);
+}
+
+/* ---- on-demand BGM: a user-supplied custom track ---------------------
+ *
+ * The Music page's Custom Tracks row latches a leaf name here -- a
+ * .adx the menu's scan found (and header-validated) in the app dir's
+ * custom_tracks folder. music_custom_step(), inside the flow wrapper
+ * below, fires it under the track pick's gate, but a custom file has
+ * no BGM table id of its own, so the pick rides a carrier: the game's
+ * own PlayBGM is called for SET 01A (table id 0x3C) with the kernel's
+ * one-shot host redirect armed at the file in this latch. The stream
+ * open inside that call is served the user's file; the game's
+ * bookkeeping lands on the carrier, which is the honest price of the
+ * ride and exactly what CUSTOM STATUS in the menu discloses.
+ *
+ * State: 0 nothing, 1 latched (a newer pick simply replaces the leaf,
+ * as with the track latch), 2 fired and sounding. State 2 clears when
+ * the [BGM] watcher publishes a different id than the carrier after
+ * the fire (the publish count noted at fire time keeps the watcher's
+ * pre-fire value from clearing it early). One shot per pick: the
+ * consumer claims the latch by compare-exchange before it fires. */
+static char s_menu_custom_leaf[96];
+static volatile int s_menu_custom_state;
+static volatile uint32_t s_menu_custom_seq;
+
+extern void xbox_custom_track_arm(const char *abs_host_path);
+extern void xbox_custom_track_disarm(void);
+
+void recomp_custom_track_request(const char *leaf)
+{
+    if (!leaf) return;
+    snprintf(s_menu_custom_leaf, sizeof s_menu_custom_leaf, "%s", leaf);
+    __atomic_store_n(&s_menu_custom_state, 1, __ATOMIC_RELEASE);
+}
+
+int recomp_custom_track_state(void)
+{
+    int st = __atomic_load_n(&s_menu_custom_state, __ATOMIC_ACQUIRE);
+    if (st == 2) {
+        uint32_t now = recomp_music_now_id();
+        if (now != 0xFFFFFFFFu && now != 0x3Cu
+         && recomp_music_now_seq()
+                != __atomic_load_n(&s_menu_custom_seq, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&s_menu_custom_state, 0, __ATOMIC_RELEASE);
+            st = 0;
+        }
+    }
+    return st;
+}
+
+const char *recomp_custom_track_name(void)
+{
+    return __atomic_load_n(&s_menu_custom_state, __ATOMIC_ACQUIRE)
+        ? s_menu_custom_leaf : NULL;
+}
+
+int recomp_cheat_infinite_cans_state(void)
+{
+    return __atomic_load_n(&s_menu_infinite_cans, __ATOMIC_ACQUIRE);
+}
+
+void recomp_cheat_infinite_cans_toggle(void)
+{
+    int on = !recomp_cheat_infinite_cans_state();
+    __atomic_store_n(&s_menu_infinite_cans, on, __ATOMIC_RELEASE);
+    fprintf(stderr, "[CHEAT] infinite spray cans %s\n", on ? "on" : "off");
+}
+
+static volatile int s_menu_refill_cans;
+
+/* Top the spray cans up to 10 once, on the next frame the character
+ * struct is live (consumed in test_hooks_step, beside the infinite
+ * cheat's own top-up). */
+void recomp_cheat_refill_cans(void)
+{
+    __atomic_store_n(&s_menu_refill_cans, 1, __ATOMIC_RELEASE);
+}
+
+int recomp_cheat_teleport_ready(void)
+{
+    return __atomic_load_n(&s_menu_player_seen, __ATOMIC_ACQUIRE);
+}
+
+int recomp_cheat_teleport_position(float xyz[3])
+{
+    int i;
+    if (!xyz || !recomp_cheat_teleport_ready()) return 0;
+    for (i = 0; i < 3; i++) {
+        uint32_t bits = __atomic_load_n(&s_menu_player_xyz[i], __ATOMIC_ACQUIRE);
+        memcpy(&xyz[i], &bits, sizeof bits);
+    }
+    return 1;
+}
+
+void recomp_cheat_teleport_request(float x, float y, float z)
+{
+    const float xyz[3] = { x, y, z };
+    int i;
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z)) return;
+    for (i = 0; i < 3; i++) {
+        uint32_t bits;
+        memcpy(&bits, &xyz[i], sizeof bits);
+        __atomic_store_n(&s_menu_teleport_xyz[i], bits, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&s_menu_teleport_pending, 1, __ATOMIC_RELEASE);
+}
+
 static void teleport_step(float *chw)
 {
     static int state = -1; static double t; static float x, y, z;
+    int i;
     if (state < 0) {
         const char *s = getenv("JSRF_TELEPORT");
         state = (s && sscanf(s, "%lf:%f,%f,%f", &t, &x, &y, &z) == 4) ? 1 : 0;
     }
-    if (state != 1 || pad_now() < t) return;
-    state = 2;
-    fprintf(stderr, "[TELEPORT] t=%.1f (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)\n", pad_now(),
-            chw[0xCA4 / 4], chw[0xCA8 / 4], chw[0xCAC / 4], x, y, z);
-    chw[0xCA4 / 4] = x; chw[0xCA8 / 4] = y; chw[0xCAC / 4] = z;
+    if (state == 1 && pad_now() >= t) {
+        state = 2;
+        fprintf(stderr, "[TELEPORT] t=%.1f (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)\n", pad_now(),
+                chw[0xCA4 / 4], chw[0xCA8 / 4], chw[0xCAC / 4], x, y, z);
+        chw[0xCA4 / 4] = x; chw[0xCA8 / 4] = y; chw[0xCAC / 4] = z;
+    }
+    if (__atomic_exchange_n(&s_menu_teleport_pending, 0, __ATOMIC_ACQ_REL)) {
+        float xyz[3];
+        for (i = 0; i < 3; i++) {
+            uint32_t bits = __atomic_load_n(&s_menu_teleport_xyz[i], __ATOMIC_RELAXED);
+            memcpy(&xyz[i], &bits, sizeof bits);
+        }
+        fprintf(stderr, "[TELEPORT] menu request (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)\n",
+                chw[0xCA4 / 4], chw[0xCA8 / 4], chw[0xCAC / 4], xyz[0], xyz[1], xyz[2]);
+        chw[0xCA4 / 4] = xyz[0]; chw[0xCA8 / 4] = xyz[1]; chw[0xCAC / 4] = xyz[2];
+    }
+    for (i = 0; i < 3; i++) {
+        uint32_t bits;
+        memcpy(&bits, &chw[0xCA4 / 4 + i], sizeof bits);
+        __atomic_store_n(&s_menu_player_xyz[i], bits, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&s_menu_player_seen, 1, __ATOMIC_RELEASE);
 }
 /* JSRF_CANS="t:n" -- once, at time t, give the player n spray cans
  * (char +0xFA0; sub_0007FC90 checks it against the boost cost, sub_0007FC60
@@ -1585,6 +1835,12 @@ static void test_hooks_step(uint8_t *ch)
         fprintf(stderr, "[CANS] t=%.1f cans %d -> %d\n", pad_now(), (int)cw[0xFA0 / 4], cans_n);
         cw[0xFA0 / 4] = (uint32_t)cans_n;
     }
+    if (recomp_cheat_infinite_cans_state() && cw[0xFA0 / 4] < 10u)
+        cw[0xFA0 / 4] = 10u;
+    if (__atomic_exchange_n(&s_menu_refill_cans, 0, __ATOMIC_ACQ_REL) && cw[0xFA0 / 4] < 10u) {
+        cw[0xFA0 / 4] = 10u;
+        fprintf(stderr, "[CHEAT] spray cans refilled to 10\n");
+    }
     timer = cw[0xE60 / 4];
     if (timer) s_boost_frames++;
     if (timer != last_timer && (timer == 0 || last_timer == 0)) {
@@ -1614,6 +1870,20 @@ static void test_hooks_step(uint8_t *ch)
  * pairs, comma-separated, share the time: "0x10001:0x200FA,0x10064:0x200FA@45"
  * sends New Game's tutorial and Load Game's garage alike to 99th Street. */
 static uint32_t s_mission_mgr;   /* the object whose vtable requests missions */
+static volatile int s_menu_mission_redirect;
+
+int recomp_mission_redirect_state(void)
+{
+    return __atomic_load_n(&s_menu_mission_redirect, __ATOMIC_ACQUIRE);
+}
+
+void recomp_mission_redirect_toggle(void)
+{
+    int on = !recomp_mission_redirect_state();
+    __atomic_store_n(&s_menu_mission_redirect, on, __ATOMIC_RELEASE);
+    fprintf(stderr, "[MISSION] menu redirect %s\n", on ? "on" : "off");
+}
+
 static void mission_hook(const char *what)
 {
     static int init; static uint32_t from[4], to[4]; static double after; static int npairs;
@@ -1660,6 +1930,12 @@ static void mission_hook(const char *what)
             *arg = to[i];
             break;
         }
+    if (recomp_mission_redirect_state() && (id == 0x00010001u || id == 0x00010064u)) {
+        /* Exact 99th Street free-skate id from the upstream selector. */
+        const uint32_t target = 0x0009009Bu;
+        fprintf(stderr, "[MISSION] menu redirect: %08X -> %08X (99th Street)\n", id, target);
+        *arg = target;
+    }
 }
 /* ---- sub_00046FD0: fill in one storage device's record for the save menu
  * (slot 8 is the hard disk: +0 present, +4 ?, +8 room for a save, +0xC the
@@ -2011,10 +2287,111 @@ __attribute__((constructor)) static void jsrf_wide_boot(void)
     const char *v = getenv("JSRF_WIDE_BOOT");
     nv2a_set_wide_scene(v && v[0] == '0' ? 0 : 1);
 }
+/* ---- the track consumer: fire a latched pick through PlayBGM ------------
+ *
+ * Called from the flow wrapper with the map jump's own bookkeeping.
+ * The gate is the map jump's, re-read fresh so a map jump that fired
+ * earlier in the same wrapper call (state now 93) defers the pick
+ * until the new area has settled into an in-play state: flow state
+ * 15 or 31, not the title mission (0x5A), and the state at least a
+ * second old. A pick that has not fired stays latched.
+ *
+ * The call shape is the game's own. sub_00116F50's only caller in the
+ * whole game is the stage dispatcher (sub_00117350), and on its
+ * PlayBGM path it always passes (id, 0, 1): a2 == 0 starts the new
+ * channel at state 1 / full gain, a3 == 1 arms the old channel's
+ * fade-out instead of a hard stop (sub_00116F50 body, the branches at
+ * 00116FBE/00116FED and 00117019). The garage's picks take the same
+ * path -- they arrive as stage requests through the same dispatcher.
+ * If the pick is already the current id the dispatcher itself would
+ * bail (it compares against sndmgr+0x9C before calling), so the
+ * consumer does the same and says so instead of restarting it. */
+extern void sub_00116F50(void);
+static void music_track_step(uint32_t flow, double state_at, double now)
+{
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    uint32_t want = __atomic_load_n(&s_menu_track_request, __ATOMIC_ACQUIRE);
+    uint32_t state, mission, id, sm = s_bgm_sndmgr;
+    uint32_t id9c = 0xFFFFFFFFu, idb8 = 0xFFFFFFFFu;
+    if (!want) return;
+    state = *(uint32_t *)(m + flow + 0x5Cu);
+    mission = *(uint32_t *)(m + flow + 0x58u);
+    if ((state != 15u && state != 31u) || mission == 0x5Au || now - state_at < 1.0)
+        return;
+    if (!__atomic_compare_exchange_n(&s_menu_track_request, &want, 0u, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;   /* a newer pick landed in between; it fires next step */
+    id = want - 1u;
+    if (sm >= 0x10000u && sm + 0x120u < (64u << 20)) {
+        id9c = *(uint32_t *)(m + sm + 0x9Cu);
+        idb8 = *(uint32_t *)(m + sm + 0xB8u);
+    }
+    if (id9c == id || idb8 == id) {
+        fprintf(stderr, "[TRACK] t=%.2f pick id %u is already current (id9c %08X idb8 %08X); not fired\n",
+                now, id, id9c, idb8);
+        return;
+    }
+    { uint32_t a[3]; a[0] = id; a[1] = 0; a[2] = 1;
+      fprintf(stderr, "[TRACK] t=%.2f tid %u esp %08X: PlayBGM(%u, 0, 1) -- flow state %u mission %08X, was id9c %08X idb8 %08X\n",
+              now, (unsigned)GetCurrentThreadId(), g_esp, id, state, mission, id9c, idb8);
+      { uint32_t r = guest_call_cdecl(sub_00116F50, 0x00116F50u, 3, a);
+        fprintf(stderr, "[TRACK] PlayBGM(%u) returned %08X; watch for the [BGM] line and its [ADXOPEN]\n",
+                id, r); } }
+}
+/* ---- the custom-track consumer: fire a latched pick on its carrier ---
+ *
+ * The same gate as the track consumer, read the same way. The fire is
+ * PlayBGM(0x3C, 0, 1) -- SET 01A, the proven call shape -- with the
+ * kernel's one-shot redirect armed at the latched file just for the
+ * duration of the call: the stream opens synchronously inside
+ * PlayBGM, so the arm is spent (or disarmed on return, if the open
+ * never came) by the time the call returns, and no later natural open
+ * of SET 01A can be caught by it. Unlike the track consumer there is
+ * deliberately no already-current bail: if the area is already
+ * playing SET 01A, whether PlayBGM re-opens the stream is the game's
+ * own business, and the pick must not be silently dropped before the
+ * question is asked. A failed open (the file deleted between pick and
+ * fire) is the dead-mix shape: the log says so, the channel stays on
+ * whatever it had, and the arm is gone either way. */
+static void music_custom_step(uint32_t flow, double state_at, double now)
+{
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    uint32_t state, mission, sm = s_bgm_sndmgr;
+    uint32_t id9c = 0xFFFFFFFFu, idb8 = 0xFFFFFFFFu;
+    int expected = 1;
+    char abs[320];
+    if (__atomic_load_n(&s_menu_custom_state, __ATOMIC_ACQUIRE) != 1)
+        return;
+    state = *(uint32_t *)(m + flow + 0x5Cu);
+    mission = *(uint32_t *)(m + flow + 0x58u);
+    if ((state != 15u && state != 31u) || mission == 0x5Au || now - state_at < 1.0)
+        return;
+    if (!__atomic_compare_exchange_n(&s_menu_custom_state, &expected, 2, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;   /* a newer pick landed in between; it fires next step */
+    if (sm >= 0x10000u && sm + 0x120u < (64u << 20)) {
+        id9c = *(uint32_t *)(m + sm + 0x9Cu);
+        idb8 = *(uint32_t *)(m + sm + 0xB8u);
+    }
+    __atomic_store_n(&s_menu_custom_seq, recomp_music_now_seq(), __ATOMIC_RELEASE);
+    snprintf(abs, sizeof abs, "sdmc:/switch/jsrf-unleashed/custom_tracks/%s",
+             s_menu_custom_leaf);
+    xbox_custom_track_arm(abs);
+    { uint32_t a[3]; a[0] = 0x3Cu; a[1] = 0; a[2] = 1;
+      fprintf(stderr, "[CUSTOM] t=%.2f tid %u esp %08X: PlayBGM(60, 0, 1) -- carrier SET 01A for '%s'; flow state %u mission %08X, was id9c %08X idb8 %08X\n",
+              now, (unsigned)GetCurrentThreadId(), g_esp, s_menu_custom_leaf,
+              state, mission, id9c, idb8);
+      { uint32_t r = guest_call_cdecl(sub_00116F50, 0x00116F50u, 3, a);
+        xbox_custom_track_disarm();
+        fprintf(stderr, "[CUSTOM] PlayBGM(60) returned %08X; '%s' plays as SET 01A until the game changes the music\n",
+                r, s_menu_custom_leaf); } }
+}
 extern void sub_00051FC0_gen(void);
 void sub_00051FC0(void)
 {
     static int init = -1, log_on; static double t; static uint32_t id, last_state = 0xFFFFFFFFu;
+    static uint32_t map_want, map_flow, map_state = 0xFFFFFFFFu;
+    static double map_state_at;
     uint8_t *m = (uint8_t *)g_xbox_mem_offset;
     uint32_t flow = g_ecx;
     if (init < 0) {
@@ -2023,6 +2400,34 @@ void sub_00051FC0(void)
         log_on = (init || getenv("JSRF_FLOW_LOG")) ? 1 : 0;
     }
     if (flow >= 0x10000u && flow + 0x1100u < (64u << 20)) {
+        uint32_t flow_state = *(uint32_t *)(m + flow + 0x5Cu);
+        uint32_t flow_mission = *(uint32_t *)(m + flow + 0x58u);
+        uint32_t picked = __atomic_exchange_n(&s_menu_map_request, 0, __ATOMIC_ACQ_REL);
+        double now = pad_now();
+        __atomic_store_n(&s_menu_map_available, 1, __ATOMIC_RELEASE);
+        if (picked) map_want = picked;
+        if (flow != map_flow || flow_state != map_state) {
+            map_flow = flow;
+            map_state = flow_state;
+            map_state_at = now;
+        }
+        /* Match upstream's safe handoff: wait a second after entering an
+         * in-play/post-title state, then let state 93 load the chosen map. */
+        if (map_want && (flow_state == 15u || flow_state == 31u)
+         && flow_mission != 0x5Au && now - map_state_at >= 1.0) {
+            fprintf(stderr, "[MAP] t=%.1f flow %08X: free skate %08X -> %08X via state 93\n",
+                    now, flow, flow_mission, map_want);
+            *(uint32_t *)(m + flow + 0x4Cu) = map_want >> 16;
+            *(uint32_t *)(m + flow + 0x54u) = map_want & 0xFFFFu;
+            *(uint32_t *)(m + flow + 0x5Cu) = 93u;
+            map_want = 0;
+        }
+        /* A latched Music > Tracks pick, under the same gate (its own
+         * fresh state read inside keeps a same-call map jump ahead of
+         * it: the pick then fires once the new area settles). */
+        music_track_step(flow, map_state_at, now);
+        /* A latched custom-track pick, under the same gate. */
+        music_custom_step(flow, map_state_at, now);
         /* JSRF_GMVAR_SET="t:idx=val[,idx=val...]" (test only): write game
          * manager variables (+0x7868 + 4*idx) once, at t seconds. */
         { static int gs = -1; static double gt; static char spec[256];
@@ -2208,6 +2613,70 @@ void sub_000A6110(void)
     sub_000A6110_gen();
 }
 
+/* ---- [BGM]: watch the sound manager's BGM bookkeeping --------------------
+ *
+ * Why a watcher, when the natural shape is a wrapper apiece on
+ * sub_00116F50 (PlayBGM), sub_00116AB0 (PlayStream) and sub_00117350
+ * (the stage dispatcher)? Those three have no _gen twins in the
+ * generated code and no entry hooks -- tools/recomp/manual_scan.py
+ * only renames a function when recomp_manual.c already wrapped it at
+ * generation time, and none of the three was -- and their callers
+ * reach them by direct RECOMP_ABI_CALL, which never consults
+ * recomp_lookup_manual. A plain-name definition here would
+ * duplicate-link against the generated body, and regenerating the
+ * tree for three log lines is not a trade worth making. What can be
+ * observed without touching them is everything they write:
+ *
+ *   +0x9C  the current BGM id -- written by PlayBGM's flip path and
+ *          by the dispatcher's direct-PlayStream path (which also
+ *          stamps the channel state and gain itself);
+ *   +0xB8  the id again, written by PlayBGM's fast path (the other
+ *          channel already in state 2), which does NOT touch +0x9C;
+ *   +0xA8[channel]  the a2 PlayBGM stored for the channel it started
+ *          (and the a3 it stored for the channel it stopped) -- the
+ *          fast path is the one that stores them;
+ *   +0x78 / +0x7C[channel] / +0x100  the current channel, the two
+ *          channel states, the old channel's fade-out arm.
+ *
+ * So this rides the one sound-manager function that is already
+ * wrapped -- its per-frame update, sub_00116E30, whose g_ecx IS the
+ * sound manager -- and logs whenever +0x9C or +0xB8 moves, with the
+ * full field set and the host thread id of the update's context.
+ * Paired with the kernel's [ADXOPEN] (the path each start actually
+ * opened, ground truth) that settles what a natural BGM change
+ * passes and does, per id class, without a single new wrapper. */
+static void bgm_watch(uint32_t o)
+{
+    static uint32_t last9c, lastb8, seen;
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    uint32_t id9c, idb8;
+    if (o < 0x10000u || o + 0x120u >= (64u << 20)) return;
+    s_bgm_sndmgr = o;
+    id9c = *(uint32_t *)(m + o + 0x9Cu);
+    idb8 = *(uint32_t *)(m + o + 0xB8u);
+    if (o != seen) {
+        seen = o; last9c = id9c; lastb8 = idb8;
+        fprintf(stderr, "[BGM] watch on sndmgr %08X: id9c %08X idb8 %08X ch %u states %u/%u (tid %u)\n",
+                o, id9c, idb8, *(uint32_t *)(m + o + 0x78u),
+                *(uint32_t *)(m + o + 0x7Cu), *(uint32_t *)(m + o + 0x80u),
+                (unsigned)GetCurrentThreadId());
+        if (id9c != 0xFFFFFFFFu) bgm_now_publish(id9c);
+        else if (idb8 != 0xFFFFFFFFu) bgm_now_publish(idb8);
+        return;
+    }
+    if (id9c == last9c && idb8 == lastb8) return;
+    fprintf(stderr, "[BGM] t=%.2f frame %u tid %u esp %08X: id9c %08X -> %08X, idb8 %08X -> %08X; ch %u states %u/%u a8 %08X/%08X fade %u\n",
+            pad_now(), s_game_frames, (unsigned)GetCurrentThreadId(), g_esp,
+            last9c, id9c, lastb8, idb8,
+            *(uint32_t *)(m + o + 0x78u),
+            *(uint32_t *)(m + o + 0x7Cu), *(uint32_t *)(m + o + 0x80u),
+            *(uint32_t *)(m + o + 0xA8u), *(uint32_t *)(m + o + 0xACu),
+            *(uint32_t *)(m + o + 0x100u));
+    if (id9c != last9c && id9c != 0xFFFFFFFFu) bgm_now_publish(id9c);
+    if (idb8 != lastb8 && idb8 != 0xFFFFFFFFu) bgm_now_publish(idb8);
+    last9c = id9c; lastb8 = idb8;
+}
+
 /* ---- sub_00116E30: the sound manager's per-frame update; counts frames.
  *
  * JSRF_VOICE_LOG=1 (test only): the speech slots, frame by frame. The
@@ -2243,6 +2712,7 @@ void sub_00116E30(void)
     int k;
     s_game_frames++;
     sub_00116E30_gen();
+    bgm_watch(o);
     if (!voice_log_on() || o < 0x10000u || o + 0x200u >= (64u << 20)) return;
     s_sndmgr = o;
     if (!init) { init = 1; memset(last, 0xFF, sizeof last); }
@@ -4514,6 +4984,8 @@ __attribute__((weak)) int nv_window_pref_rstick_camera(void);
 __attribute__((weak)) int nv_window_pref_rstick_camera(void) { return 0; }   /* no switch: off */
 __attribute__((weak)) int nv_window_pref_rstick_ease(void);
 __attribute__((weak)) int nv_window_pref_rstick_ease(void) { return 1; }   /* no switch: upstream's ease back */
+__attribute__((weak)) int nv_window_pref_rstick_holdview(void);
+__attribute__((weak)) int nv_window_pref_rstick_holdview(void) { return 0; }   /* no switch: the ease back runs as it always has */
 
 #define RCAM_DEAD   0.20f      /* of full deflection: a resting stick drifts */
 /* The speed: what is past the dead zone, to the power 1.5 -- fine near the
@@ -4537,6 +5009,7 @@ __attribute__((weak)) int nv_window_pref_rstick_ease(void) { return 1; }   /* no
 
 static struct {
     float    rx, ry;           /* the right stick, -1..1, dead zone taken out */
+    int      moving;           /* the movement stick is off its dead zone */
     int      lt;               /* the L trigger held */
     float    yaw, pitch;       /* the turn, radians: to the right, and up */
     float    idle;             /* seconds since the stick was let go */
@@ -4564,6 +5037,13 @@ static void rcam_note_pad(XBOX_INPUT_STATE *s)
     }
     s_rcam.rx = x;
     s_rcam.ry = y;
+    {   /* Whether the skater is being steered, for the hold-the-view
+         * gate on the ease back: the same dead zone, no curve -- only
+         * whether the movement stick is touched at all. */
+        float lx = (float)s->Gamepad.sThumbLX / 32767.0f;
+        float ly = (float)s->Gamepad.sThumbLY / 32767.0f;
+        s_rcam.moving = (lx * lx + ly * ly) > RCAM_DEAD * RCAM_DEAD;
+    }
     s_rcam.lt = s->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] > 64;
     /* While the camera is turning with it, the game does not see the stick
      * (its first-person look). Elsewhere -- menus, conversations, events --
@@ -4680,11 +5160,20 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
         s_rcam.pitch += RCAM_CURVE(s_rcam.ry) * RCAM_PITCH * dt;
         s_rcam.idle = 0.0f;
     } else if (nv_window_pref_rstick_ease()) {
-        s_rcam.idle += dt;
-        if (s_rcam.idle > RCAM_HOLD) {
-            float k = expf(-dt / RCAM_TAU);
-            s_rcam.yaw *= k;
-            s_rcam.pitch *= k;
+        /* Hold the view (a platform choice; the Deko3D build's menu
+         * provides it, on): while the movement stick is touched, the
+         * drift home waits -- pan, let go of the right stick and keep
+         * skating, and the view stays where it was put. It only runs
+         * once the player stops moving too. */
+        if (nv_window_pref_rstick_holdview() && s_rcam.moving) {
+            s_rcam.idle = 0.0f;
+        } else {
+            s_rcam.idle += dt;
+            if (s_rcam.idle > RCAM_HOLD) {
+                float k = expf(-dt / RCAM_TAU);
+                s_rcam.yaw *= k;
+                s_rcam.pitch *= k;
+            }
         }
     }
     /* Ease off: the turn simply stays where the player left it. */

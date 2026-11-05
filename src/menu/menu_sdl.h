@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 /* Once, on the GL thread, with the window's context current. about_gpu and
- * about_gl: the graphics card and the OpenGL version, for File > About; kept,
+ * about_gl: the graphics card and the OpenGL version, for File tab > About; kept,
  * not copied. 0 if Dear ImGui could not start; the game then runs without the
  * menu. */
 int  xbox_MenuInit(SDL_Window *window, void *gl_context, const char *about_gpu,

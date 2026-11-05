@@ -1,7 +1,7 @@
 /*
  * menu.h -- the in-game menu's contents (F1, or Back on a pad).
  *
- * The menu is a bar of menus, each a list of rows, and any part of the game
+ * The menu is a set of tabs, each a list of rows, and any part of the game
  * can add rows to it. Whoever owns a setting adds them: a row carries the
  * owner's own functions, so the setting keeps living where it always did
  * (nv2a_gl.c for the window's) and the menu holds no copy of it. Nor does
@@ -23,8 +23,8 @@
  *     xbox_MenuAdd(rows, (int)(sizeof rows / sizeof rows[0]));
  *     #endif
  *
- * Plain C; menu.cpp draws the rows with Dear ImGui. Labels, (Restart), boxes
- * and File > About follow docs/menu-format.md.
+ * Plain C; menu.cpp draws the rows with Dear ImGui. Tabs, section headings,
+ * labels, (Restart), confirmations and File > About follow docs/menu-format.md.
  */
 #ifndef XBOX_MENU_H
 #define XBOX_MENU_H
@@ -33,13 +33,15 @@
 extern "C" {
 #endif
 
-/* The menus, left to right. A new one is a line here and its title in
- * menu.cpp; a menu nobody has added rows to is not shown. */
+/* The pages, left to right. A new one is a line here and its title in
+ * menu.cpp; a page nobody has added rows to is not shown. */
 typedef enum {
     XBOX_MENU_FILE,
     XBOX_MENU_DISPLAY,
     XBOX_MENU_GRAPHICS,
     XBOX_MENU_CONTROLLER,
+    XBOX_MENU_CHEATS,
+    XBOX_MENU_MUSIC,
     XBOX_MENU_DEVELOPER,
     XBOX_MENU_COUNT
 } XBOX_MENU_ID;
@@ -83,10 +85,17 @@ typedef struct XBOX_MENU_ITEM {
      * Display's Skip intro, added as the game starts, below the window's
      * rows, added once the window is up. */
     int             last;
-    /* Said in a tooltip while the row is hovered or has the pad: what
-     * the setting does, in a line or two of plain words. NULL: no
-     * tooltip. Kept last so tables written before it stay valid. */
+    /* Said in the help pane and a tooltip while hovered/focused: what
+     * the setting does, in a line or two of plain words. NULL: no tip.
+     * Kept in its original position for older aggregate initializers. */
     const char     *tip;
+    /* Optional heading within a page. Rows stay in the order added; a
+     * heading appears when this text changes. Appended to keep existing
+     * aggregate initializers source-compatible. */
+    const char     *section;
+    /* Optional runtime availability check. A false result disables the
+     * control without hiding its label or help text. Appended for older rows. */
+    int           (*enabled)(void);
 } XBOX_MENU_ITEM;
 
 /* Adds rows to the end of their menus (above any `last` row), copied: the
@@ -101,6 +110,10 @@ void xbox_MenuAdd(const XBOX_MENU_ITEM *items, int count);
  * frame after opening -- the bar alone, the pad on the first menu's title,
  * so a pad has somewhere to start. */
 void menu_build(int just_opened);
+
+/* Ask the host to close the menu after this frame has been rendered. Safe
+ * from menu_build(); the host defers the state change until ImGui is done. */
+void xbox_MenuRequestClose(void);
 
 /* The window's side too: a box in the middle of the window, over whatever is
  * behind it, saying how far something the game is waiting for has got --

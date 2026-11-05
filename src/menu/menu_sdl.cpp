@@ -44,6 +44,7 @@
 static SDL_mutex   *g_mu;
 static volatile int g_ready;        /* both read by the input layer's thread */
 static volatile int g_open;
+static int          g_close_requested; /* consumed after ImGui::Render */
 static int          g_just_opened;
 static float        g_scale;
 static ImGuiStyle   g_style;        /* before scaling */
@@ -62,7 +63,7 @@ static char         g_corner[48];
  * with it; the runtime is not. */
 extern "C" const char *recomp_version(void) __attribute__((weak));
 
-/* File > About, a section at a time: what the project is and who it
+/* File tab > About, a section at a time: what the project is and who it
  * credits, then the build, the OS, the graphics card, SDL, OpenGL, Dear
  * ImGui. Every section is written the same way, and so is any added later:
  * its name on a line of its own, then each detail -- the version first,
@@ -88,6 +89,8 @@ static const char *about_text(void)
              "-The Switch port of JetSetRadioFuture-Unleashed\n"
              "-by JuMatt, built on xboxrecomp by sp00nz and\n"
              "-the xemu project's NV2A and APU hardware models\n"
+             "-The free-skate map list and mission IDs follow\n"
+             "-JuMatt's upstream 0.6.6 map selector.\n"
              "-The in-game menu, adapted from JSRF-PC\n"
              "-by spriteice\n\n"
              "%s\n"
@@ -139,14 +142,14 @@ static void exit_game(void)
 /* Every field, in order: C++11 has no designated initializers. */
 static const XBOX_MENU_ITEM k_file[] = {
     { XBOX_MENU_FILE, XBOX_ITEM_INFO,      "About", NULL, NULL,      NULL, NULL, 0, about_text, NULL, NULL, NULL, 0, 0, 0, NULL, 0,
-      "What this is, who made it, and this build's details." },
-    { XBOX_MENU_FILE, XBOX_ITEM_SEPARATOR, NULL,    NULL, NULL,      NULL, NULL, 0, NULL,       NULL, NULL, NULL, 0, 0, 0, NULL, 0, NULL },
+      "What this is, who made it, and this build's details.", "About" },
+    { XBOX_MENU_FILE, XBOX_ITEM_SEPARATOR, NULL,    NULL, NULL,      NULL, NULL, 0, NULL,       NULL, NULL, NULL, 0, 0, 0, NULL, 0, NULL, NULL },
     { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Restart", NULL, recomp_restart_self, NULL, NULL, 0, NULL,
       "The game restarts, losing unsaved progress.", NULL, NULL, 0, 0, 0, NULL, 0,
-      "Starts the game over from the top, as if it had just been launched." },
+      "Starts the game over from the top, as if it had just been launched.", "Session" },
     { XBOX_MENU_FILE, XBOX_ITEM_ACTION,    "Exit",  NULL, exit_game, NULL, NULL, 0, NULL,
       "Unsaved progress is lost.", NULL, NULL, 0, 0, 0, NULL, 0,
-      "Closes the game." },
+      "Closes the game.", "Session" },
 };
 
 /* ---- opening and closing ------------------------------------------------ */
@@ -176,6 +179,13 @@ extern "C" void xbox_MenuSetOpen(int on)
     SDL_LockMutex(g_mu);
     set_open(on);
     SDL_UnlockMutex(g_mu);
+}
+
+/* Called by menu_build while the frame mutex is already held. Defer the
+ * actual close until after ImGui::Render has finished using its input. */
+extern "C" void xbox_MenuRequestClose(void)
+{
+    __atomic_store_n(&g_close_requested, 1, __ATOMIC_RELEASE);
 }
 
 /* ---- the calls from the window (nv2a_gl.c) ------------------------------ */
@@ -371,8 +381,10 @@ extern "C" void xbox_MenuFrame(void)
     if (g_open) menu_build(g_just_opened);
     g_just_opened = 0;
     if (g_busy_total) menu_build_busy(g_busy_what, g_busy_done, g_busy_total);
-    if (g_corner[0] && !g_open) menu_build_corner(g_corner);   /* not over the menu bar */
+    if (g_corner[0] && !g_open) menu_build_corner(g_corner);   /* not over the settings overlay */
     ImGui::Render();
+    if (__atomic_exchange_n(&g_close_requested, 0, __ATOMIC_ACQ_REL))
+        set_open(0);
     SDL_UnlockMutex(g_mu);
 }
 

@@ -34,6 +34,7 @@
 #include "nv2a_shader_cache.h"
 #if defined(XBOXRECOMP_MENU)
 #include "menu_sdl.h"   /* the in-game menu (src/menu), drawn over this window */
+#include "../jsrf_maps.h"
 #endif
 #include "nv2a_hash.h"
 #include "nv2a_psh_consts.h"
@@ -498,6 +499,9 @@ static int g_imm_drawing;
  */
 typedef struct {
     double tex, verts, vbo, unif, draw, state;
+    double prog, setup, mid;  /* do_draw's untimed rest, split for prof_report */
+    double pre, stages;      /* the setup span, split at the constant file */
+    double stagetex, stageuni; /* the stages span, split bind side / uniform side */
     double whole_draw;      /* all of do_draw, the above included */
     double present, pace;   /* at the flip: showing the frame, waiting for its time */
     unsigned n_draws, n_const_upload, n_prog_switch, n_tex_upload, n_tex_lookup;
@@ -650,6 +654,13 @@ static void prof_report(void)
         d.draw  = g_prof.draw  - prev.draw;
         d.state = g_prof.state - prev.state;
         d.whole_draw = g_prof.whole_draw - prev.whole_draw;
+        d.prog  = g_prof.prog  - prev.prog;
+        d.setup = g_prof.setup - prev.setup;
+        d.mid   = g_prof.mid   - prev.mid;
+        d.pre    = g_prof.pre    - prev.pre;
+        d.stages = g_prof.stages - prev.stages;
+        d.stagetex = g_prof.stagetex - prev.stagetex;
+        d.stageuni = g_prof.stageuni - prev.stageuni;
         d.present = g_prof.present - prev.present;
         d.pace    = g_prof.pace    - prev.pace;
         fprintf(stderr,
@@ -672,6 +683,25 @@ static void prof_report(void)
                 ? 1e6 * (d.whole_draw - d.tex - d.verts - d.vbo - d.unif - d.draw - d.state)
                   / (g_prof.n_draws - prev.n_draws) : 0.0,
             100 * d.present / dt, 100 * d.pace / dt);
+        fprintf(stderr,
+            "[GLPROF]   inside a draw: program %.1f us, setup %.1f us "
+            "(pre %.1f, stages %.1f (tex %.1f, uni %.1f)), middle %.1f us "
+            "(setup and middle are gross: the constants and uploads inside "
+            "them count in their own buckets too)\n",
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.prog / (g_prof.n_draws - prev.n_draws) : 0.0,
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.setup / (g_prof.n_draws - prev.n_draws) : 0.0,
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.pre / (g_prof.n_draws - prev.n_draws) : 0.0,
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.stages / (g_prof.n_draws - prev.n_draws) : 0.0,
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.stagetex / (g_prof.n_draws - prev.n_draws) : 0.0,
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.stageuni / (g_prof.n_draws - prev.n_draws) : 0.0,
+            (g_prof.n_draws - prev.n_draws)
+                ? 1e6 * d.mid / (g_prof.n_draws - prev.n_draws) : 0.0);
         { static double last_vc;
           if (now - last_vc >= 10.0) { last_vc = now; vc_report(" (so far)"); } }
         /* Per second, not per frame -- which is what it used to say, and the
@@ -2230,6 +2260,7 @@ static void sdl_toggle_vsync(void)
 
 #if defined(XBOXRECOMP_MENU)
 #include "menu.h"
+#include "jsrf_maps.h"
 
 /* The window's rows in the in-game menu: the settings the hotkeys above
  * own, offered there too. Each row points at the same state and saves
@@ -2285,6 +2316,74 @@ static void menu_fps_pick(int i)
 }
 
 static void menu_smaa_flip(void) { sdl_pick_smaa(!nv2a_smaa()); }
+
+/* These menu actions hand work back to the game thread. The guest callbacks
+ * are never invoked directly from the overlay's rendering thread. */
+extern int  recomp_cheat_infinite_cans_state(void);
+extern void recomp_cheat_infinite_cans_toggle(void);
+extern int  recomp_cheat_teleport_ready(void);
+extern int  recomp_cheat_teleport_position(float xyz[3]);
+extern void recomp_cheat_teleport_request(float x, float y, float z);
+extern int  recomp_map_jump_available(void);
+extern void recomp_map_jump_request(uint32_t mission);
+extern int  recomp_mission_redirect_state(void);
+extern void recomp_mission_redirect_toggle(void);
+extern int  xbox_music_mix_override(void);
+extern void xbox_music_mix_select(int set);
+
+static double g_cheat_teleport_xyz[3];
+static int g_cheat_teleport_seeded;
+static int g_map_selection = -1;
+
+static void menu_teleport_seed(void)
+{
+    float xyz[3];
+    if (!g_cheat_teleport_seeded && recomp_cheat_teleport_position(xyz)) {
+        g_cheat_teleport_xyz[0] = xyz[0];
+        g_cheat_teleport_xyz[1] = xyz[1];
+        g_cheat_teleport_xyz[2] = xyz[2];
+        g_cheat_teleport_seeded = 1;
+    }
+}
+static double menu_teleport_x(void) { menu_teleport_seed(); return g_cheat_teleport_xyz[0]; }
+static double menu_teleport_y(void) { menu_teleport_seed(); return g_cheat_teleport_xyz[1]; }
+static double menu_teleport_z(void) { menu_teleport_seed(); return g_cheat_teleport_xyz[2]; }
+static void menu_teleport_set_x(double v) { g_cheat_teleport_xyz[0] = v; g_cheat_teleport_seeded = 1; }
+static void menu_teleport_set_y(double v) { g_cheat_teleport_xyz[1] = v; g_cheat_teleport_seeded = 1; }
+static void menu_teleport_set_z(double v) { g_cheat_teleport_xyz[2] = v; g_cheat_teleport_seeded = 1; }
+static void menu_teleport_run(void)
+{
+    menu_teleport_seed();
+    recomp_cheat_teleport_request((float)g_cheat_teleport_xyz[0],
+                                  (float)g_cheat_teleport_xyz[1],
+                                  (float)g_cheat_teleport_xyz[2]);
+}
+static int menu_music_state(void) { return xbox_music_mix_override(); }
+static void menu_music_pick(int i)
+{
+    if (i < 0 || i > 18) return;
+    xbox_music_mix_select(i);
+    fprintf(stderr, "[MUSIC] DJ mix override: %s\n", i ? "selected for the next stream" : "game default");
+}
+static const char *menu_music_info(void)
+{
+    return "JSRF plays each area as one continuous DJ mix. This selects the mix file the game opens next; it does not skip within the mix already playing.";
+}
+static int menu_map_shibuya_state(void) { return g_map_selection >= 0 && g_map_selection < 4 ? g_map_selection : -1; }
+static int menu_map_kogane_state(void)  { return g_map_selection >= 4 && g_map_selection < 9 ? g_map_selection - 4 : -1; }
+static int menu_map_benten_state(void)  { return g_map_selection >= 9 && g_map_selection < JSRF_MAP_COUNT ? g_map_selection - 9 : -1; }
+static void menu_map_pick(int base, int i, int n)
+{
+    int map = base + i;
+    if (i < 0 || i >= n || map < 0 || map >= JSRF_MAP_COUNT) return;
+    g_map_selection = map;
+    recomp_map_jump_request(k_jsrf_maps[map].mission);
+    fprintf(stderr, "[MAP] requested free skate: %s (%s)\n",
+            k_jsrf_maps[map].name, k_jsrf_maps[map].district);
+}
+static void menu_map_shibuya_pick(int i) { menu_map_pick(0, i, 4); }
+static void menu_map_kogane_pick(int i)  { menu_map_pick(4, i, 5); }
+static void menu_map_benten_pick(int i)  { menu_map_pick(9, i, 5); }
 
 static int menu_msaa_state(void)
 {
@@ -2465,7 +2564,7 @@ static const char *menu_status_text(void)
     return buf;
 }
 
-/* The menu bar's frame rate (menu.cpp asks for it by this name):
+/* The overlay's frame rate (menu.cpp asks for it by this name):
  * frames over the last half second or so, from the same counters
  * Status reads, smoothed by only ever being measured over a whole
  * window. 0 until the first window has passed. Frames, not flips:
@@ -2502,9 +2601,30 @@ static void sdl_menu_register(void)
     static const char *const skipvol_names[] = {
         "Draw all", "Skip characters", "Skip scenery", "Skip all"
     };
+    static const char *const music_set_names[] = {
+        "Use area's mix",
+        "DJ mix 01A", "DJ mix 01B", "DJ mix 02A", "DJ mix 02B",
+        "DJ mix 03A", "DJ mix 03B", "DJ mix 04A", "DJ mix 04B",
+        "DJ mix 05A", "DJ mix 05B", "DJ mix 06A", "DJ mix 06B",
+        "DJ mix 07A", "DJ mix 07B", "DJ mix 08A", "DJ mix 08B",
+        "DJ mix 09A", "DJ mix 09B"
+    };
+    static const char *const map_shibuya_names[] = {
+        "Shibuya Terminal", "Chuo Street", "Dogenzaka Hill", "Hikage Street"
+    };
+    static const char *const map_kogane_names[] = {
+        "Rokkaku-dai Heights", "Tokyo Underground Sewage Facility",
+        "Kibogaoka Hill", "Bottom Point of the Sewage Facility",
+        "Fortified Residential Zone"
+    };
+    static const char *const map_benten_names[] = {
+        "99th Street", "Sky Dinosaurian Square", "Rokkaku Expo Stadium",
+        "Highway Zero", "Skyscraper District"
+    };
     static const XBOX_MENU_ITEM rows[] = {
         { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_CHOICE,
           .label = "Render scale (Restart)",
+          .section = "Performance",
           .state = menu_scale_state, .pick = menu_scale_pick,
           .choices = scale_names, .nchoices = NV2A_SCALE_MAX,
           .confirm = "The new scale is stored and the game restarts; "
@@ -2514,28 +2634,33 @@ static void sdl_menu_register(void)
                  "the cheapest speed-up there is." },
         { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_CHOICE,
           .label = "Frame rate",
+          .section = "Performance",
           .state = menu_fps_state, .pick = menu_fps_pick,
           .choices = fps_names, .nchoices = 3,
           .tip = "Caps the frame rate. 60 is the original game's pace; "
                  "Unlimited lets it run as fast as it can." },
         { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_TOGGLE,
           .label = "Vsync",
+          .section = "Presentation",
           .state = nv_window_pref_vsync, .run = sdl_toggle_vsync,
           .tip = "Waits for the display's refresh before showing each "
                  "frame. On is steadier; off can tear, and the frame "
                  "is paced by the game's own vblank either way." },
         { .menu = XBOX_MENU_DISPLAY, .kind = XBOX_ITEM_TOGGLE,
           .label = "Show frame rate",
+          .section = "Presentation",
           .state = nv_window_pref_show_fps, .run = sdl_toggle_show_fps,
           .tip = "Frames a second in the top-left corner, updated twice "
                  "a second. Hidden while this menu is open." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "Widescreen (16:9)",
+          .section = "Aspect ratio",
           .state = nv2a_widescreen, .run = sdl_toggle_widescreen,
           .tip = "Widens the view to fill a 16:9 screen instead of "
                  "the original 4:3." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "Stretch to fill screen",
+          .section = "Aspect ratio",
           .state = nv2a_wide_stretch, .run = sdl_toggle_wide_stretch,
           .tip = "Stretches the whole 4:3 picture to fill a 16:9 "
                  "screen: title, menus and loading fill it too, and "
@@ -2543,23 +2668,27 @@ static void sdl_menu_register(void)
                  "looks a little wider; nothing is cut off." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_TOGGLE,
           .label = "SMAA",
+          .section = "Image quality",
           .state = nv2a_smaa, .run = menu_smaa_flip,
           .tip = "A smoothing pass over edges after rendering: a "
                  "softer picture for a small cost." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
           .label = "MSAA (Restart)",
+          .section = "Image quality",
           .state = menu_msaa_state, .pick = menu_msaa_pick,
           .choices = msaa_names, .nchoices = 4,
           .tip = "Smooths edges while rendering. Higher is smoother "
                  "and costs more; applies at the next start." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
           .label = "Anisotropic filtering",
+          .section = "Image quality",
           .state = menu_aniso_state, .pick = menu_aniso_pick,
           .choices = aniso_names, .nchoices = 5,
           .tip = "Keeps ground and wall textures sharp where they "
                  "run away from you at a shallow angle." },
         { .menu = XBOX_MENU_GRAPHICS, .kind = XBOX_ITEM_CHOICE,
           .label = "Shadow volumes",
+          .section = "Performance",
           .state = menu_skipvol_state, .pick = menu_skipvol_pick,
           .choices = skipvol_names, .nchoices = 4,
           .tip = "A speed experiment: shadow volumes are work the "
@@ -2567,6 +2696,7 @@ static void sdl_menu_register(void)
                  "for everything. Skipped shadows simply don't appear." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_CHOICE,
           .label = "Right-stick camera",
+          .section = "Camera",
           .state = menu_rcam_state, .pick = menu_rcam_pick,
           .choices = rcam_names, .nchoices = 3,
           .tip = "The right stick moves the camera. Camera (tracking) "
@@ -2575,12 +2705,14 @@ static void sdl_menu_register(void)
                  "does what it did on the Xbox." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Camera eases back when released",
+          .section = "Camera",
           .state = nv_window_pref_rstick_ease, .run = sdl_toggle_rstick_ease,
           .tip = "After you let go of the right stick, the view drifts "
                  "back behind the skater. Off, the view stays where you "
                  "left it; the left trigger still resets it." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Nintendo layout (A/B, X/Y)",
+          .section = "Button layout",
           .state = nv_window_pref_nintendo_layout, .run = sdl_toggle_nintendo_layout,
           .tip = "A and B trade places, and X and Y too, in the game "
                  "and in this menu, so each button does what its "
@@ -2588,6 +2720,7 @@ static void sdl_menu_register(void)
                  "for an Xbox pad and don't move." },
         { .menu = XBOX_MENU_CONTROLLER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Both sticks in game menus (Restart)",
+          .section = "Game menus",
           .state = dev_state_DEV_STICKBOTH, .run = dev_run_DEV_STICKBOTH,
           .tip = "In the game's own menus, the right stick moves the "
                  "selection too, not just the left. Applies at the "
@@ -2599,78 +2732,92 @@ static void sdl_menu_register(void)
     static const XBOX_MENU_ITEM dev_rows[] = {
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_INFO,
           .label = "Status", .text = menu_status_text,
+          .section = "Status",
           .tip = "Frames, draws and triangles a second, counted "
                  "between one look at Status and the next." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Start in 99th Street (Test)",
+          .section = "Mission testing",
+          .state = recomp_mission_redirect_state, .run = recomp_mission_redirect_toggle,
+          .confirm = "This redirects new-game tutorial and garage requests to 99th Street. It can affect story flow or offer a save; use a separate save.",
+          .tip = "A live test shortcut for JSRF_MISSION. It redirects the tutorial and garage mission requests to 99th Street." },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Run log (Restart)",
+          .section = "Logging",
           .state = dev_state_DEV_LOG, .run = dev_run_DEV_LOG,
           .tip = "The run log, written to the Logs folder. Off stops "
                  "the logging altogether: a small saving, and nothing "
                  "left to look at when something breaks." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
-          .label = "Profiler (Restart)",
-          .state = dev_state_DEV_PROFILE, .run = dev_run_DEV_PROFILE,
-          .tip = "A once-a-second report in the log: frame time and "
-                 "where it went. For finding what makes a scene slow." },
-        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
-          .label = "Sampler (Restart)",
-          .state = dev_state_DEV_SAMPLE, .run = dev_run_DEV_SAMPLE,
-          .tip = "Samples what the renderer is doing as it runs and "
-                 "writes the samples to the log, for profiling a "
-                 "stretch of play." },
-        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Log direct (Restart)",
+          .section = "Logging",
           .state = dev_state_DEV_LOGDIR, .run = dev_run_DEV_LOGDIR,
           .tip = "Log lines are written the moment they happen "
                  "instead of through the buffer. Slower; it catches "
                  "the last lines before a crash." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Spin log (Restart)",
+          .section = "Logging",
           .state = dev_state_DEV_SPIN, .run = dev_run_DEV_SPIN,
           .tip = "Logs time spent busy-waiting (spinning) to the log." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Profiler (Restart)",
+          .section = "Profiling",
+          .state = dev_state_DEV_PROFILE, .run = dev_run_DEV_PROFILE,
+          .tip = "A once-a-second report in the log: frame time and "
+                 "where it went. For finding what makes a scene slow." },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Sampler (Restart)",
+          .section = "Profiling",
+          .state = dev_state_DEV_SAMPLE, .run = dev_run_DEV_SAMPLE,
+          .tip = "Samples what the renderer is doing as it runs and "
+                 "writes the samples to the log, for profiling a "
+                 "stretch of play." },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Fast GPU (Restart)",
+          .section = "Rendering",
           .state = dev_state_DEV_FASTGPU, .run = dev_run_DEV_FASTGPU,
           .tip = "Acknowledges GPU flushes from a second thread "
                  "during kickoff. A speed experiment for GPU-bound "
                  "scenes." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Shader cache (Restart)",
+          .section = "Rendering",
           .state = dev_state_DEV_SHADERCACHE, .run = dev_run_DEV_SHADERCACHE,
           .tip = "Keeps compiled shaders on disk between runs, so a "
                  "scene doesn't stutter while its shaders compile "
                  "again. The first run with it off, or after it's "
                  "cleared, is the slow one." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
-          .label = "Mute (Restart)",
-          .state = dev_state_DEV_MUTE, .run = dev_run_DEV_MUTE,
-          .tip = "No sound at all: the audio core is skipped, not "
-                 "just turned down." },
-        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Widescreen FX full frame (Restart)",
+          .section = "Rendering",
           .state = dev_state_DEV_WIDEFX, .run = dev_run_DEV_WIDEFX,
           .tip = "In widescreen, full-screen effects (the boost smear "
                  "and its like) are drawn across the whole frame. "
                  "Off squeezes them into a 4:3 box, where they smear." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "CRC32 texture hashing (Restart)",
+          .section = "Rendering",
           .state = dev_state_DEV_CRC32, .run = dev_run_DEV_CRC32,
           .tip = "The vertex and texture caches key their entries "
                  "with CRC32, which this CPU does in hardware. Off "
                  "compares the long way." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB overlap accounting (Restart)",
+          .section = "Push-buffer diagnostics",
           .state = dev_state_DEV_OVERLAP, .run = dev_run_DEV_OVERLAP,
           .tip = "Counts how much of each frame the push-buffer walk "
                  "spends overlapped with everything else, into the "
                  "log. Measuring only; it changes nothing." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "Merge probe (Restart)",
+          .section = "Push-buffer diagnostics",
           .state = dev_state_DEV_MERGE, .run = dev_run_DEV_MERGE,
           .tip = "Probes whether neighbouring draws could be merged "
                  "into one, and logs what it finds. Measuring only." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB call snapshot (Restart)",
+          .section = "Push-buffer diagnostics",
           .state = dev_state_DEV_CALLSNAP, .run = dev_run_DEV_CALLSNAP,
           .tip = "With fast GPU on, copies the command lists the "
                  "game replays by reference before drawing them, so "
@@ -2678,12 +2825,79 @@ static void sdl_menu_register(void)
                  "reads them live." },
         { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
           .label = "PB semaphore log (Restart)",
+          .section = "Push-buffer diagnostics",
           .state = dev_state_DEV_SEMLOG, .run = dev_run_DEV_SEMLOG,
           .tip = "Logs the GPU's semaphore waits and releases to the "
                  "log. Chatty; for stalls and hangs." },
+        { .menu = XBOX_MENU_DEVELOPER, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Mute (Restart)",
+          .section = "Audio",
+          .state = dev_state_DEV_MUTE, .run = dev_run_DEV_MUTE,
+          .tip = "No sound at all: the audio core is skipped, not "
+                 "just turned down." },
+    };
+    static const XBOX_MENU_ITEM cheat_rows[] = {
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_TOGGLE,
+          .label = "Infinite spray cans",
+          .section = "Transient (session only)",
+          .state = recomp_cheat_infinite_cans_state, .run = recomp_cheat_infinite_cans_toggle,
+          .tip = "Keeps at least 10 cans available as you use them. This only changes live memory and resets when the game closes." },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_NUMBER,
+          .label = "Teleport X", .section = "Transient (session only)",
+          .value = menu_teleport_x, .set = menu_teleport_set_x,
+          .min = -10000.0, .max = 10000.0, .step = 10.0, .format = "%.0f",
+          .tip = "World-space X coordinate. The three coordinates start at the current player's position; adjust them before teleporting." },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_NUMBER,
+          .label = "Teleport Y", .section = "Transient (session only)",
+          .value = menu_teleport_y, .set = menu_teleport_set_y,
+          .min = -10000.0, .max = 10000.0, .step = 10.0, .format = "%.0f",
+          .tip = "World-space Y coordinate. The three coordinates start at the current player's position; adjust them before teleporting." },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_NUMBER,
+          .label = "Teleport Z", .section = "Transient (session only)",
+          .value = menu_teleport_z, .set = menu_teleport_set_z,
+          .min = -10000.0, .max = 10000.0, .step = 10.0, .format = "%.0f",
+          .tip = "World-space Z coordinate. The three coordinates start at the current player's position; adjust them before teleporting." },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_ACTION,
+          .label = "Teleport to coordinates", .section = "Transient (session only)",
+          .run = menu_teleport_run, .enabled = recomp_cheat_teleport_ready,
+          .tip = "Moves the player to the coordinates above on the next game update. This does not write to the save." },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_CHOICE,
+          .label = "Shibuya-cho", .section = "Progress change (may affect save)",
+          .state = menu_map_shibuya_state, .pick = menu_map_shibuya_pick,
+          .choices = map_shibuya_names, .nchoices = 4,
+          .confirm = "The game may offer to save after loading this map. Decline that save offer to keep your existing progress untouched.",
+          .tip = "Loads the selected free-skate mission through the game's normal transition. The save warning is intentional.",
+          .enabled = recomp_map_jump_available },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_CHOICE,
+          .label = "Kogane-cho", .section = "Progress change (may affect save)",
+          .state = menu_map_kogane_state, .pick = menu_map_kogane_pick,
+          .choices = map_kogane_names, .nchoices = 5,
+          .confirm = "The game may offer to save after loading this map. Decline that save offer to keep your existing progress untouched.",
+          .tip = "Loads the selected free-skate mission through the game's normal transition. The save warning is intentional.",
+          .enabled = recomp_map_jump_available },
+        { .menu = XBOX_MENU_CHEATS, .kind = XBOX_ITEM_CHOICE,
+          .label = "Benten-cho", .section = "Progress change (may affect save)",
+          .state = menu_map_benten_state, .pick = menu_map_benten_pick,
+          .choices = map_benten_names, .nchoices = 5,
+          .confirm = "The game may offer to save after loading this map. Decline that save offer to keep your existing progress untouched.",
+          .tip = "Loads the selected free-skate mission through the game's normal transition. The save warning is intentional.",
+          .enabled = recomp_map_jump_available },
+    };
+    static const XBOX_MENU_ITEM music_rows[] = {
+        { .menu = XBOX_MENU_MUSIC, .kind = XBOX_ITEM_CHOICE,
+          .label = "DJ mix (next stream)", .section = "Mix selection",
+          .state = menu_music_state, .pick = menu_music_pick,
+          .choices = music_set_names, .nchoices = 19,
+          .tip = "Overrides the area's whole continuous mix the next time the game opens a set stream. It does not skip to an individual song or change the stream already playing." },
+        { .menu = XBOX_MENU_MUSIC, .kind = XBOX_ITEM_INFO,
+          .label = "About mix selection", .section = "How it works",
+          .text = menu_music_info,
+          .tip = "The game plays a continuous DJ mix file per area; this selector chooses a different whole mix for the next stream open." },
     };
     xbox_MenuAdd(rows, (int)(sizeof rows / sizeof rows[0]));
     xbox_MenuAdd(dev_rows, (int)(sizeof dev_rows / sizeof dev_rows[0]));
+    xbox_MenuAdd(cheat_rows, (int)(sizeof cheat_rows / sizeof cheat_rows[0]));
+    xbox_MenuAdd(music_rows, (int)(sizeof music_rows / sizeof music_rows[0]));
 }
 #endif /* XBOXRECOMP_MENU */
 
@@ -6732,7 +6946,9 @@ static void do_draw_body(void)
       if (sk && S.xf_mode == NV2A_XF_MODE_FIXED && S.ff_lighting
           && (sk == 1 || (S.frames & 1u))) return; }
 
-    slot = program_for_current();
+    { double _tprog = PROF_ON() ? prof_now() : 0.0;
+      slot = program_for_current();
+      if (PROF_ON()) g_prof.prog += prof_now() - _tprog; }
     if (slot < 0) { g_drop[DROP_NOPROG]++; return; }
 
     /* RECOMP_GL_ONLY_A0=1 draws only the batches that pick their transform
@@ -7378,6 +7594,9 @@ static void do_draw_body(void)
       }
       PROF_ADD(vbo); }
 
+    double setup_t0 = PROF_ON() ? prof_now() : 0.0;
+    double mid_t0 = 0.0;
+    double stages_t0 = 0.0;
     if (g_cur_slot != slot) {
         g_prof.n_prog_switch++;
         G->prog_use(g_pcache[slot].prog);
@@ -7751,6 +7970,7 @@ static void do_draw_body(void)
         if (uses(slot, NV2A_U_FFTEXMAT))
             G->uniform_f(NV2A_U_FFTEXMAT, &S.u.ff_texmat[0][0], 16);
     }
+    if (PROF_ON()) g_prof.pre += prof_now() - setup_t0;
     if (!G->uniform_f_part) {
         if (S.consts_dirty) {
             PROF_T0();
@@ -7882,6 +8102,7 @@ static void do_draw_body(void)
      * belongs to the texture and not to the draw. Sampling a surface the
      * title rendered into a moment ago is render-to-texture, and the live
      * framebuffer is the answer rather than the bytes at that address. */
+    stages_t0 = PROF_ON() ? prof_now() : 0.0;
     {
         int st, srcslot[4] = { -1, -1, -1, -1 };
         for (st = 0; st < 4; st++) {
@@ -7891,6 +8112,7 @@ static void do_draw_body(void)
 
             int sslot = -1;
 
+            double stex_t0 = PROF_ON() ? prof_now() : 0.0;
             if (S.psh.tex_bound[st]) {
                 tex = surface_texture_for(&S.tex[st], &sx, &sy, &sslot);
                 if (!tex) {
@@ -7906,6 +8128,8 @@ static void do_draw_body(void)
                 }
             }
             tex_bind(st, tex);
+            if (PROF_ON()) g_prof.stagetex += prof_now() - stex_t0;
+            double suni_t0 = PROF_ON() ? prof_now() : 0.0;
             /* A surface this backend rendered holds its picture the GL way
              * up: the vertex stage sends screen y = 0 to NDC +1, so the top
              * row of the picture is the LAST row of the framebuffer. A
@@ -7936,9 +8160,13 @@ static void do_draw_body(void)
                 uni1f((NV2A_U_BUMPSCALE0 + st), S.tex[st].bump_scale);
             if (uses(slot, (NV2A_U_BUMPOFF0 + st)))
                 uni1f((NV2A_U_BUMPOFF0 + st), S.tex[st].bump_off);
+            if (PROF_ON()) g_prof.stageuni += prof_now() - suni_t0;
             srcslot[st] = sslot;
         }
         g_last.tex0 = 0;    /* unit 0 is no longer what the cache remembers */
+    if (PROF_ON()) g_prof.setup += prof_now() - setup_t0;
+    if (PROF_ON()) g_prof.stages += prof_now() - stages_t0;
+    mid_t0 = PROF_ON() ? prof_now() : 0.0;
 
         /* [PASS]: every draw while nv2a_gl_trace_frames() is active, and the
          * first draws that use a BUMPENVMAP stage: what each stage samples,
@@ -9357,6 +9585,7 @@ static void do_draw_body(void)
             goto xray_done;
         } }
     }
+    if (PROF_ON()) g_prof.mid += prof_now() - mid_t0;
     if (!curtain_skip && !g_surf_lost) {
         merge_probe_note(slot, vc_vb, mode, vc_seq);
         PROF_T0();
