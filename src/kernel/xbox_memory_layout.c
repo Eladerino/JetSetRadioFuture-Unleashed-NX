@@ -604,6 +604,13 @@ int xbox_Nv2aFrameCounter(uint32_t device_ptr_va, uint32_t counter_off)
     return 0;
 }
 
+void xbox_Nv2aFrameCounterFlip(void)
+{
+    /* Frame counters are advanced by frame_counters_tick() on the
+     * acknowledgement thread; a flip callback is only an ordering marker for
+     * renderers with a device queue. */
+}
+
 static void frame_counters_tick(void)
 {
     DWORD now = GetTickCount();
@@ -1377,8 +1384,71 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
  * at is. Zero total means the image had no TLS directory. */
 static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
 
+/* REGISTER BLOCK (skeammer). Lifted code rewritten by JSRF's
+ * regen/jsrf_reg_locals.py keeps these registers in C locals and stores
+ * and loads them all around every call, so on the Switch they are one
+ * block in a fixed order, reached from &g_eax (recomp_types.h, REGISTERS
+ * IN LOCALS):
+ *
+ *   eax ecx edx ebx esi edi esp fp_top | fp_stack[8]
+ *    0   4   8   12  16  20  24   28      32 .. 95
+ *
+ * A compiler places separate thread-locals as it likes, so the block is
+ * laid out here in assembly in a .tbss.recomp_regs section, zero-filled
+ * like the definitions it replaces. To every other file these are
+ * ordinary thread-locals. recomp_fast_tls_selfcheck() below checks the
+ * layout. -DRECOMP_NO_REG_BLOCK goes back to separate definitions. */
+#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
+#define RECOMP_REG_BLOCK_SYM(name, size)                                      \
+    "\t.globl " #name "\n\t.type " #name ", %tls_object\n"                  \
+    "\t.size " #name ", " #size "\n" #name ":\n\t.zero " #size "\n"
+__asm__("\t.pushsection .tbss.recomp_regs,\"awT\",%nobits\n"
+        "\t.balign 16\n"
+        RECOMP_REG_BLOCK_SYM(g_eax, 4)
+        RECOMP_REG_BLOCK_SYM(g_ecx, 4)
+        RECOMP_REG_BLOCK_SYM(g_edx, 4)
+        RECOMP_REG_BLOCK_SYM(g_ebx, 4)
+        RECOMP_REG_BLOCK_SYM(g_esi, 4)
+        RECOMP_REG_BLOCK_SYM(g_edi, 4)
+        RECOMP_REG_BLOCK_SYM(g_esp, 4)
+        RECOMP_REG_BLOCK_SYM(g_fp_top, 4)
+        RECOMP_REG_BLOCK_SYM(g_fp_stack, 64)
+        "\t.popsection\n");
+#undef RECOMP_REG_BLOCK_SYM
+extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
+extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+extern RECOMP_TLS double g_fp_stack[8];
+extern RECOMP_TLS int g_fp_top;
+#else
 RECOMP_TLS uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
 RECOMP_TLS uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
+#define RECOMP_FP_DEFINED_HERE 1
+#endif
+
+/* Verify the register-block layout the generated code's leaf helpers
+ * assume: offsets of the registers and the x87 stack relative to &g_eax
+ * must be eax 0, ecx 4, edx 8, ebx 12, esi 16, edi 20, esp 24,
+ * fp_top 28, fp_stack 32. Returns the number of mismatches (0 = layout
+ * as assumed). In non-block mode there is no fixed layout to check, so
+ * it always returns 0. Definition only; no call site here. */
+int recomp_fast_tls_selfcheck(void)
+{
+#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
+    const char *base = (const char *)&g_eax;
+    int mismatches = 0;
+    if ((const char *)&g_ecx - base != 4) mismatches++;
+    if ((const char *)&g_edx - base != 8) mismatches++;
+    if ((const char *)&g_ebx - base != 12) mismatches++;
+    if ((const char *)&g_esi - base != 16) mismatches++;
+    if ((const char *)&g_edi - base != 20) mismatches++;
+    if ((const char *)&g_esp - base != 24) mismatches++;
+    if ((const char *)&g_fp_top - base != 28) mismatches++;
+    if ((const char *)&g_fp_stack - base != 32) mismatches++;
+    return mismatches;
+#else
+    return 0;
+#endif
+}
 
 #ifdef RECOMP_ABI_CHECK
 /* Report a lifted function that returned without restoring ebx/esi/edi.
@@ -1524,8 +1594,10 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
 
 /* SEH frame pointer bridge (see recomp_types.h for explanation) */
 RECOMP_TLS uint32_t g_seh_ebp = 0;
+#ifdef RECOMP_FP_DEFINED_HERE   /* else in the REGISTER BLOCK above */
 RECOMP_TLS double g_fp_stack[8];
 RECOMP_TLS int g_fp_top = 0;
+#endif
 /* x87 control and status. The reset default masks every exception and
  * rounds to nearest, which is what the CRT expects before _control87. */
 RECOMP_TLS uint16_t g_fp_control_word = 0x037Fu;

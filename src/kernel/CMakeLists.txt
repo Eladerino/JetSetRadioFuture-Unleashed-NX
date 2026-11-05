@@ -24,8 +24,19 @@ set(KERNEL_SOURCES
     icall_feedback.c
     recomp_trace.c
     nv2a_pb_scan.c
-    nv2a_pb_exec.c
 )
+
+if(SWITCH AND XBOXRECOMP_DEKO3D)
+    # This executor presents the raw NV2A state and geometry to the Deko3D
+    # backend. Keep the existing software / GL executor for every other build.
+    list(APPEND KERNEL_SOURCES
+        nv2a_pb_exec_dk.c
+        nv2a_backend_queue.c
+        nv2a_host_api_dk.c
+    )
+else()
+    list(APPEND KERNEL_SOURCES nv2a_pb_exec.c)
+endif()
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
 
@@ -34,10 +45,16 @@ add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
 get_filename_component(XBOXRECOMP_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 target_include_directories(xbox_kernel PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../nv2a_gl
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${XBOXRECOMP_SRC_DIR}
+    ${XBOXRECOMP_SRC_DIR}/d3d
 )
+if(SWITCH AND XBOXRECOMP_DEKO3D)
+    target_include_directories(xbox_kernel PUBLIC ${XBOXRECOMP_SRC_DIR}/nv2a_dk)
+    target_compile_definitions(xbox_kernel PRIVATE XBOXRECOMP_DEKO3D=1)
+else()
+    target_include_directories(xbox_kernel PUBLIC ${XBOXRECOMP_SRC_DIR}/nv2a_gl)
+endif()
 
 if(WIN32)
     # platform is an INTERFACE target on Windows: it contributes the src/
@@ -49,7 +66,10 @@ if(WIN32)
 elseif(APPLE OR ANDROID OR SWITCH)
     # The crypto is the portable code in kernel_crypto.c; OpenSSL is not
     # needed (and on an iPhone or an Android phone not there).
-    target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
+    target_link_libraries(xbox_kernel PUBLIC platform)
+    if(NOT (SWITCH AND XBOXRECOMP_DEKO3D))
+        target_link_libraries(xbox_kernel PUBLIC xbox_nv2a_gl)
+    endif()
 else()
     # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
     find_package(OpenSSL REQUIRED)

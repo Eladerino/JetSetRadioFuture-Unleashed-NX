@@ -18,8 +18,11 @@ target_include_directories(xbox_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # reaches the modules that link xbox_menu; this one does not, so take
 # it here under the same condition that builds the menu. NV2A_GL_MENU
 # is an option, so it reads the same in this directory.
-if(NV2A_GL_MENU)
+if(NV2A_GL_MENU OR NV2A_DK_MENU)
     target_compile_definitions(xbox_input PRIVATE XBOXRECOMP_MENU=1)
+endif()
+if(NV2A_DK_MENU)
+    target_compile_definitions(xbox_input PRIVATE XBOXRECOMP_DK_MENU=1)
 endif()
 
 if(WIN32 AND NOT XBOXRECOMP_WIN_GL)

@@ -85,6 +85,8 @@ LONG InterlockedIncrement(volatile LONG *Addend);
 LONG InterlockedDecrement(volatile LONG *Addend);
 LONG InterlockedExchange(volatile LONG *Target, LONG Value);
 LONG InterlockedExchangeAdd(volatile LONG *Addend, LONG Value);
+LONG InterlockedAnd(volatile LONG *Dest, LONG Value);
+LONG InterlockedOr(volatile LONG *Dest, LONG Value);
 LONG InterlockedCompareExchange(volatile LONG *Dest, LONG Exchange, LONG Comparand);
 PVOID InterlockedCompareExchangePointer(PVOID volatile *Dest, PVOID Exchange, PVOID Comparand);
 

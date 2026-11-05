@@ -58,6 +58,19 @@ extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
 extern RECOMP_TLS uint32_t g_seh_ebp;
+/* FP/SIMD lifted state, saved/restored by kernel_raise_interrupt_here.
+ * Types from xbox_memory_layout.c: g_fp_top is int, g_fp_stack is
+ * double[8], g_fp_cmp is int, g_fp_cc is uint16_t, and g_xmm0..g_xmm7 /
+ * g_mm0..g_mm7 are separate RECOMP_TLS globals of the union types
+ * RecompXmm / RecompMmx declared in xbox_memory_layout.h. */
+extern RECOMP_TLS int g_fp_top;
+extern RECOMP_TLS double g_fp_stack[8];
+extern RECOMP_TLS int g_fp_cmp;
+extern RECOMP_TLS uint16_t g_fp_cc;
+extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
+extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
+extern RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* Dispatch table lookup (for function pointer args) */
@@ -2514,6 +2527,28 @@ void xbox_nv2a_software_method(uint32_t subch, uint32_t param)
     g_swm_q[h % SWM_QUEUE].subch = subch;
     g_swm_q[h % SWM_QUEUE].param = param;
     __atomic_store_n(&g_swm_head, h + 1, __ATOMIC_RELEASE);
+}
+
+/* Deko3D's pushbuffer executor must not pass a NOP trap until the title has
+ * handled it: that trap is the guest's WAIT_FOR_IDLE / make-space boundary.
+ * Keep the normal GL path asynchronous, and let the native executor wait for
+ * the queue ticket it just submitted. The pushbuffer executor is the sole
+ * producer, so an unchanged head means this method was filtered or dropped. */
+int xbox_nv2a_software_method_sync(uint32_t subch, uint32_t param)
+{
+    uint32_t before = __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE);
+    uint32_t target, tail;
+
+    xbox_nv2a_software_method(subch, param);
+    target = __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE);
+    if (target == before)
+        return 0;
+    do {
+        tail = __atomic_load_n(&g_swm_tail, __ATOMIC_ACQUIRE);
+        if ((int32_t)(tail - target) >= 0)
+            return 1;
+        Sleep(1);
+    } while (1);
 }
 
 void xbox_nv2a_software_method_done(void)
@@ -6715,13 +6750,34 @@ void recomp_guest_spin_yield(uint32_t site_va, uint32_t obj_va, uint32_t flags)
             uint32_t s_eax = g_eax, s_ecx = g_ecx, s_edx = g_edx;
             uint32_t s_ebx = g_ebx, s_esi = g_esi, s_edi = g_edi;
             uint32_t s_esp = g_esp, s_seh = g_seh_ebp;
+            /* The full register file rides along, as in
+             * kernel_raise_interrupt_here: the register passes hold
+             * FP/SIMD state in locals whose spill/reload reads the
+             * globals on the way out of this call. */
+            int s_fp_top = g_fp_top;
+            double s_fp_stack[8];
+            RecompXmm s_xmm0 = g_xmm0, s_xmm1 = g_xmm1, s_xmm2 = g_xmm2, s_xmm3 = g_xmm3;
+            RecompXmm s_xmm4 = g_xmm4, s_xmm5 = g_xmm5, s_xmm6 = g_xmm6, s_xmm7 = g_xmm7;
+            RecompMmx s_mm0 = g_mm0, s_mm1 = g_mm1, s_mm2 = g_mm2, s_mm3 = g_mm3;
+            RecompMmx s_mm4 = g_mm4, s_mm5 = g_mm5, s_mm6 = g_mm6, s_mm7 = g_mm7;
+            int s_fp_cmp = g_fp_cmp;
+            uint16_t s_fp_cc = g_fp_cc;
             int r;
+            memcpy(s_fp_stack, g_fp_stack, sizeof s_fp_stack);
             in_isr = 1;
             r = kernel_raise_interrupt_locked(APU_VECTOR);
             in_isr = 0;
             g_eax = s_eax; g_ecx = s_ecx; g_edx = s_edx;
             g_ebx = s_ebx; g_esi = s_esi; g_edi = s_edi;
             g_esp = s_esp; g_seh_ebp = s_seh;
+            g_fp_top = s_fp_top;
+            memcpy(g_fp_stack, s_fp_stack, sizeof g_fp_stack);
+            g_xmm0 = s_xmm0; g_xmm1 = s_xmm1; g_xmm2 = s_xmm2; g_xmm3 = s_xmm3;
+            g_xmm4 = s_xmm4; g_xmm5 = s_xmm5; g_xmm6 = s_xmm6; g_xmm7 = s_xmm7;
+            g_mm0 = s_mm0; g_mm1 = s_mm1; g_mm2 = s_mm2; g_mm3 = s_mm3;
+            g_mm4 = s_mm4; g_mm5 = s_mm5; g_mm6 = s_mm6; g_mm7 = s_mm7;
+            g_fp_cmp = s_fp_cmp;
+            g_fp_cc = s_fp_cc;
             g_spin_isrs++;
             fprintf(stderr, "  [SPIN] ran the APU handler unprompted after %lu"
                             " polls; it returned %d\n", polls, r);
@@ -6734,12 +6790,30 @@ void recomp_guest_spin_yield(uint32_t site_va, uint32_t obj_va, uint32_t flags)
             uint32_t s_eax = g_eax, s_ecx = g_ecx, s_edx = g_edx;
             uint32_t s_ebx = g_ebx, s_esi = g_esi, s_edi = g_edi;
             uint32_t s_esp = g_esp, s_seh = g_seh_ebp;
+            /* The full register file, as in kernel_raise_interrupt_here. */
+            int s_fp_top = g_fp_top;
+            double s_fp_stack[8];
+            RecompXmm s_xmm0 = g_xmm0, s_xmm1 = g_xmm1, s_xmm2 = g_xmm2, s_xmm3 = g_xmm3;
+            RecompXmm s_xmm4 = g_xmm4, s_xmm5 = g_xmm5, s_xmm6 = g_xmm6, s_xmm7 = g_xmm7;
+            RecompMmx s_mm0 = g_mm0, s_mm1 = g_mm1, s_mm2 = g_mm2, s_mm3 = g_mm3;
+            RecompMmx s_mm4 = g_mm4, s_mm5 = g_mm5, s_mm6 = g_mm6, s_mm7 = g_mm7;
+            int s_fp_cmp = g_fp_cmp;
+            uint16_t s_fp_cc = g_fp_cc;
+            memcpy(s_fp_stack, g_fp_stack, sizeof s_fp_stack);
             in_isr = 1;
             kernel_raise_interrupt_locked(APU_VECTOR);
             in_isr = 0;
             g_eax = s_eax; g_ecx = s_ecx; g_edx = s_edx;
             g_ebx = s_ebx; g_esi = s_esi; g_edi = s_edi;
             g_esp = s_esp; g_seh_ebp = s_seh;
+            g_fp_top = s_fp_top;
+            memcpy(g_fp_stack, s_fp_stack, sizeof g_fp_stack);
+            g_xmm0 = s_xmm0; g_xmm1 = s_xmm1; g_xmm2 = s_xmm2; g_xmm3 = s_xmm3;
+            g_xmm4 = s_xmm4; g_xmm5 = s_xmm5; g_xmm6 = s_xmm6; g_xmm7 = s_xmm7;
+            g_mm0 = s_mm0; g_mm1 = s_mm1; g_mm2 = s_mm2; g_mm3 = s_mm3;
+            g_mm4 = s_mm4; g_mm5 = s_mm5; g_mm6 = s_mm6; g_mm7 = s_mm7;
+            g_fp_cmp = s_fp_cmp;
+            g_fp_cc = s_fp_cc;
             g_spin_isrs++;
         }
     }
@@ -6897,16 +6971,42 @@ void xbox_guest_lock_yield_now(void)
 }
 /* Run a device's interrupt handler on this thread, between two instructions
  * of whatever it is running, with the lifted registers saved around it.
- * recomp_guest_spin_yield above says why this thread and why the registers. */
+ * recomp_guest_spin_yield above says why this thread and why the registers.
+ *
+ * FP/SIMD state now rides along too (g_fp_top, g_fp_stack[8], g_xmm0..g_xmm7,
+ * g_mm0..g_mm7, g_fp_cmp, g_fp_cc), not just the integer registers: the
+ * register passes (skeammer's jsrf_reg_locals / jsrf_fp_locals /
+ * jsrf_simd_locals) hold x87/SIMD state in C locals across
+ * RECOMP_BACK_EDGE points, and an interrupt delivered on this thread must
+ * not see or disturb stale globals. Save/restore only -- what
+ * kernel_raise_interrupt_locked does is unchanged. */
 static int kernel_raise_interrupt_here(uint32_t vector)
 {
     uint32_t s_eax = g_eax, s_ecx = g_ecx, s_edx = g_edx;
     uint32_t s_ebx = g_ebx, s_esi = g_esi, s_edi = g_edi;
     uint32_t s_esp = g_esp, s_seh = g_seh_ebp;
-    int r = kernel_raise_interrupt_locked(vector);
+    int s_fp_top = g_fp_top;
+    double s_fp_stack[8];
+    RecompXmm s_xmm0 = g_xmm0, s_xmm1 = g_xmm1, s_xmm2 = g_xmm2, s_xmm3 = g_xmm3;
+    RecompXmm s_xmm4 = g_xmm4, s_xmm5 = g_xmm5, s_xmm6 = g_xmm6, s_xmm7 = g_xmm7;
+    RecompMmx s_mm0 = g_mm0, s_mm1 = g_mm1, s_mm2 = g_mm2, s_mm3 = g_mm3;
+    RecompMmx s_mm4 = g_mm4, s_mm5 = g_mm5, s_mm6 = g_mm6, s_mm7 = g_mm7;
+    int s_fp_cmp = g_fp_cmp;
+    uint16_t s_fp_cc = g_fp_cc;
+    int r;
+    memcpy(s_fp_stack, g_fp_stack, sizeof s_fp_stack);
+    r = kernel_raise_interrupt_locked(vector);
     g_eax = s_eax; g_ecx = s_ecx; g_edx = s_edx;
     g_ebx = s_ebx; g_esi = s_esi; g_edi = s_edi;
     g_esp = s_esp; g_seh_ebp = s_seh;
+    g_fp_top = s_fp_top;
+    memcpy(g_fp_stack, s_fp_stack, sizeof g_fp_stack);
+    g_xmm0 = s_xmm0; g_xmm1 = s_xmm1; g_xmm2 = s_xmm2; g_xmm3 = s_xmm3;
+    g_xmm4 = s_xmm4; g_xmm5 = s_xmm5; g_xmm6 = s_xmm6; g_xmm7 = s_xmm7;
+    g_mm0 = s_mm0; g_mm1 = s_mm1; g_mm2 = s_mm2; g_mm3 = s_mm3;
+    g_mm4 = s_mm4; g_mm5 = s_mm5; g_mm6 = s_mm6; g_mm7 = s_mm7;
+    g_fp_cmp = s_fp_cmp;
+    g_fp_cc = s_fp_cc;
     g_spin_isrs++;
     return r;
 }

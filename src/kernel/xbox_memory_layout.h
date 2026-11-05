@@ -174,6 +174,9 @@ int xbox_Nv2aMirrorCounter(uint32_t device_ptr_va,
                            uint32_t src_off, uint32_t dst_off);
 
 int xbox_Nv2aFrameCounter(uint32_t device_ptr_va, uint32_t counter_off);
+/* Called by a renderer after it has completed a flip. The current runtime
+ * advances these counters on its acknowledgement thread. */
+void xbox_Nv2aFrameCounterFlip(void);
 
 /* Tell the runtime where the display framebuffer is (from AvSetDisplayMode). */
 void xbox_SetDisplayFramebuffer(uint32_t fb_va, uint32_t pitch);
@@ -333,12 +336,31 @@ typedef union RecompMmx {
 
 #ifndef RECOMP_XMM_DEFINED
 #define RECOMP_XMM_DEFINED
+/* With GCC or Clang the union also holds the four lanes as one vector
+ * (RECOMP_XMM_VECTOR, skeammer), so an SSE value in a local stays in one
+ * SIMD register instead of being put together lane-wise with bit
+ * inserts: mulps is one vector multiply. Both definitions of this
+ * union -- this one and recomp_types.h's -- agree on its size (16) and
+ * alignment (16), and must stay identical. -DRECOMP_XMM_NO_VECTOR
+ * gives the plain union. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(RECOMP_XMM_NO_VECTOR)
+#define RECOMP_XMM_VECTOR 1
+typedef float    recomp_v4sf __attribute__((vector_size(16)));
+typedef uint32_t recomp_v4su __attribute__((vector_size(16)));
+typedef int32_t  recomp_v4si __attribute__((vector_size(16)));
+#else
+#define RECOMP_XMM_VECTOR 0
+#endif
 typedef union RecompXmm {
     float    f[4];
     double   d[2];
     uint32_t u[4];
     int32_t  i[4];
     uint64_t q[2];
+#if RECOMP_XMM_VECTOR
+    recomp_v4sf vf;
+    recomp_v4su vu;
+#endif
 } RecompXmm;
 #endif
 
@@ -370,6 +392,14 @@ typedef union RecompXmm {
 #define XBOX_TIB_MAIN       0x00001000
 extern RECOMP_TLS uint32_t g_fs_base;
 #define XBOX_FS_BASE        g_fs_base
+
+/* Layout check for the fixed-offset TLS register block in
+ * xbox_memory_layout.c (skeammer): returns the number of register
+ * offsets relative to &g_eax that do not match the layout the
+ * generated code's leaf helpers assume (0 = layout as assumed).
+ * In non-block builds there is no fixed layout to check and it
+ * always returns 0. */
+int recomp_fast_tls_selfcheck(void);
 
 #define XBOX_STACK_BASE     0x00780000
 

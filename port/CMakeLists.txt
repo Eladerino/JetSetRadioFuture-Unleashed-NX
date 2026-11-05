@@ -26,10 +26,9 @@ endif()
 
 project(jsrf_recomp C)
 
-# The in-game menu (src/menu) is the tree's only C++: Dear ImGui and the
-# menu around it, built when the runtime's NV2A_GL_MENU is on (the Switch
-# build among them). Enabled here, before the runtime is added, so its
-# library can be built under this project.
+# The OpenGL in-game menu (src/menu) is the tree's only C++: Dear ImGui and
+# its SDL/OpenGL back ends. The Deko3D Switch menu is native C in nv2a_dk.
+# Keep C++ enabled here for builds which include the ImGui menu.
 enable_language(CXX)
 
 # Nintendo Switch (devkitPro toolchain), as in the runtime's CMakeLists.
@@ -279,6 +278,9 @@ if(SWITCH)
     # "platform/switch_backtrace.h".
     target_sources(jsrf_recomp PRIVATE switch/jsrf_switch.c
                                        switch/switch_posix.c)
+    if(XBOXRECOMP_DEKO3D)
+        target_compile_definitions(jsrf_recomp PRIVATE JSRF_DEKO3D=1)
+    endif()
     target_include_directories(jsrf_recomp PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/ios"
         "${JSRF_REPO}/src")

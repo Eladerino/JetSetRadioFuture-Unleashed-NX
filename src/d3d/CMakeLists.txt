@@ -18,8 +18,8 @@ if(WIN32 AND NOT XBOXRECOMP_WIN_GL)
                      ${CMAKE_CURRENT_BINARY_DIR}/d3d8_smoke)
 elseif(APPLE OR XBOXRECOMP_WIN_GL OR ANDROID OR SWITCH)
     # Nothing to build: a title that brings its own D3D (JSRF's is linked into
-    # its executable) reaches the GPU through the pushbuffer and nv2a_gl, and
-    # the OpenGL D3D8 below wants SDL2 and libepoxy, which a Mac only has
+    # its executable) reaches the GPU through the pushbuffer and the selected
+    # nv2a_gl or nv2a_dk renderer. The OpenGL D3D8 below wants SDL2 and libepoxy, which a Mac only has
     # through a package manager -- the Intel Homebrew's x86_64 copies, which
     # an arm64 build cannot link -- and an iPhone not at all. The headers
     # stay available.

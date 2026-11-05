@@ -36,6 +36,12 @@
 #include <sys/stat.h>
 #include <sys/iosupport.h>
 #include <switch.h>
+#if defined(JSRF_DEKO3D)
+#include "nv2a_dk.h"
+#define JSRF_SCALE_ENV "RECOMP_DK_SCALE"
+#else
+#define JSRF_SCALE_ENV "RECOMP_GL_SCALE"
+#endif
 #include "xiso.h"
 #include "../xbe_check.h"
 
@@ -454,7 +460,11 @@ static int cfg_get_int(const char *file, const char *key, int def)
  * have, and the no-trap build is the one the Switch platform layer is
  * written for. */
 static const char *const k_env[][2] = {
+#if defined(JSRF_DEKO3D)
+    { "RECOMP_USB", "1" }, { "RECOMP_GL", "0" }, { "RECOMP_PB_EXEC", "1" },
+#else
     { "RECOMP_USB", "1" }, { "RECOMP_GL", "1" }, { "RECOMP_PB_EXEC", "1" },
+#endif
     { "RECOMP_VBLANK", "1" }, { "RECOMP_AC97_READY_NOTRAP", "1" },
     { "RECOMP_TRACE_BUDGET", "0" }, { "RECOMP_GL_READBACK", "0" },
     { "RECOMP_FPS", "60" },
@@ -489,7 +499,7 @@ static const char *const k_env[][2] = {
  * (presence) is left unset by 0, not set to "0". */
 static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "widescreen",   "RECOMP_WIDESCREEN",   0 },
-    { "scale",        "RECOMP_GL_SCALE",     0 },
+    { "scale",        JSRF_SCALE_ENV,          0 },
     { "aniso",        "RECOMP_GL_ANISO",     0 },
     { "fps",          "RECOMP_FPS",          0 },
     { "mute",         "RECOMP_MUTE",         0 },
@@ -500,7 +510,13 @@ static const struct { const char *name, *var; int presence; } k_opts[] = {
     { "log",          "JSRF_LOG",            0 },
     { "fast_gpu",     "RECOMP_NV2A_FLUSH_ACK", 0 },
     { "nintendo_layout", "RECOMP_NINTENDO_LAYOUT", 0 },
+#if defined(JSRF_DEKO3D)
+    { "show_fps",     "RECOMP_DK_FPS",       0 },
+    { "show_fps_ms",  "RECOMP_DK_FPS_MS",    0 },
+    { "show_fps_drw", "RECOMP_DK_FPS_DRW",   0 },
+#else
     { "show_fps",     "RECOMP_SHOW_FPS",     0 },
+#endif
 };
 
 /* What the options files said, for the log (which is not open yet here). */
@@ -610,6 +626,9 @@ static int unpack_progress(void *ctx, uint64_t done, uint64_t total)
     static uint64_t last_mb;
     uint64_t mb = done >> 20;
     (void)ctx;
+#if defined(JSRF_DEKO3D)
+    nv2a_dk_set_progress(total ? (int)((done * 1000u) / total) : -1);
+#endif
     if (mb - last_mb >= 256 || done == total) {
         last_mb = mb;
         fprintf(stderr, "[SWITCH] unpacking: %llu of %llu MB\n",
@@ -1143,7 +1162,7 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     open_log(base);
     { int s = cfg_get_int(cfg, "scale", 1);
       snprintf(scale, sizeof scale, "%d", s >= 1 && s <= 4 ? s : 1);
-      setenv("RECOMP_GL_SCALE", scale, 0); }
+      setenv(JSRF_SCALE_ENV, scale, 0); }
     setenv("JSRF_GAME_DIR", game, 1);
     setenv("JSRF_SAVE_DIR", save, 1);
     setenv("JSRF_SETTINGS_FILE", cfg, 1);
@@ -1160,7 +1179,20 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     fprintf(stderr, "[SWITCH] thread pointer: soft (libnx call)\n");
 #endif
 
+#if defined(JSRF_DEKO3D)
+    nv2a_dk_loader_start();
+#endif
     prepare_game_folder(game);
+#if defined(JSRF_DEKO3D)
+    char xbe[1100];
+    struct stat st;
+    snprintf(xbe, sizeof xbe, "%s/default.xbe", game);
+    nv2a_dk_install();
+    if (stat(xbe, &st) == 0)
+        nv2a_dk_build_shaders(xbe);
+    else
+        nv2a_dk_set_progress(-1);
+#endif
     if (chdir(game) != 0)
         fprintf(stderr, "[SWITCH] cannot enter %s: %s\n", game,
                 strerror(errno));

@@ -21,6 +21,7 @@
 #   JOBS       parallel compile jobs (default: 4; the generated code
 #              is over a million lines, and each translation unit is
 #              large -- 4 is a safe number for 32 GB)
+#   DEKO3D=OFF  use the previous GLES renderer instead (default: ON)
 #   SKIP_TOOLCHAIN=1   do not touch devkitPro (already installed)
 #   SKIP_RECOMP=1      reuse port/recomp/gen from an earlier run (after a
 #                      source change outside the generated code; regenerating
@@ -57,6 +58,7 @@ FORK_DIR="${FORK_DIR:-}"
 FORK_URL="${FORK_URL:-}"
 WORK_DIR="${WORK_DIR:-$HOME/jsrf-switch-build}"
 JOBS="${JOBS:-4}"
+DEKO3D="${DEKO3D:-ON}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '\n== %s\n' "$*"; }
@@ -190,6 +192,7 @@ say "building the Switch engine (-j$JOBS)"
 cmake -S port -B "$WORK_DIR/build-switch" \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DXBOXRECOMP_DEKO3D="$DEKO3D" \
     -DJSRF_GEN_OPT="${JSRF_GEN_OPT:-}" \
     ${JSRF_ICON:+-DJSRF_ICON="$JSRF_ICON"}
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"

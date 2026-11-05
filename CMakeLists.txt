@@ -8,6 +8,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     set(SWITCH TRUE)
 endif()
 
+# On Switch the NV2A is rendered by deko3d, the native GPU API. Other
+# platforms keep the OpenGL / Metal renderer. Turn this off to build the
+# existing SDL + OpenGL ES Switch path instead.
+if(SWITCH)
+    set(_xboxrecomp_deko3d_default ON)
+else()
+    set(_xboxrecomp_deko3d_default OFF)
+endif()
+option(XBOXRECOMP_DEKO3D "Switch: render the NV2A with deko3d" ${_xboxrecomp_deko3d_default})
+if(XBOXRECOMP_DEKO3D AND NOT SWITCH)
+    message(FATAL_ERROR "XBOXRECOMP_DEKO3D is only available for the Nintendo Switch")
+endif()
+
 # Xbox Static Recompilation Runtime Library
 # Provides link-time libraries for statically recompiled Xbox games.
 # Pattern: extract emulator subsystems (xemu) into reusable static libraries.
@@ -46,6 +59,27 @@ endif()
 # the kernel HLE and the graphics/audio/input layers build on.
 add_subdirectory(src/platform)
 
+# The Deko3D executor replaces the Switch's GL pushbuffer renderer. It is
+# selected before the kernel so the kernel can compile the matching executor.
+if(SWITCH AND XBOXRECOMP_DEKO3D)
+    enable_language(CXX)
+    add_subdirectory(src/third_party/uam)
+    add_subdirectory(src/nv2a_dk)
+endif()
+
+if(SWITCH AND XBOXRECOMP_DEKO3D)
+    set(_nv2a_dk_menu_default ON)
+else()
+    set(_nv2a_dk_menu_default OFF)
+endif()
+option(NV2A_DK_MENU "Deko3D: controller menu for display, cheats and music" ${_nv2a_dk_menu_default})
+if(NV2A_DK_MENU AND NOT (SWITCH AND XBOXRECOMP_DEKO3D))
+    message(FATAL_ERROR "NV2A_DK_MENU needs the Nintendo Switch Deko3D renderer")
+endif()
+if(NV2A_DK_MENU)
+    target_compile_definitions(xbox_nv2a_dk PUBLIC XBOXRECOMP_DK_MENU=1 XBOXRECOMP_MENU=1)
+endif()
+
 # Core: Xbox kernel replacement (memory layout, file I/O, threading, sync)
 add_subdirectory(src/kernel)
 
@@ -62,14 +96,14 @@ add_subdirectory(src/apu)
 add_subdirectory(src/nv2a)
 
 # NV2A -> OpenGL translation (POSIX, and Windows with XBOXRECOMP_WIN_GL)
-if(NOT WIN32 OR XBOXRECOMP_WIN_GL)
+if((NOT WIN32 OR XBOXRECOMP_WIN_GL) AND NOT (SWITCH AND XBOXRECOMP_DEKO3D))
     add_subdirectory(src/nv2a_gl)
 endif()
 
 # The in-game menu (src/menu): nv2a_gl links it when NV2A_GL_MENU is on
 # (src/nv2a_gl/CMakeLists.txt, which has just run); the library is added
 # here, after that directory. It is the tree's only C++.
-if(NV2A_GL_MENU)
+if(NV2A_GL_MENU AND NOT (SWITCH AND XBOXRECOMP_DEKO3D))
     enable_language(CXX)
     add_subdirectory(src/menu)
 endif()
@@ -96,7 +130,11 @@ target_link_libraries(xboxrecomp INTERFACE
     xbox_usb
     xbox_apu
     xbox_nv2a
-    $<$<OR:$<NOT:$<BOOL:${WIN32}>>,$<BOOL:${XBOXRECOMP_WIN_GL}>>:xbox_nv2a_gl>
     xbox_video
 )
+if(SWITCH AND XBOXRECOMP_DEKO3D)
+    target_link_libraries(xboxrecomp INTERFACE xbox_nv2a_dk)
+elseif(NOT WIN32 OR XBOXRECOMP_WIN_GL)
+    target_link_libraries(xboxrecomp INTERFACE xbox_nv2a_gl)
+endif()
 
