@@ -4,6 +4,14 @@
 // tab and selection, cyan and magenta accents, amber values, flat
 // solid colours throughout).
 //
+// Over that base, the game-assets skin (nv2a_dk_menu_skin.cpp)
+// draws JSRF's own art where it serves -- the badge, the game's
+// UI font for heads and labels, the panel wash, the spray-can
+// cursor, the button tiles -- all of it loaded at runtime from
+// the player's own game files. Every skin call site is gated on
+// dk_menu_skin_ok(); when the art cannot load, what renders is
+// exactly the pre-skin menu described above.
+//
 // This replaces the hand-drawn menu (rectangles, baked font atlas,
 // premultiplied 2D blits) wholesale: that path's image machinery is
 // what froze the game on menu open (RUN53-CRASH-AUDIT and
@@ -28,6 +36,7 @@
 #include "imgui_internal.h"  // SetFocusID: the nav focus restore (see note_focus)
 #include "nv2a_dk_imgui_dk.h"
 #include "nv2a_dk_menu.h"
+#include "nv2a_dk_menu_skin.h"
 #include "nv2a_dk_menu_state.h"
 
 #if defined(XBOXRECOMP_DK_MENU)
@@ -36,6 +45,9 @@ namespace {
 
 /* The mock-2 palette (the core's COL_* values, as ImGui colours). */
 constexpr ImVec4 kPanelBase{0.051f, 0.078f, 0.094f, 0.96f};  // #0D1418, dense over the game
+constexpr ImVec4 kPanelTeal{0.000f, 0.302f, 0.329f, 0.96f};  // #004D54 at kPanelBase's alpha:
+// the game's own 2D menus sit on this dark teal field (sampled from the VS
+// screens in Garage01 -- see the game-assets survey); skin mode only, below.
 constexpr ImVec4 kPanelEdge{0.360f, 0.400f, 0.450f, 1.0f};
 constexpr ImVec4 kRowsFace{0.039f, 0.067f, 0.086f, 0.78f};   // #0A1116, a layer over the panel
 constexpr ImVec4 kRowsEdge{0.192f, 0.259f, 0.302f, 1.0f};   // #31424D
@@ -51,6 +63,14 @@ constexpr ImVec4 kHelpBody{0.765f, 0.808f, 0.831f, 1.0f};   // #C3CED4
 constexpr ImVec4 kHelpName{1.000f, 0.620f, 0.369f, 1.0f};   // #FF9E5E
 constexpr ImVec4 kMuted{0.576f, 0.639f, 0.678f, 1.0f};      // #93A3AD
 constexpr ImVec4 kFoot{0.541f, 0.592f, 0.639f, 1.0f};       // #8A97A3
+/* Skin-mode lifts of the two quiet greys (build H). On the shipped
+ * field the originals are fine, but on the retint's teal
+ * (kPanelTeal) kFoot measures ~3.2:1 and kMuted ~3.7:1 -- the
+ * footer words and the header subtitle go muddy. The lifts land
+ * at ~4.6:1 and ~4.8:1 on the teal. Skin-only use sites: the
+ * fallback keeps the shipped values untouched. */
+constexpr ImVec4 kFootBright{0.660f, 0.710f, 0.750f, 1.0f};   // #A8B5BF, on teal
+constexpr ImVec4 kMutedBright{0.680f, 0.730f, 0.770f, 1.0f};  // #ADBABC, on teal
 constexpr ImVec4 kTabText{0.565f, 0.624f, 0.667f, 1.0f};    // #909FAA
 constexpr ImVec4 kTabFace{0.078f, 0.122f, 0.153f, 1.0f};    // #141F27
 constexpr ImVec4 kInk{0.078f, 0.063f, 0.047f, 1.0f};        // #14100C
@@ -201,6 +221,16 @@ bool init()
         g_broken = true;
         return false;
     }
+    /* The game-assets skin (the game's own art, loaded from the
+     * player's copy): optional by construction -- if it cannot
+     * load, the menu below renders exactly as it always has. */
+    dk_menu_skin_init();
+    /* Skin live: the window field takes the game's dark teal
+     * (kPanelTeal) in place of the shipped blue-black. Skin off:
+     * the style is never touched, so the menu renders exactly
+     * as shipped. The pane faces stay layered over it as before. */
+    if (dk_menu_skin_ok())
+        ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = kPanelTeal;
     return true;
 }
 
@@ -291,26 +321,64 @@ void build_menu(int fb_w, int fb_h)
     /* ── Header: the title and SETTINGS ── */
     {
         float y0 = ImGui::GetCursorPosY();
-        float settings_x = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x
-                         - ImGui::CalcTextSize("SETTINGS").x;
-        ImGui::SetCursorPos(ImVec2(settings_x, y0 + 8.0f * u));
-        ImGui::TextColored(kMuted, "SETTINGS");
-        ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, y0));
-        ImGui::PushFont(nullptr, 34.0f * u);
-        ImGui::TextColored(kTitle, "JSRF ");
-        ImGui::SameLine(0.0f, 0.0f);
-        ImGui::TextColored(kOrange, "UNLEASHED NX");
-        float th = ImGui::GetTextLineHeight();
-        ImGui::PopFont();
-        ImGui::SetCursorPosY(y0 + th + 6.0f * u);
+        if (dk_menu_skin_ok()) {
+            /* The title in the game's own font, with room at the
+             * left for the badge sticker (drawn over the corner
+             * once the tabs are in, below). SETTINGS is right-
+             * aligned by its game-font width, as the text it
+             * replaces was by its own. Layout height is unchanged:
+             * the same 34-unit line the text title took. */
+            ImVec2 hp = ImGui::GetCursorScreenPos();
+            float settings_x = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x
+                             - dk_menu_game_text_width("SETTINGS", 13.0f * u);
+            dk_menu_draw_game_text(wdl, ImVec2(ImGui::GetWindowPos().x + settings_x, hp.y + 9.0f * u),
+                                   "SETTINGS", 13.0f * u, u32(kMutedBright));
+            ImGui::PushFont(nullptr, 34.0f * u);
+            float th = ImGui::GetTextLineHeight();
+            ImGui::PopFont();
+            float ty = hp.y + (th - 27.0f * u) * 0.5f;
+            float w1 = dk_menu_draw_game_text(wdl, ImVec2(hp.x + 104.0f * u, ty),
+                                              "JSRF ", 27.0f * u, u32(kTitle));
+            dk_menu_draw_game_text(wdl, ImVec2(hp.x + 104.0f * u + w1 + 2.0f * u, ty),
+                                   "UNLEASHED NX", 27.0f * u, u32(kOrange));
+            ImGui::SetCursorPosY(y0 + th + 6.0f * u);
+        } else {
+            float settings_x = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x
+                             - ImGui::CalcTextSize("SETTINGS").x;
+            ImGui::SetCursorPos(ImVec2(settings_x, y0 + 8.0f * u));
+            ImGui::TextColored(kMuted, "SETTINGS");
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, y0));
+            ImGui::PushFont(nullptr, 34.0f * u);
+            ImGui::TextColored(kTitle, "JSRF ");
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextColored(kOrange, "UNLEASHED NX");
+            float th = ImGui::GetTextLineHeight();
+            ImGui::PopFont();
+            ImGui::SetCursorPosY(y0 + th + 6.0f * u);
+        }
     }
     /* ── The spray stripe: three bands, stepped ends ── */
     {
         ImVec2 p = ImGui::GetCursorScreenPos();
-        float w = ImGui::GetContentRegionAvail().x, sh = 3.0f * u;
-        wdl->AddRectFilled(p, ImVec2(p.x + w, p.y + sh), u32(kCyan));
-        wdl->AddRectFilled(ImVec2(p.x, p.y + sh), ImVec2(p.x + w * 0.93f, p.y + 2.0f * sh), u32(kOrange));
-        wdl->AddRectFilled(ImVec2(p.x, p.y + 2.0f * sh), ImVec2(p.x + w * 0.86f, p.y + 3.0f * sh), u32(kMagenta));
+        /* Skin bands run a unit taller (build H): the mock's
+         * stripe is chunkier than the shipped 3u bands, which read
+         * thin under the title. The fallback keeps its 3u. */
+        float w = ImGui::GetContentRegionAvail().x,
+              sh = (dk_menu_skin_ok() ? 4.0f : 3.0f) * u;
+        if (dk_menu_skin_ok()) {
+            /* The game's TV-static texture, tinted per band, in
+             * the same stepped layout as the flat bands. */
+            ImVec2 uv0, uv1;
+            dk_menu_skin_sprite_uv(DK_SPR_STATIC, uv0, uv1);
+            ImTextureRef at = dk_menu_skin_atlas_ref();
+            wdl->AddImage(at, p, ImVec2(p.x + w, p.y + sh), uv0, uv1, u32(kCyan));
+            wdl->AddImage(at, ImVec2(p.x, p.y + sh), ImVec2(p.x + w * 0.93f, p.y + 2.0f * sh), uv0, uv1, u32(kOrange));
+            wdl->AddImage(at, ImVec2(p.x, p.y + 2.0f * sh), ImVec2(p.x + w * 0.86f, p.y + 3.0f * sh), uv0, uv1, u32(kMagenta));
+        } else {
+            wdl->AddRectFilled(p, ImVec2(p.x + w, p.y + sh), u32(kCyan));
+            wdl->AddRectFilled(ImVec2(p.x, p.y + sh), ImVec2(p.x + w * 0.93f, p.y + 2.0f * sh), u32(kOrange));
+            wdl->AddRectFilled(ImVec2(p.x, p.y + 2.0f * sh), ImVec2(p.x + w * 0.86f, p.y + 3.0f * sh), u32(kMagenta));
+        }
         ImGui::Dummy(ImVec2(w, 3.0f * sh + 4.0f * u));
     }
     /* ── The tabs: colour-block plates, display only -- the
@@ -326,21 +394,88 @@ void build_menu(int fb_w, int fb_h)
          * The active tab's orange plate + marker are unchanged. */
         float pad = 12.0f * u, tab_h = 32.0f * u;
         float widths[16];
-        for (int i = 0; i < npages && i < 16; i++)
-            widths[i] = ImGui::CalcTextSize(pages[i].name).x + 2.0f * pad + (i == page ? 14.0f * u : 0.0f);
+        bool gtext[16];
+        const bool skin = dk_menu_skin_ok();
+        for (int i = 0; i < npages && i < 16; i++) {
+            /* A page name the game font covers is drawn in it;
+             * any other keeps the plate's own text (none today --
+             * every page name is plain capitals). */
+            gtext[i] = skin && dk_menu_game_text_covered(pages[i].name);
+            widths[i] = (gtext[i] ? dk_menu_game_text_width(pages[i].name, 14.0f * u)
+                                  : ImGui::CalcTextSize(pages[i].name).x)
+                      + 2.0f * pad + (i == page ? 14.0f * u : 0.0f);
+        }
         const float gap = 10.0f * u;
         for (int i = 0; i < npages && i < 16; i++) {
             if (i) ImGui::SameLine(0.0f, gap);
             bool on = i == page;
-            plate(pages[i].name, ImVec2(widths[i], tab_h), on ? kOrange : kTabFace, on ? kInk : kTabText);
+            /* A game-font tab's plate carries an invisible ID
+             * ("##NAME": no display text, a unique ID), so the
+             * plates never share one widget ID. */
+            char tab_id[64];
+            snprintf(tab_id, sizeof tab_id, "##%s", pages[i].name);
+            plate(gtext[i] ? tab_id : pages[i].name, ImVec2(widths[i], tab_h),
+                  on ? kOrange : kTabFace, on ? kInk : kTabText);
+            ImVec2 rmin = ImGui::GetItemRectMin(), rmax = ImGui::GetItemRectMax();
+            if (skin) {
+                /* The message-panel's borderless interior as a
+                 * wash over the plate (the bordered panel itself
+                 * is 46px of art on a 30px plate; its border is
+                 * reserved for the big blocks below). */
+                ImVec2 uv0, uv1;
+                dk_menu_skin_sprite_uv(DK_SPR_PANEL_IN, uv0, uv1);
+                wdl->AddImage(dk_menu_skin_atlas_ref(),
+                              ImVec2(rmin.x + 1.0f, rmin.y + 1.0f), ImVec2(rmax.x - 1.0f, rmax.y - 1.0f),
+                              uv0, uv1,
+                              on ? u32(ImVec4(1.0f, 0.45f, 0.20f, 0.50f))
+                                 : u32(ImVec4(1.0f, 1.0f, 1.0f, 0.30f)));
+            }
             if (on) {
-                ImVec2 rmin = ImGui::GetItemRectMin(), rmax = ImGui::GetItemRectMax();
-                wdl->AddRectFilled(rmin, ImVec2(rmax.x, rmin.y + 2.0f * u), u32(kCyan));
-                ImVec2 c(rmin.x + 8.0f * u, (rmin.y + rmax.y) * 0.5f);
-                wdl->AddTriangleFilled(ImVec2(c.x, c.y - 5.0f * u), ImVec2(c.x, c.y + 5.0f * u),
-                                       ImVec2(c.x + 6.0f * u, c.y), u32(kInk));
+                if (!skin) {
+                    /* The shipped active-tab accents: the cyan top
+                     * strip and the triangle. With the skin live
+                     * both are gone (Brandon, Nov 5): the spray can
+                     * below is the sole selection indicator, with
+                     * no accent line beside it. */
+                    wdl->AddRectFilled(rmin, ImVec2(rmax.x, rmin.y + 2.0f * u), u32(kCyan));
+                    ImVec2 c(rmin.x + 8.0f * u, (rmin.y + rmax.y) * 0.5f);
+                    wdl->AddTriangleFilled(ImVec2(c.x, c.y - 5.0f * u), ImVec2(c.x, c.y + 5.0f * u),
+                                           ImVec2(c.x + 6.0f * u, c.y), u32(kInk));
+                } else {
+                    /* The can at the active plate's left edge,
+                     * straddling it -- the same placement as the
+                     * row cursor, so one glyph marks selection in
+                     * both strips. Drawn on the window list: no
+                     * child clip can cut it. */
+                    ImVec2 uv0, uv1;
+                    dk_menu_skin_sprite_uv(DK_SPR_CAN, uv0, uv1);
+                    ImVec2 csz = dk_menu_skin_sprite_px(DK_SPR_CAN);
+                    float ch = 40.0f * u, cw = ch * csz.x / csz.y;
+                    float cy = (rmin.y + rmax.y) * 0.5f;
+                    wdl->AddImage(dk_menu_skin_atlas_ref(),
+                                  ImVec2(rmin.x - cw * 0.5f, cy - ch * 0.5f),
+                                  ImVec2(rmin.x + cw * 0.5f, cy + ch * 0.5f), uv0, uv1);
+                }
+            }
+            if (gtext[i]) {
+                float tw = dk_menu_game_text_width(pages[i].name, 14.0f * u);
+                float cx = (rmin.x + rmax.x) * 0.5f + (on && !skin ? 7.0f * u : 0.0f);
+                dk_menu_draw_game_text(wdl, ImVec2(cx - tw * 0.5f, (rmin.y + rmax.y) * 0.5f - 7.0f * u),
+                                       pages[i].name, 14.0f * u, u32(on ? kInk : kTabText));
             }
         }
+    }
+    /* The badge sticker: drawn last in the header stack, so it
+     * sits over the panel corner and the spray band the way the
+     * approved mock has it. Its size is the mock's (96x78 at the
+     * 720p scale step). */
+    if (dk_menu_skin_ok()) {
+        ImVec2 uv0, uv1;
+        dk_menu_skin_sprite_uv(DK_SPR_BADGE, uv0, uv1);
+        ImVec2 wp = ImGui::GetWindowPos();
+        wdl->AddImage(dk_menu_skin_atlas_ref(),
+                      ImVec2(wp.x + 6.0f * u, wp.y + 3.0f * u),
+                      ImVec2(wp.x + 102.0f * u, wp.y + 81.0f * u), uv0, uv1);
     }
 
     /* ── The body: rows and help on their own sub-panels ── */
@@ -390,8 +525,25 @@ void build_menu(int fb_w, int fb_h)
              * the 3u chunk and off the pane edge), tip at 13u --
              * inside focus_dx, so text never meets it. */
             float cy = p.y + h * 0.5f, tx = p.x + 7.0f * u;
-            dl->AddTriangleFilled(ImVec2(tx, cy - 5.0f * u), ImVec2(tx, cy + 5.0f * u),
-                                  ImVec2(tx + 6.0f * u, cy), u32(kWhite));
+            if (!dk_menu_skin_ok())
+                dl->AddTriangleFilled(ImVec2(tx, cy - 5.0f * u), ImVec2(tx, cy + 5.0f * u),
+                                      ImVec2(tx + 6.0f * u, cy), u32(kWhite));
+            if (dk_menu_skin_ok()) {
+                /* The game's spray can rides the band's left edge
+                 * as the cursor, straddling the pane's border --
+                 * the clip is pushed out to the can's own rect so
+                 * the child window does not cut the overhang. */
+                ImVec2 uv0, uv1;
+                dk_menu_skin_sprite_uv(DK_SPR_CAN, uv0, uv1);
+                ImVec2 csz = dk_menu_skin_sprite_px(DK_SPR_CAN);
+                float ch = 44.0f * u, cw = ch * csz.x / csz.y;
+                ImVec2 c0(p.x - 6.0f * u - cw * 0.5f, p.y + h * 0.5f - ch * 0.5f);
+                ImVec2 c1(c0.x + cw, c0.y + ch);
+                dl->PushClipRect(ImVec2(c0.x - 2.0f * u, c0.y - 2.0f * u),
+                                 ImVec2(c1.x + 2.0f * u, c1.y + 2.0f * u), false);
+                dl->AddImage(dk_menu_skin_atlas_ref(), c0, c1, uv0, uv1);
+                dl->PopClipRect();
+            }
         };
         auto note_focus = [&](int i, bool en) {
             if (en && g_first_enabled < 0) g_first_enabled = i;
@@ -441,11 +593,30 @@ void build_menu(int fb_w, int fb_h)
             ImGui::PushID(i);
             if (r->kind == DK_R_SECTION) {
                 ImGui::Dummy(ImVec2(0.0f, 8.0f * u));
-                ImGui::PushFont(nullptr, 20.0f * u);  // a step up the type scale: heads over rows
-                ImGui::TextColored(kCyan, "//");
-                ImGui::SameLine(0.0f, 6.0f * u);
-                ImGui::TextColored(kMagenta, "%s", r->label);
-                ImGui::PopFont();
+                char head[160];
+                snprintf(head, sizeof head, "%s", r->label);
+                if (dk_menu_skin_ok() && dk_menu_game_text_covered(head)) {
+                    /* The head in the game's font, without the
+                     * shipped "//" prefix (build H): the slashes
+                     * are a code-comment tell, and a game's menu
+                     * does not comment on itself. The fallback
+                     * below prints its own "//" and is untouched.
+                     * Coverage is checked on the label alone, which
+                     * can only widen it. The advance is the text
+                     * path's line height, so the rules below land
+                     * where they always land. */
+                    ImGui::PushFont(nullptr, 20.0f * u);
+                    float lh = ImGui::GetTextLineHeight();
+                    ImGui::PopFont();
+                    dk_menu_draw_game_text(dl, ImGui::GetCursorScreenPos(), head, 15.0f * u, u32(kMagenta));
+                    ImGui::Dummy(ImVec2(0.0f, lh));
+                } else {
+                    ImGui::PushFont(nullptr, 20.0f * u);  // a step up the type scale: heads over rows
+                    ImGui::TextColored(kCyan, "//");
+                    ImGui::SameLine(0.0f, 6.0f * u);
+                    ImGui::TextColored(kMagenta, "%s", r->label);
+                    ImGui::PopFont();
+                }
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 float w = ImGui::GetContentRegionAvail().x;
                 dl->AddLine(p, ImVec2(p.x + w, p.y), u32(kRule), 2.0f * u);
@@ -487,6 +658,11 @@ void build_menu(int fb_w, int fb_h)
                 const char *word = v ? "ON" : "OFF";
                 float word_w = ImGui::CalcTextSize(word).x;
                 float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+                /* Skin rows pull the word + box off the pane's
+                 * edge to the same right margin the chips and
+                 * pills now keep (build H); the shipped pair sits
+                 * ~2u from the border. */
+                if (dk_menu_skin_ok()) right -= 4.0f * u;
                 ImGui::SameLine(0.0f, 0.0f);
                 ImGui::SetCursorPosX(right - word_w - fh - 8.0f * u);
                 ImGui::TextColored(v ? kCyan : kOffWord, "%s", word);
@@ -518,19 +694,31 @@ void build_menu(int fb_w, int fb_h)
                 int nc = dk_menu_row_nchoices(r);
                 int cur = r->get(r->arg);
                 const char *val = cur >= 0 && cur < nc ? r->choices[cur] : "";
+                float vw = ImGui::CalcTextSize(val).x;
+                float chw = vw + (dk_menu_skin_ok() ? 16.0f : 20.0f) * u, chh = fh - 2.0f * u;
+                /* Skin rows give the chip a right margin (build
+                 * H): flush to the pane's edge, the widest value
+                 * in the menu (MUSIC's USE AREA MIX) rode into
+                 * the pane's border with no margin at all. The
+                 * label is clipped to end clear of the chip, so
+                 * a long label can never run under it. */
+                float rin = dk_menu_skin_ok() ? 6.0f * u : 0.0f;
+                ImVec2 c0(rp.x + rw - rin - chw, rp.y + 1.0f * u), c1(rp.x + rw - rin, rp.y + 1.0f * u + chh);
                 float tx = rp.x + (i == g_focus_row ? focus_dx : 0.0f);
+                if (dk_menu_skin_ok())
+                    dl->PushClipRect(ImVec2(rp.x, rp.y), ImVec2(c0.x - 8.0f * u, rp.y + fh), true);
                 dl->AddText(ImVec2(tx, rp.y + (fh - ImGui::GetTextLineHeight()) * 0.5f),
                             u32(en ? kText : kDisabled), r->label);
-                float vw = ImGui::CalcTextSize(val).x;
-                float chw = vw + 20.0f * u, chh = fh - 2.0f * u;
-                ImVec2 c0(rp.x + rw - chw, rp.y + 1.0f * u), c1(rp.x + rw, rp.y + 1.0f * u + chh);
+                if (dk_menu_skin_ok())
+                    dl->PopClipRect();
                 dl->AddRectFilled(c0, c1, u32(kChipFace), 3.0f * u);
                 dl->AddRect(c0, c1, u32(en ? kChipEdge : kDisEdge), 3.0f * u, 1.0f, 0);
                 dl->AddText(ImVec2(c0.x + 8.0f * u, c0.y + (chh - ImGui::GetTextLineHeight()) * 0.5f),
                             u32(en ? kAmber : kDisabled), val);
                 float tri_x = c0.x + 11.0f * u + vw, tri_cy = (c0.y + c1.y) * 0.5f;
-                dl->AddTriangleFilled(ImVec2(tri_x, tri_cy - 4.0f * u), ImVec2(tri_x, tri_cy + 4.0f * u),
-                                      ImVec2(tri_x + 5.0f * u, tri_cy), u32(en ? kOrange : kDisabled));
+                if (!dk_menu_skin_ok())
+                    dl->AddTriangleFilled(ImVec2(tri_x, tri_cy - 4.0f * u), ImVec2(tri_x, tri_cy + 4.0f * u),
+                                          ImVec2(tri_x + 5.0f * u, tri_cy), u32(en ? kOrange : kDisabled));
                 if (activated && en) {
                     g_choice_row = i;
                     g_choice_fresh = true;
@@ -579,18 +767,29 @@ void build_menu(int fb_w, int fb_h)
                 bool activated = ImGui::InvisibleButton("##row", ImVec2(rw, fh),
                                                         ImGuiButtonFlags_EnableNav);
                 note_focus(i, en);
+                float plw = ImGui::CalcTextSize("RUN").x + 18.0f * u;
+                /* The RUN pill takes the same skin right margin
+                 * and label clip as the choice chip (build H). */
+                float rin = dk_menu_skin_ok() ? 6.0f * u : 0.0f;
+                ImVec2 c0(rp.x + rw - rin - plw, rp.y + 1.0f * u), c1(rp.x + rw - rin, rp.y + fh - 1.0f * u);
                 float tx = rp.x + (i == g_focus_row ? focus_dx : 0.0f);
+                if (dk_menu_skin_ok())
+                    dl->PushClipRect(ImVec2(rp.x, rp.y), ImVec2(c0.x - 8.0f * u, rp.y + fh), true);
                 dl->AddText(ImVec2(tx, rp.y + (fh - ImGui::GetTextLineHeight()) * 0.5f),
                             u32(en ? kText : kDisabled), r->label);
-                float plw = ImGui::CalcTextSize("RUN").x + 18.0f * u;
-                ImVec2 c0(rp.x + rw - plw, rp.y + 1.0f * u), c1(rp.x + rw, rp.y + fh - 1.0f * u);
+                if (dk_menu_skin_ok())
+                    dl->PopClipRect();
                 dl->AddRectFilled(c0, c1, u32(en ? kActFace : kActDis), 3.0f * u);
                 dl->AddRect(c0, c1, u32(en ? kActEdge : kDisEdge), 3.0f * u, 1.0f, 0);
                 float tri_cy = (c0.y + c1.y) * 0.5f;
-                dl->AddTriangleFilled(ImVec2(c0.x + 5.0f * u, tri_cy - 4.0f * u),
-                                      ImVec2(c0.x + 5.0f * u, tri_cy + 4.0f * u),
-                                      ImVec2(c0.x + 10.0f * u, tri_cy), u32(en ? kOrange : kDisabled));
-                dl->AddText(ImVec2(c0.x + 13.0f * u, c0.y + ((c1.y - c0.y) - ImGui::GetTextLineHeight()) * 0.5f),
+                if (!dk_menu_skin_ok())
+                    dl->AddTriangleFilled(ImVec2(c0.x + 5.0f * u, tri_cy - 4.0f * u),
+                                          ImVec2(c0.x + 5.0f * u, tri_cy + 4.0f * u),
+                                          ImVec2(c0.x + 10.0f * u, tri_cy), u32(en ? kOrange : kDisabled));
+                float run_tx = dk_menu_skin_ok()
+                    ? c0.x + ((c1.x - c0.x) - ImGui::CalcTextSize("RUN").x) * 0.5f
+                    : c0.x + 13.0f * u;
+                dl->AddText(ImVec2(run_tx, c0.y + ((c1.y - c0.y) - ImGui::GetTextLineHeight()) * 0.5f),
                             u32(en ? kAmber : kDisabled), "RUN");
                 if (activated && en && r->run) r->run(r->arg);
                 break;
@@ -630,6 +829,11 @@ void build_menu(int fb_w, int fb_h)
                 ImGui::InvisibleButton("##row", ImVec2(rw, total_h),
                                        ImGuiButtonFlags_EnableNav);
                 note_focus(i, en);
+                if (dk_menu_skin_ok())
+                    /* The big blocks get the message panel as a
+                     * framed wash (the mock's STATUS treatment,
+                     * applied to the INFO blocks as a class). */
+                    dk_menu_draw_panel_wash(dl, rp, ImVec2(rp.x + rw, rp.y + total_h), 0.30f, 10.0f * u);
                 float tx = rp.x + (i == g_focus_row ? focus_dx : 0.0f);
                 dl->AddText(ImVec2(tx, rp.y + (fh - ImGui::GetTextLineHeight()) * 0.5f),
                             u32(en ? kText : kDisabled), r->label);
@@ -718,13 +922,32 @@ void build_menu(int fb_w, int fb_h)
     {
         int hi = focused_now >= 0 ? focused_now : g_focus_row;
         const DkRow *hr = hi >= 0 && hi < pg.nrows ? &rows[hi] : nullptr;
-        plate("HELP", ImVec2(ImGui::CalcTextSize("HELP").x + 16.0f * u, 26.0f * u), kCyan, kInk);
+        if (dk_menu_skin_ok()) {
+            plate("##HELP", ImVec2(dk_menu_game_text_width("HELP", 11.0f * u) + 16.0f * u, 26.0f * u), kCyan, kInk);
+            ImVec2 rmin = ImGui::GetItemRectMin(), rmax = ImGui::GetItemRectMax();
+            float tw = dk_menu_game_text_width("HELP", 11.0f * u);
+            dk_menu_draw_game_text(ImGui::GetWindowDrawList(),
+                                   ImVec2((rmin.x + rmax.x) * 0.5f - tw * 0.5f,
+                                          (rmin.y + rmax.y) * 0.5f - 5.5f * u),
+                                   "HELP", 11.0f * u, u32(kInk));
+        } else {
+            plate("HELP", ImVec2(ImGui::CalcTextSize("HELP").x + 16.0f * u, 26.0f * u), kCyan, kInk);
+        }
         if (hr) {
             ImGui::Dummy(ImVec2(0.0f, 4.0f * u));
             ImGui::PushTextWrapPos(0.0f);
-            ImGui::PushFont(nullptr, 17.0f * u);
-            ImGui::TextColored(kHelpName, "%s", hr->label);
-            ImGui::PopFont();
+            if (dk_menu_skin_ok() && dk_menu_game_text_covered(hr->label)) {
+                ImGui::PushFont(nullptr, 17.0f * u);
+                float lh = ImGui::GetTextLineHeight();
+                ImGui::PopFont();
+                dk_menu_draw_game_text(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(),
+                                       hr->label, 13.0f * u, u32(kHelpName));
+                ImGui::Dummy(ImVec2(0.0f, lh));
+            } else {
+                ImGui::PushFont(nullptr, 17.0f * u);
+                ImGui::TextColored(kHelpName, "%s", hr->label);
+                ImGui::PopFont();
+            }
             if (hr->tip) {
                 ImGui::Dummy(ImVec2(0.0f, 4.0f * u));
                 ImGui::TextColored(kHelpBody, "%s", hr->tip);
@@ -755,14 +978,73 @@ void build_menu(int fb_w, int fb_h)
             wdl->AddLine(fp, ImVec2(fp.x + fw, fp.y), u32(kRuleSoft), 1.0f);
             ImGui::Dummy(ImVec2(0.0f, 7.0f * u));
         }
-        chip("DPAD", "MOVE", kKeyFace, kKeyText);
-        chip("A", "SELECT", kCyan, kInk);
-        chip("B", "BACK", kMagenta, kInk);
-        chip("L R", "TABS", kKeyFace, kKeyText);
-        /* The button that opens and closes the menu itself (Minus:
-         * a tap, a half-second hold, or L+R+Minus -- xinput_device.c's
-         * menu_button_tick). Display only, like the other chips. */
-        chip("-", "CLOSE", kKeyFace, kKeyText);
+        if (dk_menu_skin_ok()) {
+            /* Build H: the skin footer is drawn, not laid out, so
+             * the whole strip shares one geometry -- every item
+             * (game tile or text chip) is the tiles' own 24u tall,
+             * every label sits at the item's exact centre, and the
+             * spacing is one rhythm throughout (6u item to word,
+             * 16u group to group, 2u inside the L R pair). The
+             * laid-out version mixed 26u Button chips with 24u
+             * images on a shared top edge, and the Button's label
+             * placement left DPAD riding left in its chip
+             * (Brandon's crop). The job words take the brightened
+             * footer grey (kFootBright) for the teal field. */
+            const float ih = 24.0f * u;
+            ImVec2 fp0 = ImGui::GetCursorScreenPos();
+            const float cy = fp0.y + ih * 0.5f;
+            const float lh = ImGui::GetTextLineHeight();
+            float x = fp0.x;
+            const ImU32 border = u32(ImGui::GetStyleColorVec4(ImGuiCol_Border));
+            const float round = ImGui::GetStyle().FrameRounding;
+            auto text_chip = [&](const char *key) {
+                float tw = ImGui::CalcTextSize(key).x;
+                float w = tw + 16.0f * u;
+                wdl->AddRectFilled(ImVec2(x, fp0.y), ImVec2(x + w, fp0.y + ih), u32(kKeyFace), round);
+                wdl->AddRect(ImVec2(x, fp0.y), ImVec2(x + w, fp0.y + ih), border, round, 1.0f, 0);
+                wdl->AddText(ImVec2(x + (w - tw) * 0.5f, cy - lh * 0.5f), u32(kKeyText), key);
+                x += w;
+            };
+            auto tile = [&](DkSkinSprite s) {
+                ImVec2 uv0, uv1;
+                dk_menu_skin_sprite_uv(s, uv0, uv1);
+                wdl->AddImage(dk_menu_skin_atlas_ref(), ImVec2(x, fp0.y), ImVec2(x + ih, fp0.y + ih), uv0, uv1);
+                x += ih;
+            };
+            auto job = [&](const char *label) {
+                wdl->AddText(ImVec2(x + 6.0f * u, cy - lh * 0.5f), u32(kFootBright), label);
+                x += 6.0f * u + ImGui::CalcTextSize(label).x + 16.0f * u;
+            };
+            /* The game's own button tiles where the sheet has
+             * them (A, B, L, R); the other keys keep their text
+             * chips -- the sheet carries no dpad or minus art. */
+            text_chip("DPAD");
+            job("MOVE");
+            tile(DK_SPR_TILE_A);
+            job("SELECT");
+            tile(DK_SPR_TILE_B);
+            job("BACK");
+            tile(DK_SPR_TILE_L);
+            x += 2.0f * u;
+            tile(DK_SPR_TILE_R);
+            job("TABS");
+            /* The button that opens and closes the menu itself
+             * (Minus: a tap, a half-second hold, or L+R+Minus --
+             * xinput_device.c's menu_button_tick). Display only,
+             * like the other chips. */
+            text_chip("-");
+            job("CLOSE");
+            ImGui::Dummy(ImVec2(0.0f, ih));
+        } else {
+            chip("DPAD", "MOVE", kKeyFace, kKeyText);
+            chip("A", "SELECT", kCyan, kInk);
+            chip("B", "BACK", kMagenta, kInk);
+            chip("L R", "TABS", kKeyFace, kKeyText);
+            /* The button that opens and closes the menu itself (Minus:
+             * a tap, a half-second hold, or L+R+Minus -- xinput_device.c's
+             * menu_button_tick). Display only, like the other chips. */
+            chip("-", "CLOSE", kKeyFace, kKeyText);
+        }
         ImGui::PopFont();
     }
     ImGui::PopFont();

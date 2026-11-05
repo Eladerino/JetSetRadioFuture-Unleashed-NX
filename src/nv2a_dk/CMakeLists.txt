@@ -29,6 +29,7 @@ add_library(xbox_nv2a_dk STATIC
     # deko3d backend, both adapted from that overlay (see imgui/
     # VERSION.txt and the headers of the two .cpp files).
     nv2a_dk_menu_imgui.cpp
+    nv2a_dk_menu_skin.cpp
     nv2a_dk_imgui_dk.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
