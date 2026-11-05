@@ -286,6 +286,39 @@ static void mkdir_p(const char *path)
     mkdir(buf, 0755);
 }
 
+/* The custom tracks folder gets a note on first run: what belongs
+ * there (the menu's CUSTOM TRACKS section reads the folder). Written
+ * once; a folder the user has taken over is left alone. */
+static void drop_custom_tracks_readme(const char *dir)
+{
+    char path[1100];
+    FILE *f;
+    snprintf(path, sizeof path, "%s/README.txt", dir);
+    f = fopen(path, "r");
+    if (f) { fclose(f); return; }
+    f = fopen(path, "w");
+    if (!f) return;
+    fputs(
+"Custom tracks for JSRF Unleashed\n"
+"\n"
+"Put .adx files in this folder. They show up in the menu, under\n"
+"Music, in the CUSTOM TRACKS section, the next time you open it.\n"
+"\n"
+"Only real CRI ADX files work. The game decodes ADX itself, so an\n"
+"MP3 renamed to .adx will not play, and can raise the game's disc\n"
+"error. Convert your audio to ADX first. VGAudio (the VGAudioCli\n"
+"command line tool) encodes ADX and can write loop points.\n"
+"\n"
+"Loops come from the file itself, so set the loop when you convert;\n"
+"looping the whole track is the usual choice. Match the game's own\n"
+"files: 44.1 kHz, stereo, unencrypted.\n"
+"\n"
+"A pick plays through the game's own music changer, riding on the\n"
+"SET 01A stream, and lasts until the game changes the music itself.\n",
+        f);
+    fclose(f);
+}
+
 /* Logs/last-run.log, the one before it kept as previous-run.log.
  *
  * stdout and stderr (descriptors 1 and 2) are pointed at a device of
@@ -1144,7 +1177,7 @@ int nv_switch_main(int argc, char **argv, int (*host)(void));
 int nv_switch_main(int argc, char **argv, int (*host)(void))
 {
     const char *base = SWITCH_BASE;
-    char game[1024], save[1024], cfg[1024], tmp[1024], scale[8];
+    char game[1024], save[1024], cfg[1024], tmp[1024], tracks[1024], scale[8];
     struct host_call call;
     pthread_attr_t a;
     pthread_t t;
@@ -1163,10 +1196,13 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     snprintf(save, sizeof save, "%s/save", base);
     snprintf(cfg, sizeof cfg, "%s/settings", base);
     snprintf(tmp, sizeof tmp, "%s/tmp", base);
+    snprintf(tracks, sizeof tracks, "%s/custom_tracks", base);
     mkdir_p(base);
     mkdir_p(game);
     mkdir_p(save);
     mkdir_p(tmp);
+    mkdir_p(tracks);
+    drop_custom_tracks_readme(tracks);
 
     open_log(base);
     { int s = cfg_get_int(cfg, "scale", 1);

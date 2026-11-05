@@ -44,6 +44,139 @@ static const char* get_xbox_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
     return ObjectAttributes->ObjectName->Buffer;
 }
 
+static volatile int s_music_mix_override;
+
+int xbox_music_mix_override(void)
+{
+    return __atomic_load_n(&s_music_mix_override, __ATOMIC_ACQUIRE);
+}
+
+void xbox_music_mix_select(int set)
+{
+    if (set < 0 || set > 18) return;
+    __atomic_store_n(&s_music_mix_override, set, __ATOMIC_RELEASE);
+    fprintf(stderr, "[MUSIC] DJ mix override: %s\n",
+            set ? "selected for the next stream" : "game default");
+}
+
+/* ── Custom tracks: a one-shot host-path redirect ────────────────────
+ * The Music page's custom pick arms this with the absolute host path
+ * of a user-supplied .adx from the app dir's custom_tracks folder.
+ * The next guest open that names the carrier stream (SET 01A: a \BGM\
+ * path whose leaf is s_set_01a.adx) is served the custom file instead
+ * of the translated game path, and the arm is spent -- unlike the DJ
+ * mix's level override above, which rewrites every matching open
+ * until it is cleared, and so would keep hijacking later natural
+ * opens of the same set. The guest path namespace cannot express the
+ * target at all (it resolves to the game and save dirs only), so the
+ * substitution happens on the host path at open time; every read
+ * afterwards follows the returned handle. The menu validates the
+ * file's ADX header at scan time -- the kernel only ever sees a path
+ * it was handed -- and the consumer that arms this disarms it again
+ * when its fabricated PlayBGM returns, so a fire whose stream never
+ * opens leaves nothing stale behind. */
+static volatile int s_custom_track_armed;
+static char s_custom_track_path[MAX_PATH];
+
+void xbox_custom_track_arm(const char *abs_host_path)
+{
+    if (!abs_host_path) return;
+    snprintf(s_custom_track_path, MAX_PATH, "%s", abs_host_path);
+    __atomic_store_n(&s_custom_track_armed, 1, __ATOMIC_RELEASE);
+}
+
+void xbox_custom_track_disarm(void)
+{
+    __atomic_store_n(&s_custom_track_armed, 0, __ATOMIC_RELEASE);
+}
+
+int xbox_custom_track_armed(void)
+{
+    return __atomic_load_n(&s_custom_track_armed, __ATOMIC_ACQUIRE);
+}
+
+#if defined(__SWITCH__)
+/* Claim the arm for this open, if it names the carrier stream. The
+ * claim is a compare-exchange, so two racing opens cannot both take
+ * it; a non-matching open never spends it. Caller guarantees out_n
+ * room for a full path (MAX_PATH). */
+static int switch_custom_track_take(const char *path, char *out, size_t out_n)
+{
+    const char *leaf, *p;
+    char folded[MAX_PATH];
+    size_t len, i;
+    int want = 1;
+    if (!path || !__atomic_load_n(&s_custom_track_armed, __ATOMIC_ACQUIRE))
+        return 0;
+    len = strlen(path);
+    if (len >= sizeof folded)
+        return 0;
+    for (i = 0; i <= len; i++) {
+        unsigned char c = (unsigned char)path[i];
+        folded[i] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    if (!strstr(folded, "\\bgm\\") && !strstr(folded, "/bgm/"))
+        return 0;
+    leaf = strrchr(folded, '/');
+    { const char *back = strrchr(folded, '\\');
+      if (!leaf || (back && back > leaf)) leaf = back; }
+    leaf = leaf ? leaf + 1 : folded;
+    if (strcmp(leaf, "s_set_01a.adx") != 0)
+        return 0;
+    if (!__atomic_compare_exchange_n(&s_custom_track_armed, &want, 0, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return 0;   /* another open took it first */
+    snprintf(out, out_n, "%s", s_custom_track_path);
+    p = strrchr(path, '/');
+    { const char *back = strrchr(path, '\\');
+      if (!p || (back && back > p)) p = back; }
+    fprintf(stderr, "[CUSTOM] stream %s -> %s\n", p ? p + 1 : path, out);
+    return 1;
+}
+#endif
+
+#if defined(__SWITCH__)
+/* DJ mixes are whole streams. Redirect only an exact leaf-name match, keep
+ * its directory, and leave the default area selection untouched at set 0. */
+static int switch_music_override_path(const char *path, char out[MAX_PATH])
+{
+    const char *leaf, *p;
+    size_t prefix, len;
+    int selected = xbox_music_mix_override();
+    char folded[14];
+    int i;
+    if (!path || selected < 1 || selected > 18)
+        return 0;
+    leaf = strrchr(path, '/');
+    {
+        const char *back = strrchr(path, '\\');
+        if (!leaf || (back && back > leaf)) leaf = back;
+    }
+    leaf = leaf ? leaf + 1 : path;
+    len = strlen(leaf);
+    if (len != 13 || strlen(path) - len + len + 1 > MAX_PATH)
+        return 0;
+    for (i = 0; i < 13; i++) {
+        unsigned char c = (unsigned char)leaf[i];
+        folded[i] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    folded[13] = '\0';
+    if (strncmp(folded, "s_set_", 6) != 0
+     || folded[6] < '0' || folded[6] > '9'
+     || folded[7] < '0' || folded[7] > '9'
+     || (folded[8] != 'a' && folded[8] != 'b')
+     || strcmp(folded + 9, ".adx") != 0)
+        return 0;
+    prefix = (size_t)(leaf - path);
+    memcpy(out, path, prefix);
+    p = out + prefix;
+    snprintf((char *)p, MAX_PATH - prefix, "s_set_%02d%c.adx",
+             (selected + 1) / 2, (selected & 1) ? 'a' : 'b');
+    fprintf(stderr, "[MUSIC] next stream %s -> %s\n", leaf, p);
+    return 1;
+}
+#endif
+
 /* A partition device reads to the end of its partition (platform-independent).
  * The image behind it holds only what has been written (kernel_path.c), and
  * the rest reads as zero, as a blank disk does -- the zeros are already in the
@@ -945,9 +1078,28 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     uint64_t io_t0_ = io_now_us();
 
     const char* xbox_path = get_xbox_path(ObjectAttributes);
+#if defined(__SWITCH__)
+    char music_path[MAX_PATH];
+    if (switch_music_override_path(xbox_path, music_path))
+        xbox_path = music_path;
+    /* An armed custom track names its file by absolute host path, so
+     * its open bypasses guest-path translation below. Only a plain
+     * file open can be the carrier stream. (The mix override is at 0
+     * whenever a pick is pending -- the pick's commit clears it -- so
+     * the path matched here is the guest's own.) */
+    char custom_path[MAX_PATH];
+    int use_custom = !(CreateOptions & XBOX_FILE_DIRECTORY_FILE)
+        && switch_custom_track_take(xbox_path, custom_path, sizeof custom_path);
+#endif
     extern int g_xbox_translate_want_dir;
     g_xbox_translate_want_dir = (CreateOptions & XBOX_FILE_DIRECTORY_FILE) ? 1 : 0;
     BOOL tr = xbox_path && xbox_translate_path(xbox_path, host_path, MAX_PATH);
+#if defined(__SWITCH__)
+    if (use_custom) {
+        snprintf(host_path, MAX_PATH, "%s", custom_path);
+        tr = TRUE;
+    }
+#endif
     g_xbox_translate_want_dir = 0;
     if (!tr) {
         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
