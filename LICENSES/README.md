@@ -38,3 +38,9 @@ for the release build ships no licence file for libnx.
 library the renderer is built on. In the devkitPro install it is carried
 in the header of `libnx/include/deko3d.h`; the text here is that header
 text, verbatim.
+
+`MIT-JSRF-Recomp.txt` is the MIT License with Miggas's copyright notice, from
+
+    https://github.com/Miggas/JSRF-Recomp
+
+It applies to `port/sse_p3.h`, taken from that project (see NOTICE).
