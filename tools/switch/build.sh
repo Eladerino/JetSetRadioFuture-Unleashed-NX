@@ -269,6 +269,12 @@ write_default_options() {
         "# widescreen). 0 = the game's behaviour exactly." \
         "RECOMP_CAM_WALLS=1" \
         "" \
+        "# Graffiti camera: 1 = spraying cuts the camera to the spot and" \
+        "# talking turns the view to face them, as on the Xbox. 0 = the" \
+        "# camera stays behind your skater. Also the GRAFFITI CAMERA row" \
+        "# in the menu (Controller > Camera)." \
+        "RECOMP_CAM_GRAFFITI=1" \
+        "" \
         "# ---- sound" \
         "" \
         "mute=0" \

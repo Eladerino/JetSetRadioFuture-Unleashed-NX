@@ -5252,6 +5252,72 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
  * the mode's update from 0x215570, and returns early while +0x1E0 is set.
  * Eye at +0x44, target at +0x5C. JSRF_CAM_LOG=1 prints every change of the
  * mode inputs and the eye position once a second. */
+/* ---- the graffiti camera, off as an option --------------------------------
+ * Ported from spriteice's JSRF-PC (9457edf, 4c57901), where it rides the
+ * free camera; here it stands alone, behind the menu's GRAFFITI CAMERA
+ * row (Controller > Camera) and RECOMP_CAM_GRAFFITI in options.txt.
+ *
+ * Spraying graffiti asks the camera for mode 13, which frames the spot
+ * and snaps back behind the player after; the spray code (sub_0008D280)
+ * asks with +0xE3C on the character. Talking asks for mode 9, the look:
+ * the talk button, or someone nearby who asks for it, sets the mode the
+ * character asks for (+0xE58) to 9, and switching to it (sub_000A5A00)
+ * puts the target 33 units ahead, toward them, and the eye 66 away; it
+ * returns to follow mode 3 when the look ends (0x8B2CF).
+ *
+ * With the option off, the update below reads 0 in place of +0xE3C and 3
+ * in place of a 9 at +0xE58, and puts both back after. Nothing this
+ * update calls in those modes reads or writes either (the player's own
+ * code does, outside it, and ends a look once +0xE58 is no longer 9), so
+ * the spray still happens and the look still ends; only the camera's
+ * reading of the requests is masked, for this one call. Only on the
+ * camera of the skater the pad moves: a scene's camera, and a scene's
+ * scripted look, stay the game's. */
+#define CHR_GRAFFITI_CAM   0xE3Cu      /* the graffiti camera, asked for (sub_0008D280) */
+#define CHR_CAM_MODE       0xE58u      /* the mode it asks the camera for */
+#define CAM_MODE_FOLLOW    3u          /* follow: what a look goes back to (0x8B2CF) */
+#define CAM_MODE_LOOK      9u          /* look at whoever the player talks to */
+#define CHR_DRIVER         0x024u      /* the player manager that built it (sub_00011BD0) */
+#define DRV_CLASS          0x001CD570u /* the player manager's class (sub_000A6980) */
+#define DRV_PAD            0x8ACu      /* its pad's port, or DRV_NO_PAD (sub_000A8370) */
+#define DRV_CONTROL        0x8B4u      /* what moves its skater (sub_000A76E0) */
+#define DRV_NO_PAD         0xFFFFFFFFu
+#define DRV_PAD_PLAYS      0u          /* the pad moves it */
+#define DRV_PAD_RECORDED   2u          /* the pad moves it, and the run is recorded */
+
+/* Whether the character who is followed by a camera is one the pad
+ * moves. Every skater with a pad builds a camera that follows it
+ * (sub_00084200), and a scene that follows another skater around (Beat
+ * round Dogenzaka Hill, Combo showing his line) is shown through that
+ * skater's own. What moves a skater is its player manager's control
+ * state: the manager reads the pad in states 0 and 2 only (sub_000A76E0,
+ * its table at 0xA8298); 1 plays back a recorded run and 3 to 13 are
+ * scripted. The game's own test for the player's skater is the same
+ * (sub_0004EBC0). (JSRF-PC's version also logs each camera's answer;
+ * this tree's JSRF_CAM_LOG already covers camera diagnosis.) */
+static int cam_pad_steered(const uint8_t *m, uint32_t who)
+{
+    const uint32_t lim = 64u << 20;
+    uint32_t drv = 0, ctl = 0, pad = DRV_NO_PAD;
+    if (who >= 0x10000u && who + 0x1000u < lim)
+        drv = *(const uint32_t *)(m + who + CHR_DRIVER);
+    if (drv >= 0x10000u && drv + 0x1000u < lim && *(const uint32_t *)(m + drv) == DRV_CLASS) {
+        pad = *(const uint32_t *)(m + drv + DRV_PAD);
+        ctl = *(const uint32_t *)(m + drv + DRV_CONTROL);
+        return pad != DRV_NO_PAD && (ctl == DRV_PAD_PLAYS || ctl == DRV_PAD_RECORDED);
+    }
+    return 0;
+}
+
+/* The menu's GRAFFITI CAMERA row and RECOMP_CAM_GRAFFITI: absent or 1
+ * is the game's own behaviour. Read every call: the menu sets it live
+ * (setenv), so a toggle applies from the next camera update. */
+static int cam_graffiti_on(void)
+{
+    const char *e = getenv("RECOMP_CAM_GRAFFITI");
+    return !(e && e[0] == '0');
+}
+
 extern void sub_000A5070_gen(void);
 void sub_000A5070(void)
 {
@@ -5264,7 +5330,25 @@ void sub_000A5070(void)
     if (on < 0) on = getenv("JSRF_CAM_LOG") != NULL;
     s_rcam_frames++;
     rcam_restore((uint8_t *)(uintptr_t)m, cam);     /* the game's own eye, for its update */
+    /* The graffiti camera and the talk look-at, masked for this call
+     * when the option is off (see "the graffiti camera, off as an
+     * option" above): +0xE3C read as 0, a mode-9 request read as 3. */
+    uint32_t *gcam = NULL, *look = NULL;
+    uint32_t sprayed = 0;
+    if (!cam_graffiti_on() && cam >= 0x10000u && cam + 0x240u < lim) {
+        uint32_t who = ((const uint32_t *)(m + cam))[0x24 / 4];
+        if (who >= 0x10000u && who + 0x1000u < lim && cam_pad_steered(m, who)) {
+            gcam = (uint32_t *)(uintptr_t)(m + who + CHR_GRAFFITI_CAM);
+            sprayed = *gcam;
+            *gcam = 0;
+            look = (uint32_t *)(uintptr_t)(m + who + CHR_CAM_MODE);
+            if (*look == CAM_MODE_LOOK) *look = CAM_MODE_FOLLOW;
+            else look = NULL;
+        }
+    }
     sub_000A5070_gen();
+    if (gcam) *gcam = sprayed;
+    if (look) *look = CAM_MODE_LOOK;
     if (cam >= 0x10000u && cam + 0x240u < lim)
         s_cam_mode_now = ((const uint32_t *)(m + cam))[0x208 / 4];
     {
