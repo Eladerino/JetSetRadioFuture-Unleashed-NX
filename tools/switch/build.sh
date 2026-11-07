@@ -263,6 +263,12 @@ write_default_options() {
         "# This setting applies to the GLES build; Deko3D presents directly." \
         "RECOMP_VSYNC=0" \
         "" \
+        "# Camera walls: 1 keeps the follow camera's view out of walls" \
+        "# (the game's own wall test covers only the centre line, so" \
+        "# the picture's edges can clip through a wall, more so in" \
+        "# widescreen). 0 = the game's behaviour exactly." \
+        "RECOMP_CAM_WALLS=1" \
+        "" \
         "# ---- sound" \
         "" \
         "mute=0" \

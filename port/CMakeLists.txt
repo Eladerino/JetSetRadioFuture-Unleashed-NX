@@ -211,6 +211,7 @@ if(ANDROID)
     add_library(jsrf_recomp SHARED
         main.c
         recomp_manual.c
+        camera_walls.c
         resource_load.c
         xbe_check.c
         android/jsrf_android.c
@@ -222,6 +223,7 @@ else()
     add_executable(jsrf_recomp
         main.c
         recomp_manual.c
+        camera_walls.c
         resource_load.c
         xbe_check.c
         ios/xiso.c
