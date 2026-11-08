@@ -666,12 +666,22 @@ static int  grafcam_get(intptr_t a)
 static void grafcam_set(intptr_t a, int on)
 { (void)a; setenv("RECOMP_CAM_GRAFFITI", on ? "1" : "0", 1);
   options_set_int("RECOMP_CAM_GRAFFITI", on); }
+/* The camera wall fix (port/recomp_manual.c): it reads
+ * RECOMP_CAM_WALLS once and latches the answer, so unlike the
+ * graffiti row this one cannot apply live -- the setter writes
+ * options.txt for the next start, and the label says so. On unless
+ * the key is 0: the fix is the default. */
+static int  camwalls_get(intptr_t a)
+{ (void)a; const char *e = getenv("RECOMP_CAM_WALLS"); return !(e && e[0] == '0'); }
+static void camwalls_set(intptr_t a, int on)
+{ (void)a; options_set_int("RECOMP_CAM_WALLS", on); }
 static const DkRow k_controller_rows[] = {
     SECTION("CAMERA"),
     CHOICE("RIGHT-STICK CAMERA", "Off: the right stick is the game's own (its first-person look). Camera: the stick turns the view and the skater's heading with it, so up on the left stick goes where the camera looks. Tracking: the stick turns the view only; the skater keeps his heading. Applies at once; kept in the settings file.", rcam_get, rcam_set, k_rcam_choices),
     CHECK("CAMERA EASES BACK WHEN RELEASED", "After you let go of the right stick, the view drifts back behind the skater. Off on the Switch by default: the held view is the point, and the L trigger already resets the turn. Kept in the settings file.", ease_get, ease_set),
     CHECK("CAMERA HOLDS ITS VIEW", "With the ease back on, it only drifts home while the movement stick is also untouched: pan, let go of the right stick and keep skating, and the view stays where you put it. This build's camera trial; turn it off for the shipped behaviour. Kept in the settings file.", hold_get, hold_set),
     CHECK("GRAFFITI CAMERA", "On, as on the Xbox: spraying graffiti cuts the camera to frame the spot, then snaps it back behind you, and talking to someone turns the view to face them. Off: the camera stays behind your skater for both. Applies at once; kept in options.txt.", grafcam_get, grafcam_set),
+    CHECK("CAMERA WALLS (RESTART)", "On: the game's camera is kept out of walls, so at a glancing angle scenery never swallows the view at the screen edges. Off: the game's own camera exactly, blind spots included. The fix reads this once at start, so a change here applies from the next start; kept in options.txt.", camwalls_get, camwalls_set),
     SECTION("PAD"),
     CHECK("NINTENDO LAYOUT (A/B, X/Y)", "The face buttons by their printed names: A does what A says, and B what B says. The game's own prompts are drawn for an Xbox pad and do not move. Applies at once; kept in the settings file and options.txt.", layout_get, layout_set_row),
     CHECKA("BOTH STICKS IN GAME MENUS (RESTART)", "The left and the right sticks both move through the game's own menus. Takes effect from the next start; kept in options.txt.", sw_get, sw_set, SW_STICKBOTH),
