@@ -284,4 +284,80 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 
+/* ════════════════════════════════════════════════════════════════
+ * ADDITIONS to src/kernel/nv2a_backend.h
+ * Paste before the header's closing #endif. The header already
+ * includes <stdint.h>.
+ *
+ * PROVENANCE: recovery re-implementation, 2026-11-10. The original
+ * harness port added exactly one declaration to this header
+ * (nv2a_backend_queue_flipq_snap, STEP0-PHASE1-REPORT) plus, for
+ * the grid, kernel_vblank_jitter (GRID-BUILD-REPORT: declared at
+ * nv2a_backend.h:50 in the fold-in tree). The snapshot structs and
+ * the remaining declarations are THIS package's API — the
+ * original's internal API is lost. Names follow the records where
+ * the records name them.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* Per-second FLIPQ snapshot, filled by kernel_flipq_snap()
+ * (src/kernel/kernel_bridge.c). All values are deltas since the
+ * previous snapshot. Stage fields are per-second means with their
+ * pair counts (a count of 0 means the mean is meaningless). */
+typedef struct {
+    /* counter 1: main-thread space-wait on 0x0019D640 */
+    uint64_t sw_count;
+    double   sw_total_ms, sw_max_ms;
+    uint64_t sw_nowait;
+    /* counter 4: walk-end -> flip-complete */
+    uint64_t fl_count;
+    double   fl_mean_ms, fl_p90_ms;
+    /* counter 5: flip-complete -> space-event signal */
+    uint64_t sig_count;
+    double   sig_mean_ms, sig_max_ms;
+    /* stage ring means (Worker C) */
+    double   st_rel_wake_ms, st_wake_prod_ms, st_prod_walk_ms,
+             st_walk_done_ms, st_done_sig_ms;
+    uint64_t st_rel_wake_n, st_wake_prod_n, st_prod_walk_n,
+             st_walk_done_n, st_done_sig_n;
+} FlipqSnap;
+
+/* Per-second queue snapshot, filled by
+ * nv2a_backend_queue_flipq_snap() (src/kernel/nv2a_backend_queue.c).
+ * Deltas since the previous snapshot. */
+typedef struct {
+    double flips_mean, flips_max;       /* counter 3: s_flips at q_flip */
+    double ringkb_mean, ringkb_max;     /* counter 3: ring bytes in use */
+    double backlog_mean, backlog_max;   /* counter 6: produced - made */
+    double wflips_delta_ms;             /* counter 3: prod_wait(W_FLIPS) */
+} QueueFlipqSnap;
+
+/* FLIPQ module (kernel_bridge.c). All entry points are safe to
+ * call with the gate off; the note_* functions check it first. */
+int      kernel_flipq_on(void);
+uint64_t kernel_flipq_now_ns(void);
+uint64_t kernel_flipq_wait_cum_ns(void);
+void     kernel_flipq_note_pass_end(uint64_t now_ns);
+void     kernel_flipq_note_flip_commit(uint64_t now_ns);
+void     kernel_flipq_note_flip_done(uint64_t now_ns);
+void     kernel_flipq_snap(FlipqSnap *out);
+void     nv2a_backend_queue_flipq_snap(QueueFlipqSnap *out);
+
+/* [SPEED] stats accessor. In this re-implementation it is the
+ * gate-off stub the adoption used in place of the killed vblank
+ * bypass (ADOPTION-RUNS.md): it reports the zero state the proven
+ * runs printed and sets *gate_off so the reporter can append
+ * " (bypass gate off)". Signature is this package's; the
+ * original's is lost. */
+void     kernel_vblank_bypass_stats(uint32_t *waits, uint32_t *bypassed,
+                                    double *late_mean, uint32_t *event_va,
+                                    int *gate_off);
+
+/* Vblank-grid jitter instrument (RECOMP_VBLANK_NS). Reads and
+ * clears the delivery-lateness accumulator. Returns the sample
+ * count (0 = print nothing). p50/p90 are bucket upper edges in
+ * microseconds; the top bucket reports its 2 ms lower edge
+ * (GRID-BUILD-REPORT §5). */
+int      kernel_vblank_jitter(double *mean_us, double *p50_us,
+                              double *p90_us);
+
 #endif /* NV2A_BACKEND_H */

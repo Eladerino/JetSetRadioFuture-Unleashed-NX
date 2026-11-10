@@ -877,6 +877,10 @@ static void log_clocks(void)
             hz[0] / 1000000, hz[1] / 1000000, hz[2] / 1000000);
 }
 
+/* [VBLJIT] accumulator reader (kernel_bridge.c; declared in
+ * nv2a_backend.h, which this TU does not include). */
+extern int kernel_vblank_jitter(double *, double *, double *);
+
 static void perf_reporter(void *arg)
 {
     u64 pi[3] = { 0 }, pt[3] = { 0 };
@@ -905,6 +909,16 @@ static void perf_reporter(void *arg)
             fprintf(stderr, "%s\n", renderer);
         }
 #endif
+        if (round) {
+            /* [VBLJIT] vblank-grid delivery jitter (RECOMP_VBLANK_NS):
+             * one line per [perf] block; gate off the accessor
+             * returns 0 and nothing prints. */
+            double vjm, vjp50, vjp90;
+            int vjn = kernel_vblank_jitter(&vjm, &vjp50, &vjp90);
+            if (vjn > 0)
+                fprintf(stderr, "[VBLJIT] n=%d mean=%.0f p50=%.0f p90=%.0f\n",
+                        vjn, vjm, vjp50, vjp90);
+        }
         if (round % 15 == 0) log_clocks();
     }
 }

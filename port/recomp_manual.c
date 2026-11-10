@@ -3103,10 +3103,80 @@ void sub_001910E0(void)
     }
 }
 
+/* ════════════════════════════════════════════════════════════════
+ * Patrol reporters — recovery re-implementation, 2026-11-10
+ * (jsrf-reporter-package-2026-11-10, file 05): the [SPEED]
+ * reporter, FLIPQ counter 2, the serial-cycle C histogram and
+ * the [FLIPQ]/[FLIPQ-HIST]/[FLIPQ-STAGE] block, woven into the
+ * shipped sub_00013A80 wrap (preserved verbatim below). The
+ * [SPEED] format string is RECONSTRUCTED — the original survives
+ * nowhere; it is byte-compatible with the patrol analyzer.
+ * ════════════════════════════════════════════════════════════════ */
+/* ── Declarations (place above the wrap) ──────────────────────────
+ * NEW. Self-contained so this file drops in without include
+ * surgery. If this TU already includes src/kernel/nv2a_backend.h
+ * with 00-header-additions.h.txt applied, delete the two typedefs
+ * and keep the externs (identical redeclaration is legal, but
+ * one source of truth is better). */
+typedef struct {
+    uint64_t sw_count;
+    double   sw_total_ms, sw_max_ms;
+    uint64_t sw_nowait;
+    uint64_t fl_count;
+    double   fl_mean_ms, fl_p90_ms;
+    uint64_t sig_count;
+    double   sig_mean_ms, sig_max_ms;
+    double   st_rel_wake_ms, st_wake_prod_ms, st_prod_walk_ms,
+             st_walk_done_ms, st_done_sig_ms;
+    uint64_t st_rel_wake_n, st_wake_prod_n, st_prod_walk_n,
+             st_walk_done_n, st_done_sig_n;
+} FlipqSnap;
+
+typedef struct {
+    double flips_mean, flips_max;
+    double ringkb_mean, ringkb_max;
+    double backlog_mean, backlog_max;
+    double wflips_delta_ms;
+} QueueFlipqSnap;
+
+extern int      kernel_flipq_on(void);
+extern uint64_t kernel_flipq_now_ns(void);
+extern uint64_t kernel_flipq_wait_cum_ns(void);
+extern void     kernel_flipq_note_pass_end(uint64_t now_ns);
+extern void     kernel_flipq_snap(FlipqSnap *out);
+extern void     nv2a_backend_queue_flipq_snap(QueueFlipqSnap *out);
+extern void     kernel_vblank_bypass_stats(uint32_t *waits,
+                                           uint32_t *bypassed,
+                                           double *late_mean,
+                                           uint32_t *event_va,
+                                           int *gate_off);
+extern unsigned long g_vblank_count;   /* kernel_bridge.c; no
+                                        * header declares it — NEW */
+
+/* NEW: gate + reporter state */
+static int speed_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("RECOMP_SPEED_LOG") != NULL;
+    return on;
+}
+
+static uint64_t fq_pass_n, fq_pass_wall_ns, fq_pass_wait_ns;
+static uint64_t fq_chist[121];              /* cumulative, never reset */
+static uint64_t fq_last_presented_end_ns;
+static unsigned fq_steps_sec;
+static unsigned fq_pres_sec[3];
+static unsigned long fq_vblanks_last;       /* at the last [SPEED] print */
+static unsigned long fq_vblanks_last_pres;  /* at the last presented pass */
+static int fq_have_pres_ref;
+
 /* ---- sub_00013A80: one pass of the game's main loop (test only log) ------
  * JSRF_FRAME_LOG=1: once a second, how many passes ran, how many of them
  * presented (+0x74 set = no Present this pass) and how many waited a vblank
- * (+0x94), and the vblank counter the game keeps at 0x265174. */
+ * (+0x94), and the vblank counter the game keeps at 0x265174.
+ * RECOMP_SPEED_LOG=1: the [SPEED] game-speed line, once a second.
+ * RECOMP_FLIPQ_LOG=1: the [FLIPQ] counter block, once a second. */
 extern void sub_00013A80_gen(void);
 void sub_00013A80(void)
 {
@@ -3114,8 +3184,145 @@ void sub_00013A80(void)
     uint8_t *m = (uint8_t *)g_xbox_mem_offset;
     uint32_t o = g_ecx;
     uint32_t w94 = (o > 0x10000u && o < (64u << 20)) ? *(uint32_t *)(m + o + 0x94) : 0;
+    int fq = kernel_flipq_on(), son = speed_on();                       /* NEW */
+    uint64_t p_t0 = 0, p_cum0 = 0;                                      /* NEW */
     if (on < 0) on = getenv("JSRF_FRAME_LOG") ? 1 : 0;
+    if (fq) {                                                           /* NEW */
+        p_cum0 = kernel_flipq_wait_cum_ns();                            /* NEW */
+        p_t0 = kernel_flipq_now_ns();                                   /* NEW */
+    }                                                                   /* NEW */
     sub_00013A80_gen();
+    if (fq || son) {                                                    /* NEW */
+        uint64_t p_t1 = kernel_flipq_now_ns();                          /* NEW */
+        int presented = (o > 0x10000u && o < (64u << 20)                /* NEW */
+                         && *(uint32_t *)(m + o + 0x74) == 0);          /* NEW */
+        if (fq) {                                                       /* NEW */
+            fq_pass_n++;                                                /* NEW */
+            fq_pass_wall_ns += p_t1 - p_t0;                             /* NEW */
+            fq_pass_wait_ns += kernel_flipq_wait_cum_ns() - p_cum0;     /* NEW */
+            kernel_flipq_note_pass_end(p_t1);                           /* NEW */
+            if (presented) {                                            /* NEW */
+                if (fq_last_presented_end_ns) {                         /* NEW */
+                    uint64_t c = p_t1 - fq_last_presented_end_ns;        /* NEW */
+                    int bin = (int)(c / 500000ull);                     /* NEW */
+                    if (bin > 120) bin = 120;                           /* NEW */
+                    fq_chist[bin]++;                                    /* NEW */
+                }                                                       /* NEW */
+                fq_last_presented_end_ns = p_t1;                        /* NEW */
+            }                                                           /* NEW */
+        }                                                               /* NEW */
+        if (son) {                                                      /* NEW */
+            fq_steps_sec++;                                             /* NEW */
+            if (presented) {                                            /* NEW */
+                unsigned long vc = g_vblank_count;                      /* NEW */
+                if (fq_have_pres_ref) {                                 /* NEW */
+                    unsigned long d = vc - fq_vblanks_last_pres;        /* NEW */
+                    fq_pres_sec[d <= 1 ? 0 : d == 2 ? 1 : 2]++;         /* NEW */
+                }                                                       /* NEW */
+                fq_vblanks_last_pres = vc;                              /* NEW */
+                fq_have_pres_ref = 1;                                   /* NEW */
+            }                                                           /* NEW */
+        }                                                               /* NEW */
+        {                                                               /* NEW */
+            static uint64_t next_ns;                                    /* NEW */
+            if (p_t1 >= next_ns) {                                      /* NEW */
+                double t_s = (double)p_t1 / 1e9;                        /* NEW */
+                if (son) {                                              /* NEW */
+                    uint32_t bw, bb, be;                                /* NEW */
+                    double bl;                                          /* NEW */
+                    int bgo;                                            /* NEW */
+                    unsigned long vc = g_vblank_count;                  /* NEW */
+                    unsigned long dvb = vc - fq_vblanks_last;           /* NEW */
+                    kernel_vblank_bypass_stats(&bw, &bb, &bl, &be,      /* NEW */
+                                               &bgo);                   /* NEW */
+                    fprintf(stderr,                                     /* NEW */
+                        "[SPEED] t=%.1f steps/s %u vblanks/s %lu "      /* NEW */
+                        "ratio %.4f present-delta %u/%u/%u "            /* NEW */
+                        "vbl-waits %u bypass %u%s late-mean %.2f "      /* NEW */
+                        "event 0x%08X\n",                               /* NEW */
+                        t_s, fq_steps_sec, dvb,                         /* NEW */
+                        dvb ? (double)fq_steps_sec / (double)dvb : 0.0, /* NEW */
+                        fq_pres_sec[0], fq_pres_sec[1], fq_pres_sec[2], /* NEW */
+                        bw, bb, bgo ? " (bypass gate off)" : "",        /* NEW */
+                        bl, be);                                        /* NEW */
+                    fq_steps_sec = 0;                                   /* NEW */
+                    fq_pres_sec[0] = fq_pres_sec[1] = fq_pres_sec[2] = 0; /* NEW */
+                    fq_vblanks_last = vc;                               /* NEW */
+                }                                                       /* NEW */
+                if (fq) {                                               /* NEW */
+                    FlipqSnap ks;                                       /* NEW */
+                    QueueFlipqSnap qs;                                  /* NEW */
+                    double wall, wait, busy;                            /* NEW */
+                    int i;                                              /* NEW */
+                    kernel_flipq_snap(&ks);                             /* NEW */
+                    nv2a_backend_queue_flipq_snap(&qs);                 /* NEW */
+                    wall = fq_pass_n                                    /* NEW */
+                         ? (double)fq_pass_wall_ns / 1e6 / (double)fq_pass_n : 0.0; /* NEW */
+                    wait = fq_pass_n                                    /* NEW */
+                         ? (double)fq_pass_wait_ns / 1e6 / (double)fq_pass_n : 0.0; /* NEW */
+                    busy = wall - wait;                                 /* NEW */
+                    fprintf(stderr,                                     /* NEW */
+                        "[FLIPQ] t=%.1f space-wait n=%llu "             /* NEW */
+                        "total=%.2fms max=%.2fms nowait=%llu | "        /* NEW */
+                        "pass n=%llu wall=%.2fms wait=%.2fms "          /* NEW */
+                        "busy=%.2fms | queue flips mean=%.2f "          /* NEW */
+                        "max=%.2f ringKB mean=%.2f max=%.2f "           /* NEW */
+                        "backlog mean=%.2f max=%.2f "                   /* NEW */
+                        "wflips-delta=%.2fms | flip-lat n=%llu "        /* NEW */
+                        "mean=%.3fms p90=%.3fms | sig-lat n=%llu "      /* NEW */
+                        "mean=%.3fms max=%.2fms\n",                     /* NEW */
+                        t_s,                                            /* NEW */
+                        (unsigned long long)ks.sw_count, ks.sw_total_ms, /* NEW */
+                        ks.sw_max_ms, (unsigned long long)ks.sw_nowait, /* NEW */
+                        (unsigned long long)fq_pass_n, wall, wait, busy, /* NEW */
+                        qs.flips_mean, qs.flips_max, qs.ringkb_mean,    /* NEW */
+                        qs.ringkb_max, qs.backlog_mean, qs.backlog_max, /* NEW */
+                        qs.wflips_delta_ms,                             /* NEW */
+                        (unsigned long long)ks.fl_count, ks.fl_mean_ms, /* NEW */
+                        ks.fl_p90_ms,                                   /* NEW */
+                        (unsigned long long)ks.sig_count, ks.sig_mean_ms, /* NEW */
+                        ks.sig_max_ms);                                 /* NEW */
+                    fq_pass_n = 0;                                      /* NEW */
+                    fq_pass_wall_ns = 0;                                /* NEW */
+                    fq_pass_wait_ns = 0;                                /* NEW */
+                    {                                                   /* NEW */
+                        uint64_t tot = 0;                               /* NEW */
+                        for (i = 0; i <= 120; i++)                      /* NEW */
+                            tot += fq_chist[i];                         /* NEW */
+                        if (tot) {                                      /* NEW */
+                            fprintf(stderr,                             /* NEW */
+                                "[FLIPQ-HIST] t=%.1f C-ms:", t_s);      /* NEW */
+                            for (i = 0; i <= 120; i++)                  /* NEW */
+                                if (fq_chist[i])                        /* NEW */
+                                    fprintf(stderr, " %.1f:%llu",       /* NEW */
+                                            i * 0.5,                    /* NEW */
+                                            (unsigned long long)fq_chist[i]); /* NEW */
+                            fprintf(stderr, "\n");                      /* NEW */
+                        }                                               /* NEW */
+                    }                                                   /* NEW */
+                    fprintf(stderr,                                     /* NEW */
+                        "[FLIPQ-STAGE] t=%.1f rel->wake %.3fms(n=%llu) " /* NEW */
+                        "wake->prod %.3fms(n=%llu) "                    /* NEW */
+                        "prod->walk %.3fms(n=%llu) "                    /* NEW */
+                        "walk->done %.3fms(n=%llu) "                    /* NEW */
+                        "done->sig %.3fms(n=%llu) "                     /* NEW */
+                        "pb-consumed=0 gpu-fence=0 (no host hook)\n",   /* NEW */
+                        t_s,                                            /* NEW */
+                        ks.st_rel_wake_ms,                              /* NEW */
+                        (unsigned long long)ks.st_rel_wake_n,           /* NEW */
+                        ks.st_wake_prod_ms,                             /* NEW */
+                        (unsigned long long)ks.st_wake_prod_n,          /* NEW */
+                        ks.st_prod_walk_ms,                             /* NEW */
+                        (unsigned long long)ks.st_prod_walk_n,          /* NEW */
+                        ks.st_walk_done_ms,                             /* NEW */
+                        (unsigned long long)ks.st_walk_done_n,          /* NEW */
+                        ks.st_done_sig_ms,                              /* NEW */
+                        (unsigned long long)ks.st_done_sig_n);          /* NEW */
+                }                                                       /* NEW */
+                next_ns = p_t1 + 1000000000ull;                         /* NEW */
+            }                                                           /* NEW */
+        }                                                               /* NEW */
+    }                                                                   /* NEW */
     if (!on || o < 0x10000u || o >= (64u << 20)) return;
     n++;
     if (*(uint32_t *)(m + o + 0x74)) nopres++;

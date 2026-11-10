@@ -179,6 +179,25 @@ static Q_LINE uint64_t st_idle_ns;
 static Q_LINE uint64_t st_wait_ns[W_N];
 static uint32_t st_waits[W_N];
 static uint64_t st_bytes, st_idx_bytes, st_attr_bytes, st_vtx_bytes;
+/* FLIPQ counters 3 + 6 (RECOMP_FLIPQ_LOG) — recovery re-implementation,
+ * jsrf-reporter-package-2026-11-10 file 04. Deliberate deviation from the
+ * lost build: the backlog counters share a zero epoch, so backlog prints
+ * real queue depths instead of unsigned-wrapped values. */
+static int flipq_on_q(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("RECOMP_FLIPQ_LOG") != NULL;
+    return on;
+}
+
+static uint64_t s_flipq_wflips_ns;    /* prod_wait(W_FLIPS) blocked */
+static uint32_t s_flipq_made;         /* records consumed (counter 6) */
+static uint64_t fq_q_samples;         /* q_flip samples this second */
+static uint64_t fq_q_flips_sum, fq_q_flips_max;
+static uint64_t fq_q_ring_sum, fq_q_ring_max;
+static double   fq_q_backlog_sum, fq_q_backlog_max;
+
 static uint32_t st_stores_queued, st_stores_now, st_big, st_records, st_batches;
 
 static uint64_t q_ns(void)
@@ -279,6 +298,8 @@ static void prod_wait(int why, size_t arg)
     pthread_mutex_unlock(&s_lock);
 done:
     st_wait_ns[why] += q_ns() - t0;
+    if (why == W_FLIPS && flipq_on_q())     /* FLIPQ counter 3 */
+        s_flipq_wflips_ns += q_ns() - t0;
 }
 
 /* Contiguous room for a record of at most `bound` bytes. */
@@ -646,6 +667,22 @@ static void q_flip(void)
     uint8_t *rec;
 
     prod_wait(W_FLIPS, 0);              /* no more than s_flip_limit frames behind */
+    if (flipq_on_q()) {                 /* FLIPQ counters 3 + 6 */
+        int flips = __atomic_load_n(&s_flips, __ATOMIC_SEQ_CST);
+        size_t used = p_head - tail_now();
+        double backlog = (double)st_records - (double)s_flipq_made;
+        fq_q_samples++;
+        fq_q_flips_sum += (uint64_t)flips;
+        if ((uint64_t)flips > fq_q_flips_max)
+            fq_q_flips_max = (uint64_t)flips;
+        fq_q_ring_sum += (uint64_t)used;
+        if ((uint64_t)used > fq_q_ring_max)
+            fq_q_ring_max = (uint64_t)used;
+        fq_q_backlog_sum += backlog;
+        if (backlog > fq_q_backlog_max)
+            fq_q_backlog_max = backlog;
+        kernel_flipq_note_flip_commit(q_ns());
+    }
     regs_collect();
     size = Q_ALIGN(state_size());
     rec = q_reserve(size);
@@ -851,6 +888,9 @@ static void q_run(const uint8_t *rec)
     size_t at;
     uint32_t i;
 
+    if (flipq_on_q())                   /* FLIPQ counter 6 */
+        s_flipq_made++;
+
     for (i = 0; i < h->nreg; i++)
         memcpy(c_regs + (b[i].idx & (Q_BLOCKS - 1)) * 16, b[i].w, 64);
     at = sizeof(QHdr) + (size_t)h->nreg * sizeof(QBlock);
@@ -868,6 +908,8 @@ static void q_run(const uint8_t *rec)
     case Q_FLIP:
         s_inner->flip();
         __atomic_sub_fetch(&s_flips, 1, __ATOMIC_SEQ_CST);
+        if (flipq_on_q())               /* FLIPQ counter 4 */
+            kernel_flipq_note_flip_done(q_ns());
         break;
     case Q_STORE: {
         const QStore *st = (const QStore *)(rec + sizeof(QHdr));
@@ -1055,3 +1097,28 @@ int nv2a_backend_queue_report(char *buf, unsigned long n, double frames)
 }
 
 #endif /* !_WIN32 */
+
+/* FLIPQ queue snapshot — recovery re-implementation,
+ * jsrf-reporter-package-2026-11-10 file 04. */
+void nv2a_backend_queue_flipq_snap(QueueFlipqSnap *out)
+{
+    memset(out, 0, sizeof *out);
+    if (fq_q_samples) {
+        out->flips_mean = (double)fq_q_flips_sum / (double)fq_q_samples;
+        out->flips_max = (double)fq_q_flips_max;
+        out->ringkb_mean = (double)fq_q_ring_sum / (double)fq_q_samples
+                           / 1024.0;
+        out->ringkb_max = (double)fq_q_ring_max / 1024.0;
+        out->backlog_mean = fq_q_backlog_sum / (double)fq_q_samples;
+        out->backlog_max = fq_q_backlog_max;
+    }
+    out->wflips_delta_ms = (double)s_flipq_wflips_ns / 1e6;
+    fq_q_samples = 0;
+    fq_q_flips_sum = 0;
+    fq_q_flips_max = 0;
+    fq_q_ring_sum = 0;
+    fq_q_ring_max = 0;
+    fq_q_backlog_sum = 0;
+    fq_q_backlog_max = 0;
+    s_flipq_wflips_ns = 0;
+}

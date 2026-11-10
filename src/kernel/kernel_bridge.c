@@ -29,6 +29,10 @@
 #include <string.h>
 #include "xbox_memory_layout.h"
 #include "recomp_icall_feedback.h"
+#include "nv2a_backend.h"        /* FlipqSnap + the snapshot API:
+ * reporter-package header additions (file 00). This TU did not
+ * include the header in rc042; the package layout assumes it
+ * is seen here. */
 #include <stdio.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
@@ -41,6 +45,7 @@
 #include <unistd.h>   /* usleep, for recomp_guest_spin_yield */
 #define SPIN_WITNESS_N 3
 #include <sched.h>    /* sched_yield, likewise */
+#include <time.h>     /* clock_gettime, nanosleep: FLIPQ module + vblank grid */
 void xbox_guest_lock_acquire(void);
 void xbox_guest_lock_release(void);
 static void kernel_freeze_watch(void); /* see the bottom of this file */
@@ -1678,6 +1683,373 @@ static uint32_t xbox_dispatcher_wait(uint32_t va, const long long *timeout_100ns
     return status;
 }
 
+/* ════════════════════════════════════════════════════════════════
+ * ADDITIONS to src/kernel/kernel_bridge.c — the FLIPQ module, the
+ * counter-1 wait hooks' callees, and the [SPEED] stats stub.
+ *
+ * INSERT: after the definition of xbox_dispatcher_wait() and
+ * before bridge_KeSetEvent() (Nov 4 lineage copy: between lines
+ * ~1660 and ~1664). Everything the module touches is already
+ * visible there: DISP_SIGNAL (macro, defined with the dispatcher
+ * block), g_is_spawned_thread / g_thread_stack_top (statics at
+ * :426/:432 in the Nov 4 copy), g_fs_base and XBOX_TIB_MAIN
+ * (xbox_memory_layout.h, included at the top of the file).
+ *
+ * INCLUDE HUNK (required): kernel_bridge.c's only <time.h> sits
+ * mid-file (Nov 4 copy: :8079), below this insertion point — the
+ * grid build hit exactly this failure (GRID-BUILD-REPORT §7).
+ * Add beside the top includes:
+ *
+ *     #include <time.h>
+ *
+ * PROVENANCE: recovery re-implementation, 2026-11-10, written to
+ * the implementation spec in STEP0-PHASE1-REPORT.md (sites,
+ * semantics, FIFO/stage behaviour) and FLIP-QUEUE-STUDY.md §5.
+ * The original module was +310 lines in this file; this one is a
+ * functional equivalent, not a reconstruction of its text. The
+ * snapshot API (kernel_flipq_snap and friends) is this package's
+ * design — see 00-header-additions.h.txt.
+ *
+ * Gate: RECOMP_FLIPQ_LOG, presence-read, cached. With the gate
+ * absent every entry point returns before touching state; the
+ * only unconditional cost is one cached static load per call.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* ── FLIPQ instrumentation (RECOMP_FLIPQ_LOG) ─────────────────── */
+
+#define FLIPQ_SPACE_EVENT   0x0019D640u  /* D3D pushbuffer-space event */
+#define FLIPQ_FIFO_N        16
+#define FLIPQ_STAGE_N       64
+
+static int flipq_on_cached(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("RECOMP_FLIPQ_LOG") != NULL;
+    return on;
+}
+
+int kernel_flipq_on(void)
+{
+    return flipq_on_cached();
+}
+
+/* The one clock everywhere: CLOCK_MONOTONIC nanoseconds — the
+ * same clock as the queue's q_ns(), so cross-file timestamps are
+ * comparable (STEP0-PHASE1-REPORT). */
+uint64_t kernel_flipq_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* The existing TLS-triple main-thread test (STEP0-PHASE1-REPORT
+ * counter 1: vblb_is_main()). */
+static int flipq_is_main(void)
+{
+    return !g_is_spawned_thread && g_thread_stack_top == 0
+        && g_fs_base == XBOX_TIB_MAIN;
+}
+
+/* ── Counter 1: main-thread space-wait on the space event ───────
+ * Armed only for main-thread, infinite-timeout (tp == NULL) waits
+ * on 0x0019D640. Did-not-wait definition (as-built, from the
+ * Phase 1 code comment): the event's SignalState was already
+ * latched at entry, so the dispatcher wait's loop never blocks —
+ * not a duration-floor heuristic. The SignalState read here is
+ * the same lock-free DISP_SIGNAL read the dispatcher itself
+ * performs under its lock; a racing signal can only flip an
+ * entry between "latched" and "waited 0 ms", never invent time. */
+static uint64_t fq_sw_count, fq_sw_total_ns, fq_sw_max_ns, fq_sw_nowait;
+static uint64_t fq_sw_cum_ns;      /* never reset: counter 2's source */
+static uint64_t fq_last_signal_ns;   /* last signal on the space event */
+static uint64_t fq_last_waitret_ns;  /* last hooked wait return */
+static uint64_t fq_last_pass_end_ns; /* last pass end (recomp_manual) */
+
+static int flipq_wait_arm(uint32_t object, const long long *tp,
+                          int *latched)
+{
+    if (!flipq_on_cached() || tp != NULL
+        || object != FLIPQ_SPACE_EVENT || !flipq_is_main())
+        return 0;
+    *latched = DISP_SIGNAL(object) != 0;
+    if (*latched)
+        fq_sw_nowait++;
+    return 1;
+}
+
+static void flipq_wait_done(int armed, int latched, uint64_t t0)
+{
+    uint64_t now, d;
+    if (!armed || latched)
+        return;
+    now = kernel_flipq_now_ns();
+    d = now - t0;
+    fq_sw_count++;
+    fq_sw_total_ns += d;
+    fq_sw_cum_ns += d;
+    if (d > fq_sw_max_ns)
+        fq_sw_max_ns = d;
+    fq_last_waitret_ns = now;
+}
+
+uint64_t kernel_flipq_wait_cum_ns(void)
+{
+    return fq_sw_cum_ns;
+}
+
+/* ── Counters 4/5: FIFO pairing ─────────────────────────────────
+ * Commit stamps pair oldest-first with completion stamps
+ * (counter 4); completion stamps pair oldest-first with the next
+ * space-event signal (counter 5). A full FIFO drops the newest
+ * stamp, never blocks (STEP0-PHASE1-REPORT, counter 5 note). */
+static uint64_t fq_commit_fifo[FLIPQ_FIFO_N];
+static int fq_commit_head, fq_commit_tail, fq_commit_count;
+static uint64_t fq_done_fifo[FLIPQ_FIFO_N];
+static int fq_done_head, fq_done_tail, fq_done_count;
+
+static void fq_fifo_push(uint64_t *fifo, int *tail, int *count,
+                         uint64_t v)
+{
+    if (*count >= FLIPQ_FIFO_N)
+        return;                    /* full: drop the newest stamp */
+    fifo[*tail] = v;
+    *tail = (*tail + 1) % FLIPQ_FIFO_N;
+    (*count)++;
+}
+
+static int fq_fifo_pop(uint64_t *fifo, int *head, int *count,
+                       uint64_t *v)
+{
+    if (*count <= 0)
+        return 0;
+    *v = fifo[*head];
+    *head = (*head + 1) % FLIPQ_FIFO_N;
+    (*count)--;
+    return 1;
+}
+
+/* Counter 4 accumulators. p90 is bucket-derived (coarse), by
+ * design; the mean is exact. Bounds 0.5/1/2/5/10/20/50/100 ms;
+ * the overflow bucket reports the period max. */
+static uint64_t fq_fl_count, fq_fl_total_ns, fq_fl_period_max_ns;
+static uint64_t fq_fl_buckets[9];
+static const uint64_t fq_fl_bounds_ns[8] = {
+    500000ull, 1000000ull, 2000000ull, 5000000ull, 10000000ull,
+    20000000ull, 50000000ull, 100000000ull
+};
+
+/* Counter 5 accumulators. */
+static uint64_t fq_sig_count, fq_sig_total_ns, fq_sig_max_ns;
+
+/* ── Worker C stage ring ────────────────────────────────────────
+ * One entry per committed flip: release (last space-event
+ * signal), wake (last space-wait return), produce-end (last pass
+ * end), walk-end (the commit stamp), flip-done. Entries complete
+ * in commit order. The snapshot folds completed entries in
+ * sequence order and advances a watermark; an entry overwritten
+ * before completion, or completed after a later entry was
+ * counted, is skipped — the documented as-built behaviour.
+ * pushbuffer-consumed and GPU fence have no host hook and are
+ * reported as 0 by the printer, as built. */
+typedef struct {
+    uint64_t seq, release, wake, prod_end, walk_end, done;
+} FlipqStage;
+
+static FlipqStage fq_stage[FLIPQ_STAGE_N];
+static uint64_t fq_stage_seq;         /* last commit sequence issued */
+static uint64_t fq_stage_done_seq;    /* next sequence awaiting done */
+static uint64_t fq_stage_watermark;   /* folded into snapshots up to */
+
+void kernel_flipq_note_pass_end(uint64_t now_ns)
+{
+    if (flipq_on_cached())
+        fq_last_pass_end_ns = now_ns;
+}
+
+void kernel_flipq_note_flip_commit(uint64_t now_ns)
+{
+    FlipqStage *e;
+    if (!flipq_on_cached())
+        return;
+    fq_fifo_push(fq_commit_fifo, &fq_commit_tail, &fq_commit_count,
+                 now_ns);
+    fq_stage_seq++;
+    e = &fq_stage[fq_stage_seq % FLIPQ_STAGE_N];
+    e->seq = fq_stage_seq;
+    e->release = fq_last_signal_ns;
+    e->wake = fq_last_waitret_ns;
+    e->prod_end = fq_last_pass_end_ns;
+    e->walk_end = now_ns;
+    e->done = 0;
+    if (fq_stage_done_seq == 0)
+        fq_stage_done_seq = fq_stage_seq;
+}
+
+void kernel_flipq_note_flip_done(uint64_t now_ns)
+{
+    uint64_t commit;
+    FlipqStage *e;
+    if (!flipq_on_cached())
+        return;
+    if (fq_fifo_pop(fq_commit_fifo, &fq_commit_head,
+                    &fq_commit_count, &commit)) {
+        uint64_t d = now_ns - commit;
+        int b = 0;
+        fq_fl_count++;
+        fq_fl_total_ns += d;
+        while (b < 8 && d > fq_fl_bounds_ns[b])
+            b++;
+        fq_fl_buckets[b]++;
+        if (d > fq_fl_period_max_ns)
+            fq_fl_period_max_ns = d;
+    }
+    fq_fifo_push(fq_done_fifo, &fq_done_tail, &fq_done_count, now_ns);
+    e = &fq_stage[fq_stage_done_seq % FLIPQ_STAGE_N];
+    if (e->seq == fq_stage_done_seq) {
+        e->done = now_ns;
+        fq_stage_done_seq++;
+    }
+}
+
+/* Called from bridge_KeSetEvent (hunk in 02). Records the release
+ * stamp and pairs counter 5. Stale pairings are counted as they
+ * fall — STEP0-RUNS.md records boot-era stale-FIFO latencies in
+ * the as-built data; this does not filter them either. */
+static void flipq_note_signal(uint32_t object)
+{
+    uint64_t now, done;
+    if (!flipq_on_cached() || object != FLIPQ_SPACE_EVENT)
+        return;
+    now = kernel_flipq_now_ns();
+    fq_last_signal_ns = now;
+    if (fq_fifo_pop(fq_done_fifo, &fq_done_head, &fq_done_count,
+                    &done)) {
+        uint64_t d = now - done;
+        fq_sig_count++;
+        fq_sig_total_ns += d;
+        if (d > fq_sig_max_ns)
+            fq_sig_max_ns = d;
+    }
+}
+
+/* Per-second snapshot for the reporter in port/recomp_manual.c.
+ * Fills *out with the deltas since the previous snapshot and
+ * resets the per-second accumulators (never fq_sw_cum_ns). */
+void kernel_flipq_snap(FlipqSnap *out)
+{
+    uint64_t seq;
+    memset(out, 0, sizeof *out);
+
+    out->sw_count = fq_sw_count;
+    out->sw_total_ms = (double)fq_sw_total_ns / 1e6;
+    out->sw_max_ms = (double)fq_sw_max_ns / 1e6;
+    out->sw_nowait = fq_sw_nowait;
+    fq_sw_count = 0;
+    fq_sw_total_ns = 0;
+    fq_sw_max_ns = 0;
+    fq_sw_nowait = 0;
+
+    out->fl_count = fq_fl_count;
+    if (fq_fl_count) {
+        uint64_t need = (fq_fl_count * 9 + 9) / 10;  /* ceil(0.9 n) */
+        uint64_t acc = 0;
+        int b = 0;
+        out->fl_mean_ms = (double)fq_fl_total_ns / 1e6
+                          / (double)fq_fl_count;
+        while (b < 9) {
+            acc += fq_fl_buckets[b];
+            if (acc >= need)
+                break;
+            b++;
+        }
+        out->fl_p90_ms = (b < 8) ? (double)fq_fl_bounds_ns[b] / 1e6
+                                 : (double)fq_fl_period_max_ns / 1e6;
+    }
+    fq_fl_count = 0;
+    fq_fl_total_ns = 0;
+    fq_fl_period_max_ns = 0;
+    memset(fq_fl_buckets, 0, sizeof fq_fl_buckets);
+
+    out->sig_count = fq_sig_count;
+    if (fq_sig_count)
+        out->sig_mean_ms = (double)fq_sig_total_ns / 1e6
+                           / (double)fq_sig_count;
+    out->sig_max_ms = (double)fq_sig_max_ns / 1e6;
+    fq_sig_count = 0;
+    fq_sig_total_ns = 0;
+    fq_sig_max_ns = 0;
+
+    /* Stage deltas: fold completed entries in sequence order. A
+     * delta is counted only when both endpoint stamps exist and
+     * are ordered — the per-delta counts in the print keep this
+     * honest (STEP0-RUNS.md: rel->wake and done->sig legitimately
+     * read n=0 for whole patrols). Sums first; means below. */
+    for (seq = fq_stage_watermark + 1; seq <= fq_stage_seq; seq++) {
+        const FlipqStage *e = &fq_stage[seq % FLIPQ_STAGE_N];
+        const FlipqStage *nx;
+        if (e->seq != seq) {         /* overwritten before folding */
+            fq_stage_watermark = seq;
+            continue;
+        }
+        if (!e->done)
+            break;                   /* completions are in order */
+        if (e->release && e->wake && e->wake >= e->release) {
+            out->st_rel_wake_ms += (double)(e->wake - e->release) / 1e6;
+            out->st_rel_wake_n++;
+        }
+        if (e->wake && e->prod_end && e->prod_end >= e->wake) {
+            out->st_wake_prod_ms += (double)(e->prod_end - e->wake) / 1e6;
+            out->st_wake_prod_n++;
+        }
+        if (e->prod_end && e->walk_end >= e->prod_end) {
+            out->st_prod_walk_ms += (double)(e->walk_end - e->prod_end) / 1e6;
+            out->st_prod_walk_n++;
+        }
+        if (e->done >= e->walk_end) {
+            out->st_walk_done_ms += (double)(e->done - e->walk_end) / 1e6;
+            out->st_walk_done_n++;
+        }
+        nx = &fq_stage[(seq + 1) % FLIPQ_STAGE_N];
+        if (nx->seq == seq + 1 && nx->release
+            && nx->release >= e->done) {
+            out->st_done_sig_ms += (double)(nx->release - e->done) / 1e6;
+            out->st_done_sig_n++;
+        }
+        fq_stage_watermark = seq;
+    }
+    if (out->st_rel_wake_n)
+        out->st_rel_wake_ms /= (double)out->st_rel_wake_n;
+    if (out->st_wake_prod_n)
+        out->st_wake_prod_ms /= (double)out->st_wake_prod_n;
+    if (out->st_prod_walk_n)
+        out->st_prod_walk_ms /= (double)out->st_prod_walk_n;
+    if (out->st_walk_done_n)
+        out->st_walk_done_ms /= (double)out->st_walk_done_n;
+    if (out->st_done_sig_n)
+        out->st_done_sig_ms /= (double)out->st_done_sig_n;
+}
+
+/* ── [SPEED] stats stub ─────────────────────────────────────────
+ * The vblank bypass is a killed direction and is NOT
+ * re-implemented (HOOK-MOVE-REPORT: the hook was correctly placed
+ * but gameplay never waits on the vblank event; STEP0/PATROL:
+ * zero engagements). The adoption excluded it and used two
+ * gate-off stubs to reproduce the proven [SPEED] line exactly
+ * (`bypass 0`, `(bypass gate off)`) — ADOPTION-RUNS.md. This
+ * accessor is that stub. */
+void kernel_vblank_bypass_stats(uint32_t *waits, uint32_t *bypassed,
+                                double *late_mean, uint32_t *event_va,
+                                int *gate_off)
+{
+    *waits = 0;
+    *bypassed = 0;
+    *late_mean = 0.0;
+    *event_va = 0;
+    *gate_off = 1;
+}
+
 static void bridge_KeSetEvent(void)
 {
     uint32_t event_ptr = STACK_ARG(0);
@@ -1686,6 +2058,7 @@ static void bridge_KeSetEvent(void)
 
     if (!disp_is_handle(event_ptr)) {
         g_eax = xbox_dispatcher_signal(event_ptr);
+        flipq_note_signal(event_ptr);   /* FLIPQ: counter 5 pairing */
         return;
     }
     g_eax = (uint32_t)xbox_KeSetEvent(XBOX_TO_NATIVE(event_ptr), increment, (BOOLEAN)wait);
@@ -1712,7 +2085,13 @@ static void bridge_KeWaitForSingleObject(void)
         g_eax = STATUS_USER_APC_VALUE;
         return;
     }
-    g_eax = xbox_dispatcher_wait(object, tp);
+    {   /* FLIPQ: counter 1 wraps the wait; gate off = the plain call */
+        int fq_latched = 0;
+        int fq_armed = flipq_wait_arm(object, tp, &fq_latched);
+        uint64_t fq_t0 = fq_armed ? kernel_flipq_now_ns() : 0;
+        g_eax = xbox_dispatcher_wait(object, tp);
+        flipq_wait_done(fq_armed, fq_latched, fq_t0);
+    }
         return;
     }
     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
@@ -2399,6 +2778,79 @@ static int kernel_raise_interrupt_locked(uint32_t vector)
  * pacing report, so "the guest's frame clock" is a number and not a belief. */
 unsigned long g_vblank_count;
 
+/* ── Grid state + helpers (insert before kernel_vblank_tick) ──── */
+
+static uint64_t s_vblank_period_ns;   /* 16,666,667 ns at hz = 60 */
+static uint64_t s_vblank_next_ns;     /* next due time, CLOCK_MONOTONIC */
+
+static int vblank_ns_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("RECOMP_VBLANK_NS") != NULL;
+    return on;
+}
+
+static uint64_t vblank_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* ── [VBLJIT] delivery-jitter accumulator ─────────────────────────
+ * On the ns path each delivery samples fire_ns − deadline_ns
+ * (the due time it fired against, before the catch-up advance)
+ * into a lateness histogram: <50 µs, 50–150, 150–300, 300–500 µs,
+ * 0.5–1 ms, 1–2 ms, ≥2 ms. A re-anchored delivery lands in the
+ * top bucket, as it should. Percentiles report the upper edge of
+ * the bucket they land in; the top bucket reports its 2 ms lower
+ * edge (GRID-BUILD-REPORT §5). */
+static uint64_t vbljit_hist[7];
+static uint64_t vbljit_count, vbljit_sum_ns;
+static const uint64_t vbljit_edges_ns[6] = {
+    50000ull, 150000ull, 300000ull, 500000ull, 1000000ull, 2000000ull
+};
+static const double vbljit_bucket_hi_us[7] = {
+    50.0, 150.0, 300.0, 500.0, 1000.0, 2000.0, 2000.0
+};
+
+static void vbljit_sample(uint64_t late_ns)
+{
+    int b = 0;
+    while (b < 6 && late_ns > vbljit_edges_ns[b])
+        b++;
+    vbljit_hist[b]++;
+    vbljit_count++;
+    vbljit_sum_ns += late_ns;
+}
+
+/* Reads and clears the accumulator. Declared in nv2a_backend.h
+ * (00-header-additions.h.txt); called by the Switch scaffold's
+ * perf reporter (06-jsrf_switch-vbljit.c.txt). */
+int kernel_vblank_jitter(double *mean_us, double *p50_us,
+                         double *p90_us)
+{
+    uint64_t n = vbljit_count, acc = 0;
+    int b;
+    if (!n)
+        return 0;
+    *mean_us = (double)vbljit_sum_ns / 1000.0 / (double)n;
+    *p50_us = 0.0;
+    *p90_us = 0.0;
+    for (b = 0; b < 7; b++) {
+        acc += vbljit_hist[b];
+        if (!*p50_us && acc * 2 >= n)
+            *p50_us = vbljit_bucket_hi_us[b];
+        if (!*p90_us && acc * 10 >= n * 9)
+            *p90_us = vbljit_bucket_hi_us[b];
+    }
+    memset(vbljit_hist, 0, sizeof vbljit_hist);
+    vbljit_count = 0;
+    vbljit_sum_ns = 0;
+    return (int)n;
+}
+
 static void kernel_vblank_tick(void)
 {
     static int enabled = -1;
@@ -2419,22 +2871,50 @@ static void kernel_vblank_tick(void)
      * makes the rate measurable rather than assumed -- if a title's boot
      * sequence is counted in display interrupts, doubling the rate halves the
      * boot, and if it is counted in anything else, nothing moves. */
-    {
-        static long long period = -1;
-        if (period < 0) {
+    if (vblank_ns_on()) {
+        static int period_ready;
+        if (!period_ready) {
             const char *e = getenv("RECOMP_VBLANK_HZ");
             double hz = e ? atof(e) : 60.0;
-            if (hz < 1.0) hz = 60.0;
-            period = (long long)(1000.0 / hz + 0.5);
-            if (period < 1) period = 1;
+            if (hz < 1.0)
+                hz = 60.0;
+            s_vblank_period_ns = (uint64_t)(1000000000.0 / hz + 0.5);
+            if (s_vblank_period_ns < 1)
+                s_vblank_period_ns = 1;
+            period_ready = 1;
         }
-        now = (long long)GetTickCount64();
-        if (now < next_ms)
-            return;
-        /* Catch up rather than drift: a late tick should not push the next one
-         * a full period further out. */
-        next_ms = (next_ms && now - next_ms < period * 4) ? next_ms + period
-                                                          : now + period;
+        {
+            uint64_t now_ns = vblank_now_ns();
+            uint64_t due = s_vblank_next_ns;
+            if (due && now_ns < due)
+                return;
+            if (due)
+                vbljit_sample(now_ns - due);
+            /* Catch up rather than drift: advance one period
+             * while late by less than four periods, else
+             * re-anchor at now + period — the shipped rule, in
+             * nanoseconds. A re-anchored delivery sampled above
+             * lands in the jitter histogram's top bucket. */
+            s_vblank_next_ns = (due && now_ns - due < s_vblank_period_ns * 4)
+                             ? due + s_vblank_period_ns
+                             : now_ns + s_vblank_period_ns;
+        }
+    } else {
+            static long long period = -1;
+            if (period < 0) {
+                const char *e = getenv("RECOMP_VBLANK_HZ");
+                double hz = e ? atof(e) : 60.0;
+                if (hz < 1.0) hz = 60.0;
+                period = (long long)(1000.0 / hz + 0.5);
+                if (period < 1) period = 1;
+            }
+            now = (long long)GetTickCount64();
+            if (now < next_ms)
+                return;
+            /* Catch up rather than drift: a late tick should not push the next one
+             * a full period further out. */
+            next_ms = (next_ms && now - next_ms < period * 4) ? next_ms + period
+                                                              : now + period;
     }
 
     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
@@ -3002,6 +3482,25 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
 static CRITICAL_SECTION g_timer_lock;
 static int g_timer_started;
 
+static void timer_loop_sleep(void)
+{
+    if (vblank_ns_on() && s_vblank_next_ns) {
+        uint64_t now_ns = vblank_now_ns();
+        int64_t left = (int64_t)s_vblank_next_ns - (int64_t)now_ns
+                     - 150000;
+        if (left > 0) {
+            struct timespec ts;
+            if (left > 1000000)
+                left = 1000000;
+            ts.tv_sec = 0;
+            ts.tv_nsec = (long)left;
+            nanosleep(&ts, NULL);
+        }
+        return;         /* ≤150 µs out: this turn does not sleep */
+    }
+    Sleep(1);
+}
+
 static DWORD WINAPI kernel_timer_thread(LPVOID unused)
 {
     int slot = xbox_worker_stack_alloc();
@@ -3029,11 +3528,16 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
         g_fs_base = tib;
     }
 
+    { extern void sw_thread_raise(const char *what)
+          __attribute__((weak));
+      if (sw_thread_raise && vblank_ns_on())
+          sw_thread_raise("timer"); }
+
     for (;;) {
         long long now;
         int i;
 
-        Sleep(1);
+        timer_loop_sleep();
         /*
          * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
          * going bad at the moment it goes bad.
