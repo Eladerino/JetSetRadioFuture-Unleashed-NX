@@ -25,7 +25,8 @@
  *  - Clears (by value), flips, stores and calls.
  *
  * Vertex arrays are copied into the record too (RECOMP_QUEUE_COPY_VERTICES,
- * default 1). JSRF's D3D finds room in its pushbuffer by reading the
+ * default 0: read later, per the fold-in default flip; =1 restores the
+ * copied behaviour described here). JSRF's D3D finds room in its pushbuffer by reading the
  * semaphore, so holding releases back behind the queue held the game back
  * whenever the thread was behind -- in a present, say: the ring-space spin
  * (sub_00191440) and its waits were ~16% of the game thread. With the
@@ -142,7 +143,7 @@ static pthread_cond_t s_cv = PTHREAD_COND_INITIALIZER;
 static int s_flip_limit = 2;
 static uint64_t s_spin_ns = 50000;
 static int s_prio = -1;
-static int s_copy_vertices = 1;         /* RECOMP_QUEUE_COPY_VERTICES */
+static int s_copy_vertices = 0;         /* RECOMP_QUEUE_COPY_VERTICES */
 static int s_exec_core = -2;            /* -2: not known yet */
 
 /* Executor thread: records written (some not yet handed over), the tail as
@@ -953,7 +954,7 @@ const Nv2aBackend *nv2a_backend_queue(const Nv2aBackend *inner)
     s_ring_bytes &= ~(size_t)15;
     s_flip_limit = (int)env_num("RECOMP_QUEUE_FRAMES", 2, 1, 8);
     s_spin_ns = (uint64_t)env_num("RECOMP_QUEUE_SPIN_US", 50, 0, 10000) * 1000;
-    s_copy_vertices = (int)env_num("RECOMP_QUEUE_COPY_VERTICES", 1, 0, 1);
+    s_copy_vertices = (int)env_num("RECOMP_QUEUE_COPY_VERTICES", 0, 0, 1);
     s_prio = (int)env_num("RECOMP_QUEUE_PRIO", -1, -1, 63);
     s_ring = (uint8_t *)malloc(s_ring_bytes + 16);
     if (!s_ring) {
