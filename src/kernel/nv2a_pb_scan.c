@@ -49,6 +49,29 @@ extern void nv2a_pb_exec_report(void);
 static int s_exec_enabled = -1;
 static int s_scan_enabled = -1;
 
+/* RECOMP_PB_FENCESCAN=1: answer the bulk block's fence question with a
+ * range test instead of the per-word loop. The loop stays whenever the
+ * scan is enabled because it also feeds note()'s inventory; the per-word
+ * fallback for genuine fences is untouched. Absent or 0: the shipped
+ * loop, exactly as before. */
+static int fencescan_on(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PB_FENCESCAN");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
+static int pb_run_has_fence(uint32_t method, int noninc, uint32_t n)
+{
+    if (noninc)
+        return method == 0x1D70u;
+    return method <= 0x1D70u && 0x1D70u < method + 4u * n;
+}
+
 /* The index methods: two 16-bit indices a word, or one 32-bit index. */
 #define NV097_ARRAY_ELEMENT16 0x1800u
 #define NV097_ARRAY_ELEMENT32 0x1808u
@@ -685,11 +708,14 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
                 uint32_t n = count;
                 int has_fence = 0;
                 if (n > (end_va - va) / 4) n = (end_va - va) / 4;
-                for (uint32_t i = 0; i < n; i++) {
-                    uint32_t m = noninc ? method : method + i * 4;
-                    if (s_scan_enabled) note(subch, m);
-                    if (m == 0x1D70u) has_fence = 1;
-                }
+                if (fencescan_on() && !s_scan_enabled)
+                    has_fence = pb_run_has_fence(method, noninc, n);
+                else
+                    for (uint32_t i = 0; i < n; i++) {
+                        uint32_t m = noninc ? method : method + i * 4;
+                        if (s_scan_enabled) note(subch, m);
+                        if (m == 0x1D70u) has_fence = 1;
+                    }
                 if (n && !has_fence) {
                     extern void nv2a_pb_exec_run(uint32_t, uint32_t, int,
                                                  const uint32_t *, uint32_t);
