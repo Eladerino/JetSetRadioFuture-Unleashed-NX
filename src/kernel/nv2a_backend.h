@@ -163,6 +163,12 @@ typedef struct {
      * attributes (attr_present & ~attr_direct), packed -- vertex v's k-th of
      * them, in attribute order, at attrs + (v * np + k) * 4. */
     uint16_t        attrs_packed;
+    /* Nonzero only from a queue running with RECOMP_QUEUE_IDX16:
+     * indices[] holds index_count uint16_t values, already rebased
+     * (index_base subtracted at queue time), not uint32_t title
+     * indices. The executor's per-draw memset zeroes it, so the
+     * direct unqueued path always reads 0. */
+    uint16_t        indices_u16;
 } Nv2aRawBatch;
 
 /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */

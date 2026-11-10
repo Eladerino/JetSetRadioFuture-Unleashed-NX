@@ -109,7 +109,7 @@ typedef struct {
 typedef struct { volatile uint32_t *word; uint32_t value, pad; } QStore;
 typedef struct { void (*fn)(void); uint64_t pad; } QCall;
 /* A draw: where its parts are in the record. */
-typedef struct { uint32_t idx_at, attrs_at, has_const, copied; } QDraw;  /* copied: attributes in the record */
+typedef struct { uint32_t idx_at, attrs_at, has_const, copied, idx16; } QDraw;  /* copied: attributes in the record */
 
 #define Q_REG_WORDS  (0x2000 / 4)
 #define Q_BLOCKS     (0x2000 / 64)
@@ -144,6 +144,7 @@ static int s_flip_limit = 2;
 static uint64_t s_spin_ns = 50000;
 static int s_prio = -1;
 static int s_copy_vertices = 0;         /* RECOMP_QUEUE_COPY_VERTICES */
+static int s_idx16 = 0;                 /* RECOMP_QUEUE_IDX16 */
 static int s_exec_core = -2;            /* -2: not known yet */
 
 /* Executor thread: records written (some not yet handed over), the tail as
@@ -433,6 +434,10 @@ static void q_draw(const Nv2aRawBatch *b)
     uint32_t nrun = 0, r;
     size_t size, draw_at, idx_at, attrs_at, local_at, at;
     int send_prog = 0, send_const = 0, send_attr;
+    /* RECOMP_QUEUE_IDX16: carry the indices pre-narrowed and pre-rebased
+     * when the back end would narrow them anyway (its isz decision is
+     * this same vertex_count test), halving the record's index segment. */
+    int idx16 = s_idx16 && nv <= 65536;
     QDraw *qd;
     uint8_t *rec, *big = NULL;
 
@@ -507,7 +512,7 @@ static void q_draw(const Nv2aRawBatch *b)
     size = draw_at + sizeof(QDraw) + Q_ALIGN(B_HEAD) + Q_ALIGN((size_t)nd * B_DSZ)
          + (send_attr ? sizeof b->attr_const : 0) + Q_ALIGN(sizeof(Nv2aRawBatch) - B_TAIL);
     idx_at = size;
-    attrs_at = idx_at + Q_ALIGN((size_t)b->index_count * 4);
+    attrs_at = idx_at + Q_ALIGN((size_t)b->index_count * (idx16 ? 2 : 4));
     local_at = attrs_at + Q_ALIGN((size_t)nv * np * 16);
     size = local_at + local_bytes;
 
@@ -545,6 +550,7 @@ static void q_draw(const Nv2aRawBatch *b)
     qd->attrs_at = (uint32_t)attrs_at;
     qd->has_const = (uint32_t)send_attr;
     qd->copied = local;
+    qd->idx16 = (uint32_t)idx16;
     at = draw_at + sizeof(QDraw);
     memcpy(rec + at, b, B_HEAD);
     at += Q_ALIGN(B_HEAD);
@@ -568,8 +574,16 @@ static void q_draw(const Nv2aRawBatch *b)
         at += sizeof b->attr_const;
     }
     memcpy(rec + at, (const uint8_t *)b + B_TAIL, sizeof(Nv2aRawBatch) - B_TAIL);
-    memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
-    st_idx_bytes += (size_t)b->index_count * 4;
+    if (idx16) {
+        uint16_t *o = (uint16_t *)(rec + idx_at);
+        uint32_t ii;
+        for (ii = 0; ii < b->index_count; ii++)
+            o[ii] = (uint16_t)(b->indices[ii] - b->index_base);
+        st_idx_bytes += (size_t)b->index_count * 2;
+    } else {
+        memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
+        st_idx_bytes += (size_t)b->index_count * 4;
+    }
     if (np) {
         float *o = (float *)(rec + attrs_at);
         uint32_t slot[NV2A_RAW_ATTRS], k;
@@ -778,6 +792,7 @@ static void run_draw(const uint8_t *rec, size_t draw_at)
     }
     memcpy(bb.attr_const, c_attr_const, sizeof bb.attr_const);
     memcpy((uint8_t *)&bb + B_TAIL, rec + at, sizeof(Nv2aRawBatch) - B_TAIL);
+    bb.indices_u16 = (uint16_t)qd->idx16;
 
     nv = bb.vertex_count;
     conv = bb.attr_present & (uint16_t)~bb.attr_direct;
@@ -971,6 +986,7 @@ const Nv2aBackend *nv2a_backend_queue(const Nv2aBackend *inner)
     s_flip_limit = (int)env_num("RECOMP_QUEUE_FRAMES", 2, 1, 8);
     s_spin_ns = (uint64_t)env_num("RECOMP_QUEUE_SPIN_US", 50, 0, 10000) * 1000;
     s_copy_vertices = (int)env_num("RECOMP_QUEUE_COPY_VERTICES", 0, 0, 1);
+    s_idx16 = (int)env_num("RECOMP_QUEUE_IDX16", 0, 0, 1);
     s_prio = (int)env_num("RECOMP_QUEUE_PRIO", -1, -1, 63);
     s_ring = (uint8_t *)malloc(s_ring_bytes + 16);
     if (!s_ring) {

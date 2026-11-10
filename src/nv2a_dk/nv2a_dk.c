@@ -4059,7 +4059,11 @@ static uint32_t upload_draw(const Nv2aRawBatch *b, DkIdxFormat *ifmt)
          * the compiler cannot tell the two buffers apart). */
         const uint32_t *__restrict ix = b->indices, base = b->index_base;
         i = 0;
-        if (isz == 2) {
+        if (isz == 2 && b->indices_u16) {
+            /* The queue already rebased and narrowed them
+             * (RECOMP_QUEUE_IDX16): a straight copy. */
+            memcpy(dst + idx_at, b->indices, (size_t)n * 2);
+        } else if (isz == 2) {
             uint16_t *__restrict o = (uint16_t *)(dst + idx_at);
 #if defined(__aarch64__)
             uint32x4_t vb = vdupq_n_u32(base);
