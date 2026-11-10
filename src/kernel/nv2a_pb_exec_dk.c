@@ -41,6 +41,27 @@ static int pb_verbose(void)
     return set;
 }
 
+/* Surgery toggles (walk attribution dwell, 2026-11-05): each is read once,
+ * and with it absent or 0 the code it gates runs exactly as shipped, so a
+ * run can price the trim against the shipped behaviour word for word.
+ *
+ * RECOMP_DK_NOTE_TRIM=1: the unhandled-method noting keeps only its count.
+ * The per-method table (slot lookup, count and last-param stores on every
+ * unhandled word) and the per-word rest_note gate go; s_gpu.unhandled_total
+ * still counts every unhandled word, so the [GPU] report's total is exact
+ * and only its per-method ranking is gone. It also supersedes
+ * RECOMP_PB_REST, whose counts are the same kind of bookkeeping.
+ *
+static int note_trim_on(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_DK_NOTE_TRIM");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
 void nv2a_pb_exec_report(void);
 
 /* Would writing this surface land on the title's own image?
@@ -376,8 +397,13 @@ static int unhandled_on(void)
 
 static void note_unhandled(uint32_t method, uint32_t param)
 {
-    uint16_t *slot = &s_unhandled_slot[(method & 0x1FFC) / 4];
+    uint16_t *slot;
 
+    if (note_trim_on()) {           /* the count, and nothing else */
+        s_gpu.unhandled_total++;
+        return;
+    }
+    slot = &s_unhandled_slot[(method & 0x1FFC) / 4];
     if (!unhandled_on())
         return;
     s_gpu.unhandled_total++;
@@ -2513,6 +2539,8 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                       const uint32_t *p, uint32_t n)
 {
     uint32_t i = 0;
+    const int note_trim = note_trim_on();
+    uint32_t trim_noted = 0;
 
     s_ws.words += n;
     if (subch == 0 && n && pb_fast()) {
@@ -2580,18 +2608,27 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             uint32_t m = noninc ? method : method + i * 4;
             if (m < 0x2000u && s_plain[m / 4]) {
                 shadow_write(m, p[i]);
-                if (unhandled_on())
+                /* The noting, trimmed: a register count per run, folded
+                 * into the total below. unhandled_total is only ever read
+                 * by the report, so batching it within a run is invisible. */
+                if (note_trim)
+                    trim_noted++;
+                else if (unhandled_on())
                     note_unhandled(m, p[i]);
                 s_ws.plain++;
             } else {
-                rest_note(0, m);
+                if (!note_trim)
+                    rest_note(0, m);
                 nv2a_pb_exec_method(0, m, p[i]);
             }
         }
+        if (trim_noted)
+            s_gpu.unhandled_total += trim_noted;
         return;
     }
     for (; i < n; i++) {
-        rest_note(subch, noninc ? method : method + i * 4);
+        if (!note_trim)
+            rest_note(subch, noninc ? method : method + i * 4);
         nv2a_pb_exec_method(subch, noninc ? method : method + i * 4, p[i]);
     }
 }
@@ -2786,6 +2823,9 @@ void nv2a_pb_exec_report(void)
             s_gpu.color_offset, s_gpu.pitch, s_gpu.clip_w, s_gpu.clip_h,
             s_gpu.clip_x, s_gpu.clip_y, s_gpu.clears,
             s_gpu.unhandled_total, s_unhandled_count);
+    if (note_trim_on())
+        fprintf(stderr, "  [GPU]   per-method unhandled ranking off"
+                        " (RECOMP_DK_NOTE_TRIM=1): the total above is exact\n");
     fprintf(stderr, "[GPU] draws %u, %u indices\n", s_gpu.draws, s_gpu.verts);
 
     fprintf(stderr, "[GPU] %u triangles sent to the back end; draw surface 0x%08X -> 0x%08X,"
