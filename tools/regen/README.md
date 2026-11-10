@@ -15,7 +15,9 @@ without it, `jsrf_reg_locals.py --apply` refuses to run.
 
 ## Run order
 
-Run in exactly this order, each with `--apply`, over the gen dir:
+The standard chain for this tree is passes 1-3, run in exactly this
+order, each with `--apply`, over the gen dir. That chain produced the
+generated code the current builds ship.
 
 1. `python3 tools/regen/jsrf_preempt.py port/recomp/gen --entry-only --apply`
    — inserts the `RECOMP_PREEMPT();` entry anchor reg_locals keys on.
@@ -31,6 +33,12 @@ Run in exactly this order, each with `--apply`, over the gen dir:
    design and stay refused.
 3. `python3 tools/regen/jsrf_inline_leaves.py port/recomp/gen --apply`
    — inline small leaf functions at their direct call sites.
+## Vendored, not standard
+
+The remaining vendored passes are skeammer's and stay in the folder
+for reference, but they are NOT part of the standard chain above and
+are unproven on this tree; do not run them as part of a normal regen.
+
 4. `python3 tools/regen/jsrf_copy_loops.py port/recomp/gen --apply`
    — memcpy front door for the MMX block-copy loop in `sub_001993A0`.
    Adapted: an alternate `BODY_OURS` literal pattern for this tree's
