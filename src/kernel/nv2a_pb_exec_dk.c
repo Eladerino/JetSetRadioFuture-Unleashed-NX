@@ -51,8 +51,7 @@ static int pb_verbose(void)
  * unhandled word) and the per-word rest_note gate go; s_gpu.unhandled_total
  * still counts every unhandled word, so the [GPU] report's total is exact
  * and only its per-method ranking is gone. It also supersedes
- * RECOMP_PB_REST, whose counts are the same kind of bookkeeping.
- *
+ * RECOMP_PB_REST, whose counts are the same kind of bookkeeping. */
 static int note_trim_on(void)
 {
     static int on = -1;
