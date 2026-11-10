@@ -25,6 +25,7 @@
  * Morton order, not a second one that can disagree with it. */
 #include "d3d8_swizzle.h"
 #include "nv2a_backend.h"
+#include "nv2a_ae16_neon.h"   /* NEON ARRAY_ELEMENT16 unpack (RECOMP_PB_NEONIDX) */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
@@ -1969,6 +1970,25 @@ static inline int pb_fast(void)
     return __builtin_expect(s_pb_fast >= 0, 1) ? s_pb_fast : pb_fast_init();
 }
 
+#if defined(__aarch64__)
+/* RECOMP_PB_NEONIDX=1: unpack ARRAY_ELEMENT16 runs with the NEON kernel
+ * in nv2a_ae16_neon.h instead of the scalar loop below. The kernel is
+ * bit-exact against that loop (idx[] + range + count) -- the desk
+ * harness in the campaign record is the gate it had to pass. Absent,
+ * or anything but '1': the shipped scalar loop, unchanged. Read once,
+ * like the other switches here: getenv per run would cost more than
+ * the unpack saves. */
+static int s_neonidx = -1;
+static inline int pb_neonidx(void)
+{
+    if (__builtin_expect(s_neonidx < 0, 0)) {
+        const char *e = getenv("RECOMP_PB_NEONIDX");
+        s_neonidx = e && e[0] == '1';
+    }
+    return s_neonidx;
+}
+#endif
+
 /* s_plain[m / 4]: 3D method m reaches only the shadow and note_unhandled.
  * Which handler takes a method depends on the method alone, except for the
  * ones excluded where this is set (nv2a_pb_exec_method's default case). */
@@ -2554,6 +2574,11 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     d = s_gpu.idx + s_gpu.idx_count;
                     /* Locals throughout, and the range found on the way, so
                      * raw_batch does not walk the indices again for it. */
+#if defined(__aarch64__)
+                    if (pb_neonidx())
+                        nv2a_ae16_unpack_neon(p, k, d, lo, hi, &lo, &hi);
+                    else
+#endif
                     for (i = 0; i < k; i++) {
                         uint32_t a = p[i] & 0xFFFFu, b = p[i] >> 16;
                         uint32_t mn = a < b ? a : b, mx = a < b ? b : a;
