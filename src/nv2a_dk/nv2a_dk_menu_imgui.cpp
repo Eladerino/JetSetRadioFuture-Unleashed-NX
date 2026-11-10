@@ -254,9 +254,29 @@ void feed_input(ImGuiIO &io, uint32_t buttons)
         { DK_MENU_TAB_RIGHT, ImGuiKey_GamepadR1 },
     };
     uint32_t changed = buttons ^ g_prev_buttons;
-    for (const auto &m : kMap)
-        if (changed & m.bit)
-            io.AddKeyEvent(m.key, (buttons & m.bit) != 0);
+    static bool cancel_fed;
+    for (const auto &m : kMap) {
+        if (!(changed & m.bit))
+            continue;
+        if (m.bit == DK_MENU_CANCEL) {
+            /* B-focus fix: the Cancel edge reaches ImGui only while a
+             * choice list is open or a modal is up; at the top level the
+             * press is swallowed, so B can no longer deselect the row.
+             * A forwarded press always gets its release (cancel_fed),
+             * so the key state never sticks. */
+            if (buttons & m.bit) {
+                if (g_choice_row >= 0 || dk_menu_modal_action() != DK_ACT_NONE) {
+                    io.AddKeyEvent(m.key, true);
+                    cancel_fed = true;
+                }
+            } else if (cancel_fed) {
+                io.AddKeyEvent(m.key, false);
+                cancel_fed = false;
+            }
+            continue;
+        }
+        io.AddKeyEvent(m.key, (buttons & m.bit) != 0);
+    }
     g_prev_buttons = buttons;
 }
 
