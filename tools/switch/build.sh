@@ -193,7 +193,9 @@ cmake -S port -B "$WORK_DIR/build-switch" \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
     -DXBOXRECOMP_DEKO3D="$DEKO3D" \
-    -DJSRF_GEN_OPT="${JSRF_GEN_OPT:-}" \
+    -DJSRF_GEN_OPT="${JSRF_GEN_OPT:--O2}" \
+    -DJSRF_GEN_OPT_O3_TUS="${JSRF_GEN_OPT_O3_TUS:-recomp_0000 recomp_0001 recomp_0002 recomp_0003 recomp_0004 recomp_0005 recomp_0006 recomp_0007 recomp_0009 recomp_dispatch recomp_stubs_unresolved recomp_tables_none}" \
+    -DJSRF_GUEST_REGS="${JSRF_GUEST_REGS:-ON}" \
     ${JSRF_ICON:+-DJSRF_ICON="$JSRF_ICON"}
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"
 

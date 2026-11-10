@@ -163,6 +163,38 @@ else()
     message(STATUS "generated code: the flags above only (JSRF_GEN_OPT unset)")
 endif()
 
+# JSRF_GEN_OPT_O3_TUS: generated TUs raised to -O3 over the JSRF_GEN_OPT
+# base. The Switch default raises every generated TU except recomp_0008:
+# recomp_0008 is the sole carrier TU of the -O3 dual-access-path crash
+# (the campaign bisect record, Phase 3, proven in both directions), so
+# it stays at the -O2 base -- belt-and-suspenders behind the structural
+# fix, at zero measured cost. tools/switch/build.sh forwards the list
+# on every build so no value lingers in the cache from an earlier one.
+if(SWITCH)
+    set(JSRF_GEN_OPT_O3_TUS_DEFAULT "recomp_0000 recomp_0001 recomp_0002 recomp_0003 recomp_0004 recomp_0005 recomp_0006 recomp_0007 recomp_0009 recomp_dispatch recomp_stubs_unresolved recomp_tables_none")
+else()
+    set(JSRF_GEN_OPT_O3_TUS_DEFAULT "")
+endif()
+set(JSRF_GEN_OPT_O3_TUS "${JSRF_GEN_OPT_O3_TUS_DEFAULT}" CACHE STRING
+    "Generated TUs additionally compiled -O3 over JSRF_GEN_OPT")
+set(JSRF_GEN_OPT_O3_TUS_LIST "${JSRF_GEN_OPT_O3_TUS}")
+string(REPLACE ";" " " JSRF_GEN_OPT_O3_TUS_LIST "${JSRF_GEN_OPT_O3_TUS_LIST}")
+separate_arguments(JSRF_GEN_OPT_O3_TUS_LIST NATIVE_COMMAND "${JSRF_GEN_OPT_O3_TUS_LIST}")
+
+# JSRF_GUEST_REGS (FIX2): the guest integer register file as AArch64
+# global register variables -- templates/runtime/recomp_guest_regs.h,
+# force-included ahead of the guest-code TUs, with
+# src/kernel/recomp_guest_regs.c as the call seam. Defaults ON for
+# Switch builds, OFF elsewhere; with it OFF every change it gates is
+# inert and the register file is the shipped thread-local one.
+if(SWITCH)
+    set(JSRF_GUEST_REGS_DEFAULT ON)
+else()
+    set(JSRF_GUEST_REGS_DEFAULT OFF)
+endif()
+set(JSRF_GUEST_REGS ${JSRF_GUEST_REGS_DEFAULT} CACHE BOOL
+    "Guest registers as AArch64 global register variables (FIX2)")
+
 # The runtime: everything in this repository outside port/ and launcher/.
 add_subdirectory("${JSRF_REPO}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 
@@ -242,8 +274,42 @@ endif()
 set_source_files_properties(${JSRF_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${JSRF_GEN_COMPILE_OPTIONS}")
 # And the run's own log says it ([MANUAL] generated code: ..., from
 # recomp_manual.c), so a test run's log tells which build it came from.
+set(JSRF_GEN_OPT_DESC "${JSRF_GEN_OPT}")
+if(JSRF_GEN_OPT_O3_TUS_LIST)
+    string(REPLACE ";" "," _jsrf_o3_csv "${JSRF_GEN_OPT_O3_TUS_LIST}")
+    set(JSRF_GEN_OPT_DESC "${JSRF_GEN_OPT_DESC} O3[${_jsrf_o3_csv}]")
+endif()
 set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/recomp_manual.c" APPEND PROPERTY
-    COMPILE_DEFINITIONS "JSRF_GEN_OPT_DESC=\"${JSRF_GEN_OPT}\"")
+    COMPILE_DEFINITIONS "JSRF_GEN_OPT_DESC=\"${JSRF_GEN_OPT_DESC}\"")
+
+# JSRF_GEN_OPT_O3_TUS application: -O3 appended after the base options
+# for the listed TUs only, so it wins over JSRF_GEN_OPT there and
+# nowhere else.
+foreach(_src IN LISTS JSRF_GEN_SOURCES)
+    get_filename_component(_n "${_src}" NAME_WE)
+    if(_n IN_LIST JSRF_GEN_OPT_O3_TUS_LIST)
+        set_property(SOURCE "${_src}" APPEND PROPERTY COMPILE_OPTIONS "-O3")
+    endif()
+endforeach()
+
+# JSRF_GUEST_REGS application: the register declarations force-included
+# ahead of everything else in the guest-code TUs, the define beside
+# them, appended last so a gen object's recorded options read
+# ..., -O3, -include ..., -DJSRF_GUEST_REGS. The runtime TUs under
+# src/ carry the same block in their own CMakeLists.
+if(JSRF_GUEST_REGS)
+    set(JSRF_GUEST_REGS_HDR "${JSRF_REPO}/templates/runtime/recomp_guest_regs.h")
+    foreach(_src IN LISTS JSRF_GEN_SOURCES)
+        set_property(SOURCE "${_src}" APPEND PROPERTY
+            COMPILE_OPTIONS "-include;${JSRF_GUEST_REGS_HDR};-DJSRF_GUEST_REGS")
+    endforeach()
+    set_property(SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/recomp_manual.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/main.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/switch/jsrf_switch.c"
+        APPEND PROPERTY
+        COMPILE_OPTIONS "-include;${JSRF_GUEST_REGS_HDR};-DJSRF_GUEST_REGS")
+endif()
 
 if(ANDROID)
     # Android: the engine is libmain.so, which SDL's Java side loads and whose

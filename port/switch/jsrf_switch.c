@@ -78,12 +78,28 @@ Result __real_threadCreate(Thread *t, ThreadFunc entry, void *arg,
 
 typedef struct { ThreadFunc entry; void *arg; } TpStart;
 
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+/* FIX2: threads created straight through libnx (this wrapper exists
+ * for them) start through the register seam too, like the
+ * Win32-compat trampoline's threads. */
+static void *tp_entry_adapter(void *v)
+{
+    TpStart *t = (TpStart *)v;
+    t->entry(t->arg);
+    return NULL;
+}
+#endif
+
 static void tp_thread_entry(void *p)
 {
     TpStart s = *(TpStart *)p;
     free(p);
     tp_publish();
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+    jsrf_guest_regs_call(tp_entry_adapter, &s);
+#else
     s.entry(s.arg);
+#endif
 }
 
 Result __wrap_threadCreate(Thread *t, ThreadFunc entry, void *arg,

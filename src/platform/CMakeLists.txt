@@ -47,3 +47,11 @@ else()
     target_link_libraries(platform PUBLIC Threads::Threads)
     target_compile_options(platform PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
 endif()
+
+# FIX2 (JSRF_GUEST_REGS): the thread trampoline's TU gets the register
+# declarations force-included, like the generated code does.
+if(JSRF_GUEST_REGS)
+    set_source_files_properties(win32_compat.c
+        PROPERTIES COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_SOURCE_DIR}/../../templates/runtime/recomp_guest_regs.h;-DJSRF_GUEST_REGS")
+endif()

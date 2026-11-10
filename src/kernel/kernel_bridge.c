@@ -54,8 +54,10 @@ uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
  * xbox_memory_layout.h and must match the definitions there -- a plain extern
  * here binds to the TLS template rather than the calling thread's copy, which
  * reads as every register being zero. */
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
 extern RECOMP_TLS uint32_t g_seh_ebp;
 /* FP/SIMD lifted state, saved/restored by kernel_raise_interrupt_here.
@@ -63,7 +65,9 @@ extern RECOMP_TLS uint32_t g_seh_ebp;
  * double[8], g_fp_cmp is int, g_fp_cc is uint16_t, and g_xmm0..g_xmm7 /
  * g_mm0..g_mm7 are separate RECOMP_TLS globals of the union types
  * RecompXmm / RecompMmx declared in xbox_memory_layout.h. */
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS int g_fp_top;
+#endif
 extern RECOMP_TLS double g_fp_stack[8];
 extern RECOMP_TLS int g_fp_cmp;
 extern RECOMP_TLS uint16_t g_fp_cc;

@@ -123,15 +123,19 @@ int recomp_dispatch_init(void);
  * host side then writes g_esp somewhere the generated code never reads, so the
  * guest starts with every register at zero and faults immediately, having
  * apparently ignored the setup that visibly ran. */
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 extern RECOMP_TLS uint32_t g_seh_ebp;
 /* x87 and SSE state. Global for the same reason the volatile GPRs are: one
  * guest routine can lift to several C functions, so a value written in one
  * body is read in the next. Defined in xbox_memory_layout.c like the rest of
  * the register file. */
 extern RECOMP_TLS double g_fp_stack[8];
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS int g_fp_top;
+#endif
 extern RECOMP_TLS uint16_t g_fp_control_word;
 extern RECOMP_TLS int g_fp_cmp;
 extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
@@ -692,7 +696,20 @@ static LONG WINAPI win_crash_filter(EXCEPTION_POINTERS *ep)
     _exit(139);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+
 #endif /* _WIN32 */
+
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+/* FIX2: the guest entry runs through the register seam
+ * (templates/runtime/recomp_guest_regs.h). */
+static void *jsrf_xbe_entry_adapter(void *unused)
+{
+    (void)unused;
+    g_esp = XBOX_STACK_TOP;
+    xbe_entry_point();
+    return NULL;
+}
+#endif
 
 /* ── WinMain ───────────────────────────────────────────────── */
 
@@ -1011,7 +1028,11 @@ static int host_main(void)
 #endif
 
     { extern void xbox_guest_lock_acquire(void); xbox_guest_lock_acquire(); }
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+    jsrf_guest_regs_call(jsrf_xbe_entry_adapter, NULL);
+#else
     xbe_entry_point();
+#endif
 
     printf("\nGame returned. Cleaning up...\n");
 
@@ -1046,7 +1067,11 @@ static void *guest_thread_main(void *arg)
      */
     g_esp = XBOX_STACK_TOP;
     { extern void xbox_guest_lock_acquire(void); xbox_guest_lock_acquire(); }
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+    jsrf_guest_regs_call(jsrf_xbe_entry_adapter, NULL);
+#else
     xbe_entry_point();
+#endif
     g_guest_returned = 1;
     return NULL;
 }

@@ -19,8 +19,10 @@
 
 #include "xbox_memory_layout.h"
 
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 
 /* A run that recurses produces trace lines without limit, and the useful
  * window is rarely the first few thousand. The budget stops a diagnostic from
@@ -211,7 +213,9 @@ void recomp_trace_enable_hooks(void)
  * reported. A diagnostic that cries wolf is worse than none -- three of them
  * were built last night and two were wrong.
  */
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS int g_fp_top;
+#endif
 int g_recomp_fpcheck;
 
 #define FPS_MAX 512

@@ -1435,7 +1435,20 @@ static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  * like the definitions it replaces. To every other file these are
  * ordinary thread-locals. recomp_fast_tls_selfcheck() below checks the
  * layout. -DRECOMP_NO_REG_BLOCK goes back to separate definitions. */
-#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+/* FIX2: the eight pinned names are global register variables
+ * (templates/runtime/recomp_guest_regs.h) and have no TLS storage to
+ * lay out here; only the unpinned x87 stack keeps its block slot. */
+#define RECOMP_REG_BLOCK_SYM(name, size)                                      \
+    "\t.globl " #name "\n\t.type " #name ", %tls_object\n"                  \
+    "\t.size " #name ", " #size "\n" #name ":\n\t.zero " #size "\n"
+__asm__("\t.pushsection .tbss.recomp_regs,\"awT\",%nobits\n"
+        "\t.balign 16\n"
+        RECOMP_REG_BLOCK_SYM(g_fp_stack, 64)
+        "\t.popsection\n");
+#undef RECOMP_REG_BLOCK_SYM
+extern RECOMP_TLS double g_fp_stack[8];
+#elif defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
 #define RECOMP_REG_BLOCK_SYM(name, size)                                      \
     "\t.globl " #name "\n\t.type " #name ", %tls_object\n"                  \
     "\t.size " #name ", " #size "\n" #name ":\n\t.zero " #size "\n"
@@ -1470,7 +1483,7 @@ RECOMP_TLS uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
  * it always returns 0. Definition only; no call site here. */
 int recomp_fast_tls_selfcheck(void)
 {
-#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
+#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK) && !defined(JSRF_GUEST_REGS_IN_CPU)
     const char *base = (const char *)&g_eax;
     int mismatches = 0;
     if ((const char *)&g_ecx - base != 4) mismatches++;
@@ -1633,7 +1646,9 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
 RECOMP_TLS uint32_t g_seh_ebp = 0;
 #ifdef RECOMP_FP_DEFINED_HERE   /* else in the REGISTER BLOCK above */
 RECOMP_TLS double g_fp_stack[8];
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 RECOMP_TLS int g_fp_top = 0;
+#endif
 #endif
 /* x87 control and status. The reset default masks every exception and
  * rounds to nearest, which is what the CRT expects before _control87. */
@@ -1644,7 +1659,9 @@ RECOMP_TLS uint16_t g_fp_cc = 0x4000;
 
 /* Defined below, with the other guest registers. */
 extern RECOMP_TLS uint32_t g_ebp;
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi;
+#endif
 
 /* ---- non-local jumps ---------------------------------------------------
  *
@@ -1678,6 +1695,11 @@ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
     return &s_jmp[s_jmp_used++].native;
 }
 
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
+/* FIX2: compiled out under register variables -- its restore ordering
+ * would put setjmp-time values back into w19-w27 over the by-name
+ * restores. It has zero callers in this title; documented, not relied
+ * on. */
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
 {
     const uint8_t *mem = (const uint8_t *)g_memory_offset;
@@ -1706,6 +1728,7 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
     }
     return 0;
 }
+#endif /* !JSRF_GUEST_REGS_IN_CPU */
 
 /* Watchdog: dump the guest call stack if the title stops making progress.
  *
@@ -1818,10 +1841,16 @@ void xbox_WatchdogStart(void)
     /* Taken on the guest thread: g_esp is thread-local, so the watchdog has to
      * be handed the address of the one that matters rather than reading its
      * own, which is always zero. */
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
     s_watchdog_esp = &g_esp;
     s_watchdog_regs[0] = &g_eax; s_watchdog_regs[1] = &g_ecx;
     s_watchdog_regs[2] = &g_edx; s_watchdog_regs[3] = &g_ebx;
     s_watchdog_regs[4] = &g_esi; s_watchdog_regs[5] = &g_edi;
+#else
+    /* FIX2: the pinned registers have no address to hand the watchdog,
+     * so the snapshot stays unset in register mode; restoring it via a
+     * publish-shadow is follow-up work, not part of this change. */
+#endif
     h = CreateThread(NULL, 0, xbox_watchdog_thread, NULL, 0, NULL);
     if (h)
         CloseHandle(h);

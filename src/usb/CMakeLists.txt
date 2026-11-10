@@ -13,3 +13,11 @@ if(MSVC)
 else()
     target_compile_options(xbox_usb PRIVATE -Wall -Wextra -O2)
 endif()
+
+# FIX2 (JSRF_GUEST_REGS): the OHCI TU gets the register declarations
+# force-included, like the generated code does.
+if(JSRF_GUEST_REGS)
+    set_source_files_properties(ohci.c
+        PROPERTIES COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_SOURCE_DIR}/../../templates/runtime/recomp_guest_regs.h;-DJSRF_GUEST_REGS")
+endif()

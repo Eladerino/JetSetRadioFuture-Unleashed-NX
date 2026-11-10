@@ -23,6 +23,7 @@ set(KERNEL_SOURCES
     xbox_memory_layout.c
     icall_feedback.c
     recomp_trace.c
+    recomp_guest_regs.c
     nv2a_pb_scan.c
 )
 
@@ -84,3 +85,12 @@ else()
 endif()
 
 target_compile_definitions(xbox_kernel PRIVATE $<$<CONFIG:Debug>:_DEBUG>)
+
+# FIX2 (JSRF_GUEST_REGS): the kernel TUs that run guest code get the
+# register declarations force-included, like the generated code does.
+if(JSRF_GUEST_REGS)
+    set_source_files_properties(kernel_bridge.c xbox_memory_layout.c
+        kernel_rtl.c recomp_trace.c recomp_guest_regs.c
+        PROPERTIES COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_SOURCE_DIR}/../../templates/runtime/recomp_guest_regs.h;-DJSRF_GUEST_REGS")
+endif()

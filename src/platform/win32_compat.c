@@ -757,6 +757,19 @@ BOOL ReleaseMutex(HANDLE h)
 void sw_thread_spread(const char *what, unsigned id);   /* port/switch */
 #endif
 
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+/* FIX2: guest-capable threads start through the register seam, so the
+ * pinned registers begin zeroed on a fresh thread and the host's own
+ * values come back when the thread proc returns. */
+struct jsrf_start_ctx { LPTHREAD_START_ROUTINE start; LPVOID param; DWORD rc; };
+static void *jsrf_start_adapter(void *v)
+{
+    struct jsrf_start_ctx *c = (struct jsrf_start_ctx *)v;
+    c->rc = c->start(c->param);
+    return NULL;
+}
+#endif
+
 static void *thread_trampoline(void *arg)
 {
     w32_object *o = (w32_object *)arg;
@@ -772,7 +785,16 @@ static void *thread_trampoline(void *arg)
         pthread_cond_wait(&o->gate, &o->lock);
     pthread_mutex_unlock(&o->lock);
 
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+    DWORD rc = 0;
+    if (o->start) {
+        struct jsrf_start_ctx sc = { o->start, o->start_param, 0 };
+        jsrf_guest_regs_call(jsrf_start_adapter, &sc);
+        rc = sc.rc;
+    }
+#else
     DWORD rc = o->start ? o->start(o->start_param) : 0;
+#endif
 
     pthread_mutex_lock(&o->lock);
     o->exit_code = rc;
