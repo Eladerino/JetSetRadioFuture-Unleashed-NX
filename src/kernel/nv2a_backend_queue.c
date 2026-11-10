@@ -700,6 +700,18 @@ void nv2a_backend_queue_store(volatile uint32_t *word, uint32_t value)
     st->pad = 0;
     st_stores_queued++;
     q_commit(size, 1);
+    /* Read-later mode: this store was gated into the ring, so the
+     * guest may already be waiting on its delivery -- and every
+     * other hand-over trigger is itself produced by guest progress
+     * (a flip ends a frame the blocked guest cannot finish, a sync
+     * is issued by a guest that is not blocked, the batch thresholds
+     * need records the guest will never commit). A final span under
+     * both thresholds then waits forever: that is the ZC stall
+     * (seven records, 4,912 B, the gated store at its end). Hand
+     * the span over now. Copy mode keeps the shipped discipline
+     * exactly; only the read-later path gains the trigger. */
+    if (!s_copy_vertices)
+        q_flush();
 }
 
 void nv2a_backend_queue_call(void (*fn)(void))
@@ -721,6 +733,10 @@ void nv2a_backend_queue_call(void (*fn)(void))
     c->fn = fn;
     c->pad = 0;
     q_commit(size, 1);
+    if (!s_copy_vertices)               /* as in queue_store above: a
+                                         * gated record hands its span
+                                         * over at queue time */
+        q_flush();
 }
 
 /* ── The queue's thread ───────────────────────────────────────────── */
