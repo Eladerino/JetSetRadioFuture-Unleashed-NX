@@ -1673,6 +1673,35 @@ static int imm_attr_write(uint32_t method, uint32_t param)
     return 1;
 }
 
+static int capture_render_state(uint32_t method, uint32_t param);
+
+/* RECOMP_DK_CAPTURE_FAST: pre-test capture_render_state's method set so
+ * the default case's majority -- words the switch cannot take -- skip the
+ * call and its 19-case switch. The set is the switch's own: the
+ * 0x0300-0x03A0 cluster plus its two strays (0x0214, 0x1D8C). The
+ * pre-test is a superset of the cases (in-cluster methods the switch
+ * does not take still fall through it and return 0), so the taker and
+ * its side effects are unchanged. Absent (or 0), the chain calls
+ * capture_render_state exactly as shipped. */
+static int capture_fast_on(void)
+{
+    static int on = -1;
+
+    if (on == -1) {
+        const char *setting = getenv("RECOMP_DK_CAPTURE_FAST");
+        on = setting != NULL && strcmp(setting, "0") != 0;
+    }
+    return on;
+}
+
+static inline int capture_render_state_fast(uint32_t method, uint32_t param)
+{
+    if (method == 0x0214 || method == 0x1D8C
+            || (method >= 0x0300 && method <= 0x03A0))
+        return capture_render_state(method, param);
+    return 0;
+}
+
 /* The render state the back end gets with every batch (Nv2aRenderState),
  * caught as its methods go by. 1 if `method` was one of them. */
 #define RS_WORD(m, field) case m: rs->field = param; return 1
@@ -2448,7 +2477,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         break;
 
     default:
-        if (capture_render_state(method, param) || capture_transform(method, param)
+        if ((capture_fast_on() ? capture_render_state_fast(method, param)
+                               : capture_render_state(method, param))
+                || capture_transform(method, param)
                 || vp_method(method, param))
             break;
         if (method >= NV_TEX_FIRST && method <= NV_TEX_LAST)
