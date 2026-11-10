@@ -63,6 +63,26 @@ static int note_trim_on(void)
     }
     return on;
 }
+
+/* RECOMP_PB_DATASHADOW=1: the three index-data ports (ARRAY_ELEMENT16,
+ * ARRAY_ELEMENT32, INLINE_ARRAY) stop maintaining their register-shadow
+ * words. The reader audit behind this (the campaign's decode-data study):
+ * no consumer reads shadow words 0x600/0x602/0x606 through any alias, so
+ * the only exposure is that regs[m/4] stops being the title's last
+ * written value for three write-only data ports -- that is the whole
+ * contract change. Absent or 0: every word maintains the shadow exactly
+ * as shipped. */
+static int datashadow_on(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PB_DATASHADOW");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
 void nv2a_pb_exec_report(void);
 
 /* Would writing this surface land on the title's own image?
@@ -2211,7 +2231,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     }
 
     if (subch == 0) {
-        shadow_write(method, param);
+        if (!datashadow_on() || (method != NV097_ARRAY_ELEMENT16 && method != 0x1808
+                && method != NV097_INLINE_ARRAY))
+            shadow_write(method, param);
         if (method < 0x2000u && s_plain[method / 4]) {
             note_unhandled(method, param);
             return;
@@ -2591,6 +2613,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
 {
     uint32_t i = 0;
     const int note_trim = note_trim_on();
+    const int datashadow = datashadow_on();
     uint32_t trim_noted = 0;
 
     s_ws.words += n;
@@ -2622,7 +2645,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     s_gpu.idx_hi = hi;
                     s_gpu.idx_count += 2 * k;
                 }
-                shadow_run(method, p, n);
+                if (!datashadow) shadow_run(method, p, n);
                 s_ws.idx += n;
                 return;
             case 0x1808:                        /* ARRAY_ELEMENT32 */
@@ -2640,7 +2663,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     s_gpu.idx_hi = hi;
                     s_gpu.idx_count += k;
                 }
-                shadow_run(method, p, n);
+                if (!datashadow) shadow_run(method, p, n);
                 s_ws.idx += n;
                 return;
             case NV097_INLINE_ARRAY:
@@ -2650,7 +2673,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     memcpy(s_gpu.inline_buf + s_gpu.inline_count, p, (size_t)k * 4);
                     s_gpu.inline_count += k;
                 }
-                shadow_run(method, p, n);
+                if (!datashadow) shadow_run(method, p, n);
                 s_ws.inl += n;
                 return;
             default:
