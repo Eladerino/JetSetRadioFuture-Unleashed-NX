@@ -175,13 +175,23 @@ extern uint32_t g_xbox_code_hi;
 #  define RECOMP_TLS _Thread_local
 #endif
 
+#if defined(JSRF_GUEST_REGS_IN_CPU)
+/* FIX2 (spike): the pinned integer registers are global register
+ * variables (recomp_guest_regs.h, force-included ahead of this
+ * header); they have no TLS storage and must not be redeclared
+ * here. g_fp_top is pinned too (w27); only the unpinned x87
+ * stack below stays a thread-local declaration. */
+#else
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 
 /* x87 stack. Per-thread for the same reason the integer registers are:
  * arguments are passed in st(0)/st(1) across call boundaries. */
 extern RECOMP_TLS double g_fp_stack[8];
+#if !defined(JSRF_GUEST_REGS_IN_CPU)
 extern RECOMP_TLS int g_fp_top;
+#endif
 
 /* ================================================================
  * Support for skeammer's guest-code passes (used with his permission)
@@ -206,31 +216,28 @@ extern RECOMP_TLS int g_fp_top;
 
 /* Leaf load/store helpers: what the passes load the locals from and
  * spill them back through, so a spill/reload is one access rather than
- * a call. On the Switch the registers are one block in a fixed order
- * (src/kernel/xbox_memory_layout.c), reached from &g_eax at the
- * offsets below -- eax 0, ecx 4, edx 8, ebx 12, esi 16, edi 20,
- * esp 24, fp_top 28 (as int32_t), fp_stack at 32 -- so the helpers go
- * through those offsets; everywhere else they name the thread-locals
- * directly. Design: skeammer's. */
-#if defined(__SWITCH__) && defined(__aarch64__) && !defined(RECOMP_NO_REG_BLOCK)
-static inline uint32_t recomp_leaf_ld_eax(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 0); }
-static inline void recomp_leaf_st_eax(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 0) = v; }
-static inline uint32_t recomp_leaf_ld_ecx(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 4); }
-static inline void recomp_leaf_st_ecx(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 4) = v; }
-static inline uint32_t recomp_leaf_ld_edx(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 8); }
-static inline void recomp_leaf_st_edx(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 8) = v; }
-static inline uint32_t recomp_leaf_ld_ebx(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 12); }
-static inline void recomp_leaf_st_ebx(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 12) = v; }
-static inline uint32_t recomp_leaf_ld_esi(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 16); }
-static inline void recomp_leaf_st_esi(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 16) = v; }
-static inline uint32_t recomp_leaf_ld_edi(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 20); }
-static inline void recomp_leaf_st_edi(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 20) = v; }
-static inline uint32_t recomp_leaf_ld_esp(void) { return *(const uint32_t *)((const char *)(const void *)&g_eax + 24); }
-static inline void recomp_leaf_st_esp(uint32_t v) { *(uint32_t *)((char *)(void *)&g_eax + 24) = v; }
-static inline double *recomp_fp_base(void) { return (double *)((char *)(void *)&g_eax + 32); }
-static inline int recomp_fp_top_ld(void) { return (int)*(const int32_t *)((const char *)(const void *)&g_eax + 28); }
-static inline void recomp_fp_top_st(int v) { *(int32_t *)((char *)(void *)&g_eax + 28) = (int32_t)v; }
-#else
+ * a call. Design: skeammer's.
+ *
+ * FIX1 RESPELL (spike only, 2026-11-09; Cold Fear pattern): the helpers
+ * name the thread-locals directly on every platform. The Switch /
+ * aarch64 branch used to reach each register through a byte offset
+ * from &g_eax (eax 0, ecx 4, edx 8, ebx 12, esi 16, edi 20, esp 24,
+ * fp_top 28, fp_stack 32), a second, pointer spelling of the same
+ * storage. An unconverted caller names g_esp directly, and at -O3 GCC
+ * treated the two spellings as non-aliasing and moved a by-name load
+ * across an inlined pointer-path spill (BISECT-DESK: the PUSH32 load
+ * in sub_00194ADD executing before the inlined writer's esp spill).
+ * Cold Fear's toolkit defines these accessors by name only
+ * (RECOMP_LEAF_REG: return g_<r>; / g_<r> = v;), with no pointer path
+ * anywhere in generated code, and ships that shape at -O3. The
+ * register block in src/kernel/xbox_memory_layout.c lays the
+ * thread-locals out at exactly the offsets above (checked by
+ * recomp_fast_tls_selfcheck), so naming each register is the same
+ * access, with one spelling. esp is included: these are the
+ * full-function helpers. Cold Fear excludes esp only from its
+ * leaf-only localisation (interrupt delivery pushes through the
+ * global there); its full _localize_registers localises esp through
+ * these same by-name accessors, as jsrf_reg_locals.py does. */
 static inline uint32_t recomp_leaf_ld_eax(void) { return g_eax; }
 static inline void recomp_leaf_st_eax(uint32_t v) { g_eax = v; }
 static inline uint32_t recomp_leaf_ld_ecx(void) { return g_ecx; }
@@ -248,7 +255,6 @@ static inline void recomp_leaf_st_esp(uint32_t v) { g_esp = v; }
 static inline double *recomp_fp_base(void) { return g_fp_stack; }
 static inline int recomp_fp_top_ld(void) { return g_fp_top; }
 static inline void recomp_fp_top_st(int v) { g_fp_top = v; }
-#endif
 
 /* Every value the fp_locals pass pushes onto its local x87 stack goes
  * through here: an empty-asm barrier the compiler cannot see through.
@@ -1884,12 +1890,52 @@ void xbox_GuestCpuPreempt(uint32_t va);
 #else
 #define RECOMP_BACK_EDGE_MEM() ((void)0)
 #endif
+/* F1 (Claude's repo review, verified 2026-11-06 in
+ * CLAUDE-REVIEW-VERIFY.md): in a translation unit rewritten by
+ * jsrf_reg_locals.py -- which defines RECOMP_REG_LOCALS before this
+ * header is included, per the pass's own file note -- a converted
+ * function keeps the guest registers in C locals between the pass's
+ * spill points. The taken branch below is a re-entry point the pass
+ * does not wrap: xbox_GuestCpuPreempt can deliver an interrupt on
+ * this thread, delivery builds the ISR frame from the thread-local
+ * register block (g_esp above all) and runs guest code that reads
+ * and writes that block, so the block must hold the current
+ * registers before the call and the locals must re-import whatever
+ * delivery left in it after. Publish and import therefore bracket
+ * the call, on the taken branch only: the untaken path costs exactly
+ * what it costs without this fix. Both go through the leaf helpers
+ * and name every register the pass localises; a register the
+ * function did not localise still names the thread-local itself
+ * here, so its publish is an identity store and its import an
+ * identity load, and an unconverted function in a rewritten file is
+ * likewise unaffected. The x87 stack lives in memory under this
+ * pass (only its top index is a local), so the top is all the FP
+ * state there is to publish. In every other translation unit both
+ * macros are empty and RECOMP_BACK_EDGE is unchanged. */
+#if defined(RECOMP_REG_LOCALS)
+#define RECOMP_RL_PUBLISH() \
+    do { recomp_leaf_st_eax(g_eax); recomp_leaf_st_ecx(g_ecx); \
+         recomp_leaf_st_edx(g_edx); recomp_leaf_st_ebx(g_ebx); \
+         recomp_leaf_st_esi(g_esi); recomp_leaf_st_edi(g_edi); \
+         recomp_leaf_st_esp(g_esp); recomp_fp_top_st(g_fp_top); } while (0)
+#define RECOMP_RL_IMPORT() \
+    do { g_eax = recomp_leaf_ld_eax(); g_ecx = recomp_leaf_ld_ecx(); \
+         g_edx = recomp_leaf_ld_edx(); g_ebx = recomp_leaf_ld_ebx(); \
+         g_esi = recomp_leaf_ld_esi(); g_edi = recomp_leaf_ld_edi(); \
+         g_esp = recomp_leaf_ld_esp(); g_fp_top = recomp_fp_top_ld(); } while (0)
+#else
+#define RECOMP_RL_PUBLISH() ((void)0)
+#define RECOMP_RL_IMPORT() ((void)0)
+#endif
 #define RECOMP_BACK_EDGE(va) \
     do { RECOMP_BACK_EDGE_MEM(); \
          if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_cpu_preempt)) { \
              if (RECOMP_LOAD_RELAXED32(&g_xbox_guest_callback_depth) > 0 \
-                 || RECOMP_UNLIKELY((++g_recomp_tick & 0xFFu) == 0u)) \
+                 || RECOMP_UNLIKELY((++g_recomp_tick & 0xFFu) == 0u)) { \
+                 RECOMP_RL_PUBLISH(); \
                  xbox_GuestCpuPreempt(va); \
+                 RECOMP_RL_IMPORT(); \
+             } \
          } } while (0)
 
 /* Copy-loop front door (skeammer's jsrf_copy_loops.py): the lifted MMX
