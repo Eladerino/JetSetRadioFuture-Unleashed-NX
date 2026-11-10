@@ -658,7 +658,7 @@ static int  sw_get(intptr_t a) { return switch_get(&k_sw[a]); }
 static void sw_set(intptr_t a, int on) { (void)on; switch_flip(&k_sw[a]); }
 static const DkRow k_controller_rows[] = {
     SECTION("CAMERA"),
-    CHOICE("RIGHT-STICK CAMERA", "Off: the right stick is the game's own (its first-person look). Camera: the stick turns the view and the skater keeps his heading. Tracking: turning the view turns the skater with it. Applies at once; kept in the settings file.", rcam_get, rcam_set, k_rcam_choices),
+    CHOICE("RIGHT-STICK CAMERA", "Off: the right stick is the game's own (its first-person look). Camera: the stick turns the view and the skater's heading with it, so up on the left stick goes where the camera looks. Tracking: the stick turns the view only; the skater keeps his heading. Applies at once; kept in the settings file.", rcam_get, rcam_set, k_rcam_choices),
     CHECK("CAMERA EASES BACK WHEN RELEASED", "After you let go of the right stick, the view drifts back behind the skater. Off on the Switch by default: the held view is the point, and the L trigger already resets the turn. Kept in the settings file.", ease_get, ease_set),
     CHECK("CAMERA HOLDS ITS VIEW", "With the ease back on, it only drifts home while the movement stick is also untouched: pan, let go of the right stick and keep skating, and the view stays where you put it. This build's camera trial; turn it off for the shipped behaviour. Kept in the settings file.", hold_get, hold_set),
     SECTION("PAD"),
