@@ -1244,6 +1244,9 @@ int nv_switch_main(int argc, char **argv, int (*host)(void))
     drop_custom_tracks_readme(tracks);
 
     open_log(base);
+#if defined(JSRF_PGO_GENERATE)
+    { extern void jsrf_pgo_start(const char *base); jsrf_pgo_start(base); }
+#endif
     { int s = cfg_get_int(cfg, "scale", 1);
       snprintf(scale, sizeof scale, "%d", s >= 1 && s <= 4 ? s : 1);
       setenv(JSRF_SCALE_ENV, scale, 0); }

@@ -195,6 +195,16 @@ endif()
 set(JSRF_GUEST_REGS ${JSRF_GUEST_REGS_DEFAULT} CACHE BOOL
     "Guest registers as AArch64 global register variables (FIX2)")
 
+# JSRF_PGO_GENERATE / JSRF_PGO_USE (gen-PGO campaign): instrument the
+# generated TUs with -fprofile-generate, or rebuild them against a
+# collected profile with -fprofile-use. Mutually exclusive. Host TUs
+# are never instrumented. The run's DESC gains " PGO[gen]".
+option(JSRF_PGO_GENERATE "Instrument the generated TUs for profile collection" OFF)
+option(JSRF_PGO_USE "Build the generated TUs against a collected profile" OFF)
+if(JSRF_PGO_GENERATE AND JSRF_PGO_USE)
+    message(FATAL_ERROR "JSRF_PGO_GENERATE and JSRF_PGO_USE are mutually exclusive")
+endif()
+
 # The runtime: everything in this repository outside port/ and launcher/.
 add_subdirectory("${JSRF_REPO}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 
@@ -279,6 +289,9 @@ if(JSRF_GEN_OPT_O3_TUS_LIST)
     string(REPLACE ";" "," _jsrf_o3_csv "${JSRF_GEN_OPT_O3_TUS_LIST}")
     set(JSRF_GEN_OPT_DESC "${JSRF_GEN_OPT_DESC} O3[${_jsrf_o3_csv}]")
 endif()
+if(JSRF_PGO_GENERATE OR JSRF_PGO_USE)
+    set(JSRF_GEN_OPT_DESC "${JSRF_GEN_OPT_DESC} PGO[gen]")
+endif()
 set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/recomp_manual.c" APPEND PROPERTY
     COMPILE_DEFINITIONS "JSRF_GEN_OPT_DESC=\"${JSRF_GEN_OPT_DESC}\"")
 
@@ -309,6 +322,39 @@ if(JSRF_GUEST_REGS)
         "${CMAKE_CURRENT_SOURCE_DIR}/switch/jsrf_switch.c"
         APPEND PROPERTY
         COMPILE_OPTIONS "-include;${JSRF_GUEST_REGS_HDR};-DJSRF_GUEST_REGS")
+endif()
+
+# JSRF_PGO application: the profile flags go on the generated TUs
+# only, appended after every other per-TU option (the recorded
+# per-object order is ..., -O3, -include ..., -DJSRF_GUEST_REGS,
+# -fprofile-generate, ...), and the generate flag on the link.
+if(JSRF_PGO_GENERATE OR JSRF_PGO_USE)
+    if(JSRF_PGO_GENERATE)
+        set(_jsrf_pgo_flag "-fprofile-generate")
+    else()
+        # -fprofile-correction: the gen TUs execute on multiple worker
+        # threads with -fprofile-update=single counters, so harvested
+        # counts tear slightly and are not flow-consistent; let GCC
+        # repair them instead of rejecting the profile outright.
+        set(_jsrf_pgo_flag "-fprofile-use;-fprofile-correction")
+    endif()
+    foreach(_src IN LISTS JSRF_GEN_SOURCES)
+        set_property(SOURCE "${_src}" APPEND PROPERTY
+            COMPILE_OPTIONS "${_jsrf_pgo_flag};-fno-profile-values;-fprofile-update=single")
+    endforeach()
+endif()
+
+# The gcda path strip is baked from the build directory's depth, and
+# the pgo runtime TU joins the Switch glue whenever this tree builds
+# for the console; its start call is gated on JSRF_PGO_GENERATE.
+string(REPLACE "/" ";" _jsrf_bin_parts "${CMAKE_BINARY_DIR}")
+list(LENGTH _jsrf_bin_parts _jsrf_bin_n)
+math(EXPR JSRF_PGO_GCOV_STRIP "${_jsrf_bin_n} - 1")
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/switch/jsrf_pgo.c" APPEND PROPERTY
+    COMPILE_DEFINITIONS "JSRF_PGO_GCOV_STRIP=${JSRF_PGO_GCOV_STRIP}")
+if(JSRF_PGO_GENERATE)
+    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/switch/jsrf_switch.c" APPEND PROPERTY
+        COMPILE_DEFINITIONS "JSRF_PGO_GENERATE=1")
 endif()
 
 if(ANDROID)
@@ -386,7 +432,16 @@ if(SWITCH)
     # "xiso.h" the unpacker shares with Android, plus src/ for main.c's
     # "platform/switch_backtrace.h".
     target_sources(jsrf_recomp PRIVATE switch/jsrf_switch.c
-                                       switch/switch_posix.c)
+                                       switch/switch_posix.c
+        switch/jsrf_pgo.c)
+
+# The profile flag also goes on the link (see the PGO block above);
+# here, after the target exists.
+if(JSRF_PGO_GENERATE)
+    target_link_options(jsrf_recomp PRIVATE -fprofile-generate)
+elseif(JSRF_PGO_USE)
+    target_link_options(jsrf_recomp PRIVATE -fprofile-use)
+endif()
     if(XBOXRECOMP_DEKO3D)
         target_compile_definitions(jsrf_recomp PRIVATE JSRF_DEKO3D=1)
     endif()

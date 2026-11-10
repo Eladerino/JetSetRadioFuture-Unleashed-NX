@@ -196,6 +196,8 @@ cmake -S port -B "$WORK_DIR/build-switch" \
     -DJSRF_GEN_OPT="${JSRF_GEN_OPT:--O2}" \
     -DJSRF_GEN_OPT_O3_TUS="${JSRF_GEN_OPT_O3_TUS:-recomp_0000 recomp_0001 recomp_0002 recomp_0003 recomp_0004 recomp_0005 recomp_0006 recomp_0007 recomp_0009 recomp_dispatch recomp_stubs_unresolved recomp_tables_none}" \
     -DJSRF_GUEST_REGS="${JSRF_GUEST_REGS:-ON}" \
+    -DJSRF_PGO_GENERATE="${JSRF_PGO_GENERATE:-OFF}" \
+    -DJSRF_PGO_USE="${JSRF_PGO_USE:-OFF}" \
     ${JSRF_ICON:+-DJSRF_ICON="$JSRF_ICON"}
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"
 
