@@ -3436,7 +3436,9 @@ void sub_001C3E85(void)
     if (fb) {
         uint32_t ev = *(uint32_t *)(m + fb + 4);
         *(uint32_t *)(m + fb) = 0;                    /* Header.dwStatus = ERROR_SUCCESS */
-        XBOX_VIBRATION v = { *(uint16_t *)(m + fb + 0x40), *(uint16_t *)(m + fb + 0x42) };
+        XBOX_VIBRATION v = { *(uint16_t *)(m + fb + 0x42), *(uint16_t *)(m + fb + 0x44) };
+        { static uint32_t last_motors = 0xFFFFFFFFu; uint32_t motors = ((uint32_t)v.wLeftMotorSpeed << 16) | (uint32_t)v.wRightMotorSpeed;
+          if (motors != last_motors) { last_motors = motors; fprintf(stderr, "[RUMBLE] left=%u right=%u\n", v.wLeftMotorSpeed, v.wRightMotorSpeed); } }
         xbox_InputSetState(GARG(1) & 3, &v);
         if (ev) { static int once; if (!once++) fprintf(stderr, "[PAD] XInputSetState with hEvent=%08X (not signalled)\n", ev); }
     }
