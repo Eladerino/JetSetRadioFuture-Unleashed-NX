@@ -1376,21 +1376,28 @@ void build_menu(int fb_w, int fb_h)
 
 /* ── NOW PLAYING: the track-name banner ─────────────────────────────
  * When a chosen track starts (a custom file, the DJ mix's stream, a
- * district assignment), the kernel publishes its display name
- * (kernel_file.c); this is the banner that shows it: a small bar in
- * the top open space of the frame (x 19-59%, y from 5%, clear of the
- * FPS counter at the left and the health/spray cluster at the
- * right), the skin's message-panel art washed as the bar, the name
- * in the game's font. The line -- "NOW PLAYING: " and the name --
- * scrolls through the bar from right to left, clipped to the bar's
- * box, one pass; a name short enough to fit stands still instead.
- * Then the bar is gone until the next chosen track. It is not a
- * letterbox and never waits for input.
+ * district assignment), the kernel publishes its artist and title
+ * (kernel_file.c); this is the banner that shows them: a small panel
+ * stacked above the health/spray cluster at the top right -- the
+ * health bar's own width, right-aligned with it, 4 px clear of its
+ * top at 720p -- the skin's message-panel art washed as the panel
+ * with a cyan cap on its top edge, the artist small in cyan over
+ * the title in the game's font. This is Direction B of the restyle
+ * concepts, Brandon's pick (Nov 5) from the mocked directions: his
+ * earlier centre bar was a proof of idea, and of the letterbox, the
+ * above-the-health-bar panel and the spray-tag ribbon he chose
+ * this one, with the panel exactly the health bar's width.
  *
- * Scroll speed 230 px/s at 720p, scaled with the frame height -- a
- * touch faster than the approved mock's ~150 px/s, so the longest
- * realistic line (a remixed licensed title, ~66 characters) is
- * through in about six seconds; a fitting name dwells 3.5 s.
+ * A title that fits the panel's inner box stands still for 3.5 s.
+ * A longer one scrolls through it from right to left, clipped to
+ * the inner box -- and loops: three passes in all, with a 0.45 s
+ * empty beat between passes (Brandon's refinement: a single pass
+ * was easy to miss in the seconds an area entry takes). A custom
+ * file has no artist: the panel shrinks to the title alone.
+ * Scroll speed 230 px/s at 720p, scaled with the frame height, as
+ * in the bar this replaces; the naming table's worst title (47
+ * characters, ~635 px at the title's ink) takes ~4.3 s a pass,
+ * ~13.7 s for the three passes and two beats.
  *
  * The banner is drawn from two frame paths: while the menu is open,
  * dk_imgui_menu_frame advances its clock but does not draw it (the
@@ -1398,68 +1405,112 @@ void build_menu(int fb_w, int fb_h)
  * is shut, dk_imgui_overlay_frame runs a frame for it alone. It
  * fails closed like the skin: without the skin's art and font there
  * is no banner, rather than one in the wrong dress -- the one
- * exception is a name the game font's page cannot spell (its
+ * exception is a line the game font's page cannot spell (its
  * coverage is codes 0x21..0x74), which keeps the caller's normal
  * text path, the skin's own rule for such strings. */
 static struct {
     unsigned seen;
     double t0;
-    char text[192];
+    char artist[96];
+    char title[192];
     int active;
 } s_npui;
 
+/* The front-end's cyan (kCyan, #2FD4E8) as a literal: this section
+ * sits past the anonymous namespace's close, where the file's
+ * u32(ImVec4) helper is ambiguous with libnx's u32 typedef. */
+static const ImU32 kNpCyan = IM_COL32(47, 212, 232, 255);
+
+/* The game font's page is uppercase; the published names are not. */
+static void np_upper(char *dst, size_t n, const char *src)
+{
+    size_t i;
+    for (i = 0; src[i] && i + 1 < n; i++) {
+        char c = src[i];
+        dst[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+    dst[i] = 0;
+}
+
 static void now_playing_update(int fb_w, int fb_h, int draw)
 {
-    char buf[192];
-    unsigned seq = dk_menu_nowplaying_poll(buf, sizeof buf);
+    char abuf[96], tbuf[192];
+    unsigned seq = dk_menu_nowplaying_poll(abuf, sizeof abuf,
+                                           tbuf, sizeof tbuf);
     double now = ImGui::GetTime();
     if (seq && seq != s_npui.seen) {
         s_npui.seen = seq;
-        snprintf(s_npui.text, sizeof s_npui.text, "%s", buf);
+        np_upper(s_npui.artist, sizeof s_npui.artist, abuf);
+        np_upper(s_npui.title, sizeof s_npui.title, tbuf);
         s_npui.t0 = now;
         s_npui.active = 1;
     }
     if (!s_npui.active) return;
     if (!dk_menu_skin_ok()) { s_npui.active = 0; return; }  /* fail closed */
-    char line[224], up[224];
-    size_t i;
-    snprintf(line, sizeof line, "NOW PLAYING: %s", s_npui.text);
-    for (i = 0; line[i] && i < sizeof up - 1; i++) {
-        char c = line[i];
-        up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
-    }
-    up[i] = 0;
+
     float W = (float)fb_w, H = (float)fb_h;
-    float x0 = 0.19f * W, x1 = 0.59f * W, y0 = 0.05f * H, bh = 0.075f * H;
-    float ink = bh * 0.46f;
-    int covered = dk_menu_game_text_covered(up);
-    float tw = covered
-        ? dk_menu_game_text_width(up, ink)
-        : ImGui::GetFont()->CalcTextSizeA(ink * 1.35f, 1e9f, 0.0f, up).x;
-    float bw = x1 - x0, pad = bh * 0.3f;
-    float speed = 230.0f * (H / 720.0f);
+    float s = H / 720.0f;
+    /* The panel, as fractions of the frame so it tracks the HUD at
+     * any frame size: the health bar's own x-extent (794..1170 of
+     * 1280), its top at 3/720, ending 4 px clear of the bar's top
+     * (63/720). Two lines tall with an artist, one without. */
+    float x1 = 0.9140625f * W, x0 = x1 - 0.29375f * W;
+    float y0 = 0.0041667f * H;
+    int two = s_npui.artist[0] != 0;
+    float bh = (two ? 56.0f : 34.0f) * s;
+    float pad = 14.0f * s;
+    float ink_t = 18.0f * s, ink_a = 11.0f * s;
+    float speed = 230.0f * s;
+
+    int tcov = dk_menu_game_text_covered(s_npui.title);
+    float tw = tcov
+        ? dk_menu_game_text_width(s_npui.title, ink_t)
+        : ImGui::GetFont()->CalcTextSizeA(ink_t * 1.35f, 1e9f, 0.0f,
+                                          s_npui.title).x;
+    float win = (x1 - x0) - 2.0f * pad;   /* the title's inner box */
     double age = now - s_npui.t0, life;
-    float tx;
-    if (tw <= bw - 2.0f * pad) {
-        life = 3.5;
-        tx = x0 + (bw - tw) * 0.5f;
+    float tx = x0 + pad;
+    int show_title = 1;
+    if (tw <= win) {
+        life = 3.5;                       /* a fitting title stands */
     } else {
-        life = (double)(tw + bw) / (double)speed;
-        tx = x1 - (float)(age * (double)speed);
+        /* Three passes: the traverse, an empty beat, twice more. */
+        double pass = (double)(tw + win) / (double)speed;
+        double cycle = pass + 0.45;
+        life = 3.0 * pass + 2.0 * 0.45;
+        double ct = age - (double)(int)(age / cycle) * cycle;
+        if (ct <= pass)
+            tx = x0 + pad + win - (float)(ct * (double)speed);
+        else
+            show_title = 0;               /* the beat between passes */
     }
     if (age >= life) { s_npui.active = 0; return; }
     if (!draw) return;
     ImDrawList *dl = ImGui::GetForegroundDrawList();
     dk_menu_draw_panel_wash(dl, ImVec2(x0, y0), ImVec2(x1, y0 + bh),
-                            0.92f, 10.0f * (H / 720.0f));
-    dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y0 + bh), true);
-    if (covered)
-        dk_menu_draw_game_text(dl, ImVec2(tx, y0 + (bh - ink) * 0.5f), up,
-                               ink, IM_COL32(255, 255, 255, 255));
-    else
-        dl->AddText(ImGui::GetFont(), ink * 1.35f,
-                    ImVec2(tx, y0 + (bh - ink * 1.35f) * 0.5f),
-                    IM_COL32(255, 255, 255, 255), up);
+                            0.92f, 4.0f * s);
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + 3.0f * s),
+                      kNpCyan);
+    dl->PushClipRect(ImVec2(x0 + pad, y0), ImVec2(x1 - pad, y0 + bh),
+                     true);
+    if (two) {
+        ImVec2 ap(x0 + pad, y0 + 7.0f * s);
+        if (dk_menu_game_text_covered(s_npui.artist))
+            dk_menu_draw_game_text(dl, ap, s_npui.artist, ink_a,
+                                   kNpCyan);
+        else
+            dl->AddText(ImGui::GetFont(), ink_a * 1.35f, ap,
+                        kNpCyan, s_npui.artist);
+    }
+    if (show_title) {
+        ImVec2 tp(tx, y0 + (two ? 23.0f : 8.0f) * s);
+        if (tcov)
+            dk_menu_draw_game_text(dl, tp, s_npui.title, ink_t,
+                                   IM_COL32(255, 255, 255, 255));
+        else
+            dl->AddText(ImGui::GetFont(), ink_t * 1.35f, tp,
+                        IM_COL32(255, 255, 255, 255), s_npui.title);
+    }
     dl->PopClipRect();
 }
 
@@ -1528,8 +1579,9 @@ void dk_imgui_overlay_frame(int fb_w, int fb_h)
     /* Self-gate before any frame begins: a live banner, or a publish
      * not yet seen, is the only reason to run one. */
     {
-        char buf[192];
-        unsigned seq = dk_menu_nowplaying_poll(buf, sizeof buf);
+        char abuf[96], tbuf[192];
+        unsigned seq = dk_menu_nowplaying_poll(abuf, sizeof abuf,
+                                               tbuf, sizeof tbuf);
         if (!s_npui.active && (!seq || seq == s_npui.seen)) return;
     }
     ImGuiIO &io = ImGui::GetIO();

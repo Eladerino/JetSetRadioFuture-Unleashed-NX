@@ -59,7 +59,7 @@ extern const char *recomp_custom_track_name(void);
 extern int  recomp_district_music_get(uint32_t mission, uint32_t *id_out, char *leaf_out, size_t leaf_n);
 extern void recomp_district_music_set(uint32_t mission, int kind, uint32_t id, const char *leaf);
 extern void xbox_now_playing_enable(int on);
-extern int  xbox_now_playing_poll(char *buf, size_t n, unsigned *seq_out);
+extern int  xbox_now_playing_poll(char *artist, size_t an, char *title, size_t tn, unsigned *seq_out);
 extern const char *recomp_version(void);
 extern int  nv2a_widescreen(void);
 extern void nv2a_set_widescreen(int on);
@@ -1442,7 +1442,7 @@ static int  np_get(intptr_t a) { (void)a; return cfg_get("now_playing", 1); }
 static void np_set(intptr_t a, int on)
 { (void)a; on = !!on; cfg_set("now_playing", on); xbox_now_playing_enable(on); }
 static const char *np_about(intptr_t a, char *buf, size_t n)
-{ (void)a; snprintf(buf, n, "WHEN A TRACK YOU CHOSE STARTS -- A CUSTOM FILE, THE DJ MIX'S NEXT STREAM, OR AN AREA'S ASSIGNED TRACK -- ITS NAME SCROLLS ONCE THROUGH A SMALL BAR AT THE TOP OF THE SCREEN AND IS GONE. GAME TRACKS SHOW THEIR REAL NAMES; A CUSTOM TRACK SHOWS ITS FILE NAME, WITH UNDERSCORES AS SPACES, SO NAME THE FILE WHAT YOU WANT SHOWN. THE BAR NEEDS THE GAME-ASSETS SKIN'S ART AND FONT, LIKE THE MENU: WITHOUT THEM IT STAYS AWAY RATHER THAN SHOW IN THE WRONG DRESS."); return buf; }
+{ (void)a; snprintf(buf, n, "WHEN A TRACK YOU CHOSE STARTS -- A CUSTOM FILE, THE DJ MIX'S NEXT STREAM, OR AN AREA'S ASSIGNED TRACK -- ITS NAME APPEARS IN A SMALL PANEL ABOVE THE HEALTH BAR, THE ARTIST OVER THE TITLE, AND IS GONE IN A FEW SECONDS; A NAME TOO LONG FOR THE PANEL SCROLLS THROUGH IT, LOOPS TWICE, AND IS GONE. GAME TRACKS SHOW THEIR REAL NAMES; A CUSTOM TRACK SHOWS ITS FILE NAME, WITH UNDERSCORES AS SPACES, SO NAME THE FILE WHAT YOU WANT SHOWN. THE BAR NEEDS THE GAME-ASSETS SKIN'S ART AND FONT, LIKE THE MENU: WITHOUT THEM IT STAYS AWAY RATHER THAN SHOW IN THE WRONG DRESS."); return buf; }
 static const DkRow k_music_rows[] = {
     SECTION("MUSIC"),
     CHOICE("DJ MIX (NEXT STREAM)", "Which of the game's DJ mixes plays, instead of each area's own. Use Area Mix gives the choice back to the game. Left and right stage a pick; open the list and select it to apply it. It takes over on the next music stream the game starts, never mid-track. This session only.", music_get, music_set, k_music_names),
@@ -1459,7 +1459,7 @@ static const DkRow k_music_rows[] = {
     INFO("CUSTOM STATUS", "What the custom folder holds, and what you have latched.", custom_status),
     INFO("ABOUT CUSTOM TRACKS", "What a custom track is, and the rules its file has to follow.", custom_about),
     SECTION("NOW PLAYING"),
-    CHECK("SHOW TRACK NAMES", "Show the name of each track you chose as it starts, in a small bar at the top of the screen.", np_get, np_set),
+    CHECK("SHOW TRACK NAMES", "Show the name of each track you chose as it starts, in a small panel above the health bar.", np_get, np_set),
     INFO("ABOUT NOW PLAYING", "When the banner appears, and where its names come from.", np_about),
     SECTION("DISTRICT SOUNDTRACKS"),
     SECTION("SHIBUYA-CHO"),
@@ -2109,10 +2109,11 @@ int dk_menu_custom_stage(void) { return custom_stage(); }
 void dk_menu_custom_stage_step(const DkRow *r, int d) { custom_stage_step(r, d); }
 int dk_menu_district_stage(const DkRow *r) { return district_stage_of(r->arg); }
 void dk_menu_district_stage_step(const DkRow *r, int d) { district_stage_step(r, d); }
-unsigned dk_menu_nowplaying_poll(char *buf, size_t n)
+unsigned dk_menu_nowplaying_poll(char *artist, size_t an,
+                                 char *title, size_t tn)
 {
     unsigned s = 0;
-    if (!xbox_now_playing_poll(buf, n, &s)) return 0;
+    if (!xbox_now_playing_poll(artist, an, title, tn, &s)) return 0;
     return s;
 }
 

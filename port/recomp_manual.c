@@ -1908,9 +1908,9 @@ static int district_custom_leaf_ok(const char *leaf)
 }
 
 /* ---- now playing: the banner's state -------------------------------
- * kernel_file.c resolves the display name of a track the player
+ * kernel_file.c resolves the artist and title of a track the player
  * chose (a custom file served through the carrier, the DJ mix's
- * stream, a district assignment's fire) and hands it here; the
+ * stream, a district assignment's fire) and hands them here; the
  * menu's front-end polls it to run the banner. The state lives in
  * this file -- not in the kernel's -- because the executable's link
  * order puts libxbox_kernel.a before libxbox_nv2a_dk.a: a poll
@@ -1920,9 +1920,11 @@ static int district_custom_leaf_ok(const char *leaf)
  * writes it and pushes the live value through
  * xbox_now_playing_enable); the seed read is lazy, on first use,
  * the way district_load reads the same file. Default ON. */
-static char s_np_text[192];
+static char s_np_artist[96];
+static char s_np_title[192];
 static volatile unsigned s_np_seq;
-static char s_np_last[192];
+static char s_np_last_artist[96];
+static char s_np_last_title[192];
 static long s_np_last_s;
 static volatile int s_np_enabled = -1;   /* -1: not seeded yet */
 
@@ -1952,29 +1954,37 @@ void xbox_now_playing_enable(int on)
     __atomic_store_n(&s_np_enabled, on ? 1 : 0, __ATOMIC_RELEASE);
 }
 
-void recomp_now_playing_publish(const char *display)
+void recomp_now_playing_publish(const char *artist, const char *title)
 {
     long now;
-    if (!display || !*display || !np_enabled()) return;
+    if (!title || !*title || !np_enabled()) return;
+    if (!artist) artist = "";
     now = (long)time(NULL);
-    if (!strcmp(s_np_last, display) && now - s_np_last_s < 20)
+    if (!strcmp(s_np_last_artist, artist) &&
+        !strcmp(s_np_last_title, title) && now - s_np_last_s < 20)
         return;   /* the same track again inside 20 s is not news */
-    snprintf(s_np_text, sizeof s_np_text, "%s", display);
-    snprintf(s_np_last, sizeof s_np_last, "%s", display);
+    snprintf(s_np_artist, sizeof s_np_artist, "%s", artist);
+    snprintf(s_np_title, sizeof s_np_title, "%s", title);
+    snprintf(s_np_last_artist, sizeof s_np_last_artist, "%s", artist);
+    snprintf(s_np_last_title, sizeof s_np_last_title, "%s", title);
     s_np_last_s = now;
     __atomic_add_fetch(&s_np_seq, 1u, __ATOMIC_RELEASE);
-    fprintf(stderr, "[NP] %s\n", display);
+    if (*artist) fprintf(stderr, "[NP] %s - %s\n", artist, title);
+    else fprintf(stderr, "[NP] %s\n", title);
 }
 
-/* The front-end's poll: 1 and the current display in buf when a
- * banner is live, with the publish sequence in *seq_out so the
- * front-end can tell a new track from the one already scrolling. */
-int xbox_now_playing_poll(char *buf, size_t n, unsigned *seq_out)
+/* The front-end's poll: 1 and the current artist and title when a
+ * banner is live (the artist empty for a custom file, which has
+ * none), with the publish sequence in *seq_out so the front-end
+ * can tell a new track from the one already scrolling. */
+int xbox_now_playing_poll(char *artist, size_t an,
+                          char *title, size_t tn, unsigned *seq_out)
 {
     unsigned s = __atomic_load_n(&s_np_seq, __ATOMIC_ACQUIRE);
     if (seq_out) *seq_out = s;
     if (!s || !np_enabled()) return 0;
-    if (buf && n) snprintf(buf, n, "%s", s_np_text);
+    if (artist && an) snprintf(artist, an, "%s", s_np_artist);
+    if (title && tn) snprintf(title, tn, "%s", s_np_title);
     return 1;
 }
 

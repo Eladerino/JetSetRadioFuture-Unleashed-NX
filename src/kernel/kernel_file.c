@@ -64,9 +64,9 @@ void xbox_music_mix_select(int set)
  * through the carrier (switch_custom_track_take below), a DJ mix's
  * stream taking over an open (switch_music_override_path), or a
  * district assignment firing a table id (the engine calls
- * xbox_now_playing_notify_id) -- its display name is resolved here
- * and handed to recomp_now_playing_publish. The banner's state (the
- * current name, its sequence, the toggle) lives with the engine's
+ * xbox_now_playing_notify_id) -- its artist and title are resolved
+ * here and handed to recomp_now_playing_publish. The banner's state
+ * (the current name, its sequence, the toggle) lives with the
  * music machinery in recomp_manual.c, NOT here: the executable's
  * link order puts libxbox_kernel.a before libxbox_nv2a_dk.a, so a
  * poll/enable defined in this file is invisible to the menu object
@@ -76,7 +76,7 @@ void xbox_music_mix_select(int set)
  *
  * The name table covers every leaf in the game's BGM folder (the
  * USA disc's Media/Z_ADX/BGM, 55 files): the licensed songs and the
- * in-house tracks resolve to "Artist - Title" from the published
+ * in-house tracks resolve to an artist and a title from the published
  * soundtrack listings (Jet Set Radio Future Original Sound Tracks,
  * SCDC-00166, and the game's licensed-song credits), cross-checked
  * against each file's own ADX header duration; the DJ sets are
@@ -88,65 +88,65 @@ void xbox_music_mix_select(int set)
  * exists only inside the set streams. Custom tracks are not in
  * this table at all: their display name is the file name itself,
  * minus .adx, with underscores shown as spaces. */
-extern void recomp_now_playing_publish(const char *display);
+extern void recomp_now_playing_publish(const char *artist, const char *title);
 
-typedef struct { const char *stem; const char *display; } NpName;
+typedef struct { const char *stem; const char *artist; const char *title; } NpName;
 static const NpName k_np_names[] = {
-    { "concept",  "Hideki Naganuma - The Concept of Love" },
-    { "buttrfly", "Hideki Naganuma - Fly Like a Butterfly" },
-    { "dealer",   "Hideki Naganuma - Funky Dealer" },
-    { "future",   "Hideki Naganuma - Shape Da Future" },
-    { "pathetic", "Hideki Naganuma - Teknopathetic" },
-    { "oldies",   "Hideki Naganuma - Oldies But Happies" },
-    { "likeit",   "Hideki Naganuma - Like It Like This Like That" },
-    { "lovelove", "Guitar Vader - I Love Love You (Love Love Super Dimension Mix)" },
-    { "baby_t",   "Guitar Vader - Baby-T" },
-    { "rockiton", "Hideki Naganuma - Rock It On (D.S. Remix)" },
-    { "sneakman", "Hideki Naganuma - Sneakman (Toronto Mix)" },
-    { "letmom",   "Hideki Naganuma - Let Mom Sleep (No Sleep Remix)" },
-    { "thats",    "Hideki Naganuma - That's Enough (B.B. Rights Mix)" },
-    { "sweet",    "Hideki Naganuma - Sweet Soul Brother (B.B. Rights Mix)" },
-    { "grace",    "Hideki Naganuma - Grace & Glory (B.B.M.H. Mix)" },
-    { "whatbout", "Richard Jacques - What About the Future" },
-    { "bokfresh", "Richard Jacques - Bokfresh" },
-    { "intent",   "Bis - Statement of Intent" },
-    { "victory",  "The Latch Brothers - Ill Victory Beat" },
-    { "model",    "Russell Simins - I'm Not a Model" },
-    { "poompoom", "The Latch Brothers - Me Likey the Poom Poom" },
-    { "birthday", "Cibo Matto - Birthday Cake" },
-    { "answer",   "Bran Van 3000 - The Answer (The Latch Brothers Remix)" },
-    { "bounce",   "The Latch Brothers - Latch Brother Bounce" },
-    { "latchula", "The Latch Brothers - Count Latchula" },
-    { "aisle10",  "Scapegoat Wax - Aisle 10" },
-    { "koto",     "The Latch Brothers - Koto Stomp" },
-    { "mic",      "The Prunes - Rockin' the Mic (The Latch Brothers Remix)" },
-    { "scrappy",  "BS 2000 - The Scrappy (The Latch Brothers Remix)" },
-    { "ending",   "Hideki Naganuma - Sweet Soul Brother (B.B. Rights Mix)" },
-    { "s_set_01a", "Professor K - DJ Mix 01A" },
-    { "s_set_01b", "Professor K - DJ Mix 01B" },
-    { "s_set_02a", "Professor K - DJ Mix 02A" },
-    { "s_set_02b", "Professor K - DJ Mix 02B" },
-    { "s_set_03a", "Professor K - DJ Mix 03A" },
-    { "s_set_03b", "Professor K - DJ Mix 03B" },
-    { "set_04",    "Professor K - DJ Mix 04" },
-    { "s_set_05a", "Professor K - DJ Mix 05A" },
-    { "s_set_05b", "Professor K - DJ Mix 05B" },
-    { "s_set_06",  "Professor K - DJ Mix S06" },
-    { "set_06",    "Professor K - DJ Mix 06" },
-    { "s_set_07a", "Professor K - DJ Mix 07A" },
-    { "s_set_07b", "Professor K - DJ Mix 07B" },
-    { "s_set_08a", "Professor K - DJ Mix 08A" },
-    { "s_set_08b", "Professor K - DJ Mix 08B" },
-    { "s_set_09a", "Professor K - DJ Mix 09A" },
-    { "s_set_09b", "Professor K - DJ Mix 09B" },
-    { "title",    "Jet Set Radio Future - Title Theme" },
-    { "g_park",   "Jet Set Radio Future - Garage Theme" },
-    { "ending_l", "Jet Set Radio Future - Ending (Long)" },
-    { "ending_s", "Jet Set Radio Future - Ending (Short)" },
-    { "clear",    "Jet Set Radio Future - Mission Clear" },
-    { "g_over",   "Jet Set Radio Future - Game Over" },
-    { "clr_dj1",  "Jet Set Radio Future - DJ Interlude" },
-    { "dj_demo1", "Jet Set Radio Future - DJ Demo" },
+    { "concept",  "Hideki Naganuma", "The Concept of Love" },
+    { "buttrfly", "Hideki Naganuma", "Fly Like a Butterfly" },
+    { "dealer",   "Hideki Naganuma", "Funky Dealer" },
+    { "future",   "Hideki Naganuma", "Shape Da Future" },
+    { "pathetic", "Hideki Naganuma", "Teknopathetic" },
+    { "oldies",   "Hideki Naganuma", "Oldies But Happies" },
+    { "likeit",   "Hideki Naganuma", "Like It Like This Like That" },
+    { "lovelove", "Guitar Vader", "I Love Love You (Love Love Super Dimension Mix)" },
+    { "baby_t",   "Guitar Vader", "Baby-T" },
+    { "rockiton", "Hideki Naganuma", "Rock It On (D.S. Remix)" },
+    { "sneakman", "Hideki Naganuma", "Sneakman (Toronto Mix)" },
+    { "letmom",   "Hideki Naganuma", "Let Mom Sleep (No Sleep Remix)" },
+    { "thats",    "Hideki Naganuma", "That's Enough (B.B. Rights Mix)" },
+    { "sweet",    "Hideki Naganuma", "Sweet Soul Brother (B.B. Rights Mix)" },
+    { "grace",    "Hideki Naganuma", "Grace & Glory (B.B.M.H. Mix)" },
+    { "whatbout", "Richard Jacques", "What About the Future" },
+    { "bokfresh", "Richard Jacques", "Bokfresh" },
+    { "intent",   "Bis", "Statement of Intent" },
+    { "victory",  "The Latch Brothers", "Ill Victory Beat" },
+    { "model",    "Russell Simins", "I'm Not a Model" },
+    { "poompoom", "The Latch Brothers", "Me Likey the Poom Poom" },
+    { "birthday", "Cibo Matto", "Birthday Cake" },
+    { "answer",   "Bran Van 3000", "The Answer (The Latch Brothers Remix)" },
+    { "bounce",   "The Latch Brothers", "Latch Brother Bounce" },
+    { "latchula", "The Latch Brothers", "Count Latchula" },
+    { "aisle10",  "Scapegoat Wax", "Aisle 10" },
+    { "koto",     "The Latch Brothers", "Koto Stomp" },
+    { "mic",      "The Prunes", "Rockin' the Mic (The Latch Brothers Remix)" },
+    { "scrappy",  "BS 2000", "The Scrappy (The Latch Brothers Remix)" },
+    { "ending",   "Hideki Naganuma", "Sweet Soul Brother (B.B. Rights Mix)" },
+    { "s_set_01a", "Professor K", "DJ Mix 01A" },
+    { "s_set_01b", "Professor K", "DJ Mix 01B" },
+    { "s_set_02a", "Professor K", "DJ Mix 02A" },
+    { "s_set_02b", "Professor K", "DJ Mix 02B" },
+    { "s_set_03a", "Professor K", "DJ Mix 03A" },
+    { "s_set_03b", "Professor K", "DJ Mix 03B" },
+    { "set_04",    "Professor K", "DJ Mix 04" },
+    { "s_set_05a", "Professor K", "DJ Mix 05A" },
+    { "s_set_05b", "Professor K", "DJ Mix 05B" },
+    { "s_set_06",  "Professor K", "DJ Mix S06" },
+    { "set_06",    "Professor K", "DJ Mix 06" },
+    { "s_set_07a", "Professor K", "DJ Mix 07A" },
+    { "s_set_07b", "Professor K", "DJ Mix 07B" },
+    { "s_set_08a", "Professor K", "DJ Mix 08A" },
+    { "s_set_08b", "Professor K", "DJ Mix 08B" },
+    { "s_set_09a", "Professor K", "DJ Mix 09A" },
+    { "s_set_09b", "Professor K", "DJ Mix 09B" },
+    { "title",    "Jet Set Radio Future", "Title Theme" },
+    { "g_park",   "Jet Set Radio Future", "Garage Theme" },
+    { "ending_l", "Jet Set Radio Future", "Ending (Long)" },
+    { "ending_s", "Jet Set Radio Future", "Ending (Short)" },
+    { "clear",    "Jet Set Radio Future", "Mission Clear" },
+    { "g_over",   "Jet Set Radio Future", "Game Over" },
+    { "clr_dj1",  "Jet Set Radio Future", "DJ Interlude" },
+    { "dj_demo1", "Jet Set Radio Future", "DJ Demo" },
 };
 /* The BGM table's ids (the Music page's track list) onto the same
  * stems: district assignments fire by id, everything else by leaf. */
@@ -170,11 +170,11 @@ static const NpId k_np_ids[] = {
     { 0x4A, "s_set_09b" },{ 0x4B, "s_set_03b" },
 };
 
-static const char *np_display_for_stem(const char *stem)
+static const NpName *np_name_for_stem(const char *stem)
 {
     size_t i;
     for (i = 0; i < sizeof k_np_names / sizeof k_np_names[0]; i++)
-        if (!strcmp(k_np_names[i].stem, stem)) return k_np_names[i].display;
+        if (!strcmp(k_np_names[i].stem, stem)) return &k_np_names[i];
     return NULL;
 }
 
@@ -183,15 +183,17 @@ void xbox_now_playing_notify_leaf(const char *leaf)
 {
     char stem[64];
     size_t i;
-    const char *disp;
     if (!leaf) return;
     for (i = 0; leaf[i] && leaf[i] != '.' && i < sizeof stem - 1; i++) {
         unsigned char c = (unsigned char)leaf[i];
         stem[i] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
     }
     stem[i] = 0;
-    disp = np_display_for_stem(stem);
-    recomp_now_playing_publish(disp ? disp : "Jet Set Radio Future - BGM");
+    {
+        const NpName *np = np_name_for_stem(stem);
+        if (np) recomp_now_playing_publish(np->artist, np->title);
+        else recomp_now_playing_publish("Jet Set Radio Future", "BGM");
+    }
 }
 
 /* A BGM table id started sounding (a district assignment's fire). */
@@ -222,7 +224,7 @@ void xbox_now_playing_notify_custom(const char *path)
     if (n >= sizeof disp) n = sizeof disp - 1;
     for (i = 0; i < n; i++) disp[i] = leaf[i] == '_' ? ' ' : leaf[i];
     disp[n] = 0;
-    recomp_now_playing_publish(disp);
+    recomp_now_playing_publish(NULL, disp);   /* no artist: the file name alone */
 }
 
 /* ── Custom tracks: a one-shot host-path redirect ────────────────────

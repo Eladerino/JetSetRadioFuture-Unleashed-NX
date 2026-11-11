@@ -72,7 +72,7 @@ int  dk_menu_custom_stage(void);
 void dk_menu_custom_stage_step(const DkRow *r, int d);
 int  dk_menu_district_stage(const DkRow *r);
 void dk_menu_district_stage_step(const DkRow *r, int d);
-unsigned dk_menu_nowplaying_poll(char *buf, size_t n);
+unsigned dk_menu_nowplaying_poll(char *artist, size_t an, char *title, size_t tn);
 int  dk_menu_modal_action(void);
 const char *dk_menu_modal_title(void);
 const char *dk_menu_modal_body(void);
