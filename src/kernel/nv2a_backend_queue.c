@@ -1028,7 +1028,7 @@ const Nv2aBackend *nv2a_backend_queue(const Nv2aBackend *inner)
     s_flip_limit = (int)env_num("RECOMP_QUEUE_FRAMES", 2, 1, 8);
     s_spin_ns = (uint64_t)env_num("RECOMP_QUEUE_SPIN_US", 50, 0, 10000) * 1000;
     s_copy_vertices = (int)env_num("RECOMP_QUEUE_COPY_VERTICES", 0, 0, 1);
-    s_idx16 = (int)env_num("RECOMP_QUEUE_IDX16", 0, 0, 1);
+    s_idx16 = (int)env_num("RECOMP_QUEUE_IDX16", 1, 0, 1);
     s_prio = (int)env_num("RECOMP_QUEUE_PRIO", -1, -1, 63);
     s_ring = (uint8_t *)malloc(s_ring_bytes + 16);
     if (!s_ring) {
