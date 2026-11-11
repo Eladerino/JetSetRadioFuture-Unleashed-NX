@@ -633,11 +633,6 @@ static const DkRow k_display_rows[] = {
     CHECK("SHOW FRAME RATE", "A small counter in the corner of the picture: frames shown each second. SHOW FRAME TIME (MS) and SHOW DRAWS (DRW/F), the two rows under this one, can each add a figure under the number. Applies at once and is kept in options.txt.", fps_get, fps_set),
     CHECK("SHOW FRAME TIME (MS)", "Add the longest gap between two frames, in milliseconds, under the frame rate counter's number: a stutter shows here even while the rate reads high. It appears only while SHOW FRAME RATE is on. Applies at once and is kept in options.txt.", fpsms_get, fpsms_set),
     CHECK("SHOW DRAWS (DRW/F)", "Add the draws in each frame, averaged over the counter's half second, under the frame rate counter's number: the heavier a scene is to draw, the higher it reads. It appears only while SHOW FRAME RATE is on. Applies at once and is kept in options.txt.", fpsdrw_get, fpsdrw_set),
-    SECTION("POST-PROCESSING"),
-    CHOICE("CRT FILTER", "The texture of a CRT television over the picture: fine dark lines between the picture's rows and the colour grille a tube's mask makes, stronger towards MAX. Applies at once; kept in options.txt.", postcrt_get, postcrt_set, k_post_choices),
-    CHOICE("VIGNETTE", "The picture's corners and edges fall off into shadow, as a tube's light does; the middle is untouched. Stronger towards MAX. Applies at once; kept in options.txt.", postvig_get, postvig_set, k_post_choices),
-    CHOICE("ANTI-ALIASING", "Smooths the jagged edges where shapes meet in the picture: edges are found and filtered along their run, while flat areas and fine detail are left alone. Applies at once; kept in options.txt.", postaa_get, postaa_set, k_post_aa_choices),
-    CHOICE("SHARPEN", "Adds edge definition back to the picture, sharpening detail against a softened copy of itself; the dose is stronger towards HIGH. Applies at once; kept in options.txt.", postsharp_get, postsharp_set, k_post_sharp_choices),
 };
 
 /* Graphics */
@@ -678,6 +673,11 @@ static const DkRow k_graphics_rows[] = {
     CHECK("WIDESCREEN", "On a 16:9 screen, widen the view to fill it instead of drawing the game's 4:3 picture. Applies at once; kept in the settings file and options.txt.", wide_get, wide_set),
     CHECK("STRETCH TO FIT SCREEN", "Fill the whole screen with the 4:3 picture, stretched, instead of widening the view. Mutually exclusive with widescreen in effect: with stretch on, the game is not widened. Applies at once; kept in options.txt.", stretch_get, stretch_set),
     CHOICE("TEXTURE ANISOTROPY (RESTART)", "Sharper textures at glancing angles, up to the chosen level. The renderer's samplers are built with it, so it applies from the next start. Kept in options.txt. Your options.txt aniso choice is honoured until you change this.", aniso_get, aniso_set, k_aniso_choices),
+    SECTION("POST-PROCESSING"),
+    CHOICE("CRT FILTER", "The texture of a CRT television over the picture: fine dark lines between the picture's rows and the colour grille a tube's mask makes, stronger towards MAX. Applies at once; kept in options.txt.", postcrt_get, postcrt_set, k_post_choices),
+    CHOICE("VIGNETTE", "The picture's corners and edges fall off into shadow, as a tube's light does; the middle is untouched. Stronger towards MAX. Applies at once; kept in options.txt.", postvig_get, postvig_set, k_post_choices),
+    CHOICE("ANTI-ALIASING", "Smooths the jagged edges where shapes meet in the picture: edges are found and filtered along their run, while flat areas and fine detail are left alone. Applies at once; kept in options.txt.", postaa_get, postaa_set, k_post_aa_choices),
+    CHOICE("SHARPEN", "Adds edge definition back to the picture, sharpening detail against a softened copy of itself; the dose is stronger towards HIGH. Applies at once; kept in options.txt.", postsharp_get, postsharp_set, k_post_sharp_choices),
 };
 
 /* Controller */
@@ -1682,14 +1682,14 @@ static void reset_apply(void)
     fps_set(0, 0);          /* show_fps=0 */
     fpsms_set(0, 0);        /* show_fps_ms=0 */
     fpsdrw_set(0, 0);       /* show_fps_drw=0 */
-    postcrt_set(0, 0);       /* post-processing off: the shipped defaults */
-    postvig_set(0, 0);
-    postaa_set(0, 0);
-    postsharp_set(0, 0);
     /* Graphics */
     wide_set(0, 1);         /* widescreen=1 */
     stretch_set(0, 1);      /* JSRF_WIDE_STRETCH is a line in the shipped file */
     aniso_set(0, 2);        /* 4X: the shipped aniso=4 */
+    postcrt_set(0, 0);       /* post-processing off: the shipped defaults */
+    postvig_set(0, 0);
+    postaa_set(0, 0);
+    postsharp_set(0, 0);
     /* Controller */
     rcam_set_mode(1);       /* CAMERA */
     rcam_set_ease(0);

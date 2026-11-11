@@ -3228,7 +3228,7 @@ int dk_ui_stretch(void) { return stretch_on(); }
 void dk_ui_set_stretch(int on) { s_stretch = on ? 1 : 0; }
 
 /* ── Post-processing (build J): the CRT FILTER and VIGNETTE rows ──
- * Two stepped looks on the Display page, applied by a final pass in
+ * Two stepped looks on the Graphics page, applied by a final pass in
  * present(): where the presenter copies the finished picture into
  * the swapchain image with the 2D engine's blit, the pass instead
  * draws it through the 3D pipeline, sampling the picture and
@@ -3452,7 +3452,7 @@ static int post_init(void)
                                        + sizeof(DkImageDescriptor));
     dkSamplerDescriptorInitialize(samp_cpu, &smp);
     s_post_state = 1;
-    fprintf(stderr, "  [DK] post pass ready (Display: CRT FILTER / VIGNETTE / ANTI-ALIASING / SHARPEN)\n");
+    fprintf(stderr, "  [DK] post pass ready (Graphics: CRT FILTER / VIGNETTE / ANTI-ALIASING / SHARPEN)\n");
     return 1;
 }
 
@@ -3657,7 +3657,7 @@ static void present(int show_loading)
 #endif
         dkCmdBufClearColorFloat(s_cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
 #if defined(XBOXRECOMP_DK_MENU)
-        /* Build J's post pass, when a Display step asks for it: the
+        /* Build J's post pass, when a Graphics step asks for it: the
          * picture drawn through the 3D pipeline instead of copied.
          * Both steps off (the default), post_present declines and
          * the blit below is recorded exactly as shipped. */
