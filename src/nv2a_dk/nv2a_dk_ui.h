@@ -33,6 +33,10 @@ int         dk_ui_fps_drw_state(void); /* the counter's draws extra is on */
 int         dk_ui_aniso_index(void);   /* 0 off, 1 2x, 2 4x, 3 8x, 4 16x */
 int         dk_ui_stretch(void);       /* the presenter fills the screen */
 void        dk_ui_set_stretch(int on);
+int         dk_ui_post_crt(void);      /* the post pass's CRT step, 0..4 */
+void        dk_ui_set_post_crt(int step);
+int         dk_ui_post_vig(void);      /* the post pass's vignette step, 0..4 */
+void        dk_ui_set_post_vig(int step);
 unsigned    dk_ui_frames(void);        /* presented frames since boot */
 unsigned    dk_ui_draws(void);         /* draws recorded since boot */
 const char *dk_ui_data_dir(void);      /* the port's folder on the card */

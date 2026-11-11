@@ -494,6 +494,25 @@ static void fpsms_set(intptr_t a, int on)
 static int  fpsdrw_get(intptr_t a) { (void)a; return dk_ui_fps_drw_state(); }
 static void fpsdrw_set(intptr_t a, int on)
 { (void)a; dk_ui_request_fps_drw(on); options_set_int("show_fps_drw", on); }
+/* Post-processing (build J): the renderer's final pass over the
+ * finished picture, read by present() every frame, so a change
+ * applies at once -- the player can stand in an area, open the
+ * menu and dial the look in live. The step rides the raw RECOMP_
+ * line in options.txt (the launcher passes those through), 0 is
+ * OFF, and the shipped default is OFF: the picture is unchanged
+ * until a player opts in. */
+static const char *k_post_choices[] = { "OFF", "LOW", "MED", "HIGH", "MAX" };
+static int  postcrt_get(intptr_t a) { (void)a; return dk_ui_post_crt(); }
+static void postcrt_set(intptr_t a, int i)
+{ char b[8]; (void)a; dk_ui_set_post_crt(i);
+  snprintf(b, sizeof b, "%d", i); setenv("RECOMP_DK_POST_CRT", b, 1);
+  options_set_int("RECOMP_DK_POST_CRT", i); }
+static int  postvig_get(intptr_t a) { (void)a; return dk_ui_post_vig(); }
+static void postvig_set(intptr_t a, int i)
+{ char b[8]; (void)a; dk_ui_set_post_vig(i);
+  snprintf(b, sizeof b, "%d", i); setenv("RECOMP_DK_POST_VIGNETTE", b, 1);
+  options_set_int("RECOMP_DK_POST_VIGNETTE", i); }
+
 /* The frame rate cap, the GL menu's row in this renderer's terms:
  * fps= in options.txt (the launcher maps it to RECOMP_FPS, default 60)
  * and a live request to the renderer, which enforces it between
@@ -602,6 +621,9 @@ static const DkRow k_display_rows[] = {
     CHECK("SHOW FRAME RATE", "A small counter in the corner of the picture: frames shown each second. SHOW FRAME TIME (MS) and SHOW DRAWS (DRW/F), the two rows under this one, can each add a figure under the number. Applies at once and is kept in options.txt.", fps_get, fps_set),
     CHECK("SHOW FRAME TIME (MS)", "Add the longest gap between two frames, in milliseconds, under the frame rate counter's number: a stutter shows here even while the rate reads high. It appears only while SHOW FRAME RATE is on. Applies at once and is kept in options.txt.", fpsms_get, fpsms_set),
     CHECK("SHOW DRAWS (DRW/F)", "Add the draws in each frame, averaged over the counter's half second, under the frame rate counter's number: the heavier a scene is to draw, the higher it reads. It appears only while SHOW FRAME RATE is on. Applies at once and is kept in options.txt.", fpsdrw_get, fpsdrw_set),
+    SECTION("POST-PROCESSING"),
+    CHOICE("CRT FILTER", "The texture of a CRT television over the picture: fine dark lines between the picture's rows and the colour grille a tube's mask makes, stronger towards MAX. Applies at once; kept in options.txt.", postcrt_get, postcrt_set, k_post_choices),
+    CHOICE("VIGNETTE", "The picture's corners and edges fall off into shadow, as a tube's light does; the middle is untouched. Stronger towards MAX. Applies at once; kept in options.txt.", postvig_get, postvig_set, k_post_choices),
 };
 
 /* Graphics */
@@ -1646,6 +1668,8 @@ static void reset_apply(void)
     fps_set(0, 0);          /* show_fps=0 */
     fpsms_set(0, 0);        /* show_fps_ms=0 */
     fpsdrw_set(0, 0);       /* show_fps_drw=0 */
+    postcrt_set(0, 0);       /* post-processing off: the shipped defaults */
+    postvig_set(0, 0);
     /* Graphics */
     wide_set(0, 1);         /* widescreen=1 */
     stretch_set(0, 1);      /* JSRF_WIDE_STRETCH is a line in the shipped file */

@@ -101,6 +101,7 @@
 #include "../jsrf_maps.h"
 #endif
 #include "nv2a_dk_imgui_bridge.h"
+#include "uam.h"
 
 #include <switch.h>
 #include <deko3d.h>
@@ -3226,6 +3227,269 @@ static int stretch_on(void)
 int dk_ui_stretch(void) { return stretch_on(); }
 void dk_ui_set_stretch(int on) { s_stretch = on ? 1 : 0; }
 
+/* ── Post-processing (build J): the CRT FILTER and VIGNETTE rows ──
+ * Two stepped looks on the Display page, applied by a final pass in
+ * present(): where the presenter copies the finished picture into
+ * the swapchain image with the 2D engine's blit, the pass instead
+ * draws it through the 3D pipeline, sampling the picture and
+ * shading it on the way. The pass runs where the blit did -- after
+ * the picture is complete, before the heartbeat, the FPS counter,
+ * the shader-progress bar and the menu are drawn over it -- so it
+ * processes the game only; the renderer's own overlays and the menu
+ * stay clean.
+ *
+ * The steps are renderer state, like the stretch switch above:
+ * latched from options.txt's raw lines (RECOMP_DK_POST_CRT /
+ * RECOMP_DK_POST_VIGNETTE, 0..4) at first read, set live by the
+ * menu's rows, and read by present() every frame, so a change lands
+ * on the next frame. Both steps at 0 skip the pass entirely --
+ * present() records the blit exactly as shipped -- and the pass's
+ * shaders are not even built until a step first asks for them. */
+static int s_post_crt = -1, s_post_vig = -1;
+
+static int post_step_read(const char *var)
+{
+    const char *e = getenv(var);
+    int v = e ? atoi(e) : 0;
+    return v < 0 ? 0 : v > 4 ? 4 : v;
+}
+int dk_ui_post_crt(void)
+{
+    if (s_post_crt < 0) s_post_crt = post_step_read("RECOMP_DK_POST_CRT");
+    return s_post_crt;
+}
+int dk_ui_post_vig(void)
+{
+    if (s_post_vig < 0) s_post_vig = post_step_read("RECOMP_DK_POST_VIGNETTE");
+    return s_post_vig;
+}
+void dk_ui_set_post_crt(int step) { s_post_crt = step < 0 ? 0 : step > 4 ? 4 : step; }
+void dk_ui_set_post_vig(int step) { s_post_vig = step < 0 ? 0 : step > 4 ? 4 : step; }
+
+/* The steps as shader parameters. The mixes Brandon picked from
+ * were made at 720p from the campaign's park capture: CRT HEAVY is
+ * a scanline depth of 0.42 at a 2-pixel period, a grille of +-10%
+ * and a compensating brightness of 1.12; VIGNETTE STRONG falls to
+ * 18% brightness at the corners, a 2.2 exponent over a radius of
+ * 0.62 of the picture's half-size. Those mixes are the MAX step
+ * verbatim; the steps below divide the dose. The scanline period
+ * is in presented pixels and scales with the swapchain's height
+ * (2 px at 720p, 3 px at 1080p): the raster belongs to the screen,
+ * not to the internal size the dynamic scale is currently using. */
+static const float k_post_crt_tab[5][3] = {   /* depth, grille, brightness */
+    { 0.00f, 0.00f, 1.00f }, { 0.12f, 0.03f, 1.03f }, { 0.22f, 0.05f, 1.06f },
+    { 0.32f, 0.08f, 1.09f }, { 0.42f, 0.10f, 1.12f },
+};
+static const float k_post_vig_tab[5] = { 1.00f, 0.75f, 0.55f, 0.35f, 0.18f };
+#define POST_VIG_EXP 2.2f
+#define POST_VIG_RAD 0.62f
+
+/* The pass's shader pair, compiled by uam on first use like the
+ * menu backend's (nv2a_dk_imgui_dk.cpp). Positions arrive in clip
+ * space from the CPU, so the vertex side only passes the picture's
+ * coordinates through; the fragment side does the work. A step at 0
+ * feeds identity parameters for its effect, so a pass running for
+ * one effect leaves the other exactly alone. */
+static const char kPostVsGlsl[] =
+    "#version 460\n"
+    "layout(location = 0) in vec2 inPos;\n"
+    "layout(location = 1) in vec2 inUv;\n"
+    "layout(location = 2) in vec2 inPix;\n"
+    "layout(location = 0) out vec2 vUv;\n"
+    "layout(location = 1) out vec2 vPix;\n"
+    "void main() {\n"
+    "    vUv = inUv;\n"
+    "    vPix = inPix;\n"
+    "    gl_Position = vec4(inPos, 0.0, 1.0);\n"
+    "}\n";
+static const char kPostFsGlsl[] =
+    "#version 460\n"
+    "layout(location = 0) in vec2 vUv;\n"
+    "layout(location = 1) in vec2 vPix;\n"
+    "layout(location = 0) out vec4 outColor;\n"
+    "layout(binding = 0) uniform sampler2D image;\n"
+    "layout(std140, binding = 0) uniform Post {\n"
+    "    vec4 u_dst;\n"
+    "    vec4 u_crt;\n"
+    "    vec4 u_vig;\n"
+    "};\n"
+    "void main() {\n"
+    "    vec3 c = texture(image, vUv).rgb;\n"
+    "    vec2 lp = vPix - u_dst.xy;\n"
+    "    float scan = 1.0 - u_crt.y * step(1.0 - 1.0 / u_crt.x, fract(lp.y / u_crt.x));\n"
+    "    vec3 grille = vec3(1.0 - u_crt.z);\n"
+    "    float gph = mod(lp.x, 3.0);\n"
+    "    if (gph < 1.0) grille.r = 1.0 + u_crt.z;\n"
+    "    else if (gph < 2.0) grille.g = 1.0 + u_crt.z;\n"
+    "    else grille.b = 1.0 + u_crt.z;\n"
+    "    c *= scan * grille * u_crt.w;\n"
+    "    vec2 q = vec2((lp.x - 0.5 * u_dst.z) / (u_dst.z * u_vig.z),\n"
+    "                  (lp.y - 0.5 * u_dst.w) / (u_dst.w * u_vig.z));\n"
+    "    float r = clamp(length(q), 0.0, 1.0);\n"
+    "    c *= 1.0 - (1.0 - u_vig.x) * pow(r, u_vig.y);\n"
+    "    outColor = vec4(c, 1.0);\n"
+    "}\n";
+
+static int        s_post_state;        /* 0 untried, 1 ready, -1 failed for the session */
+static DkShader   s_post_vs, s_post_fs;
+static DkMemBlock s_post_desc;         /* one image descriptor, then one sampler descriptor */
+static DkGpuAddr  s_post_imgdesc_gpu, s_post_sampdesc_gpu;
+static const DkImage *s_post_src;      /* the image the descriptor currently names */
+
+static int post_init(void)
+{
+    uint32_t vs_size = 0, fs_size = 0;
+    const uint8_t *vs_dksh, *fs_dksh;
+    DkSampler smp;
+    DkSamplerDescriptor *samp_cpu;
+    if (s_post_state) return s_post_state > 0;
+    s_post_state = -1;
+    vs_dksh = (const uint8_t *)uam_compile_dksh(UAM_STAGE_VERTEX, kPostVsGlsl, &vs_size);
+    fs_dksh = (const uint8_t *)uam_compile_dksh(UAM_STAGE_FRAGMENT, kPostFsGlsl, &fs_size);
+    if (!vs_dksh || !fs_dksh || !dk_ui_shader_load(&s_post_vs, vs_dksh)
+        || !dk_ui_shader_load(&s_post_fs, fs_dksh)) {
+        fprintf(stderr, "  [DK] post pass: shader build failed; the picture stays as shipped\n");
+        return 0;
+    }
+    s_post_desc = dk_ui_block((uint32_t)sizeof(DkImageDescriptor)
+                                  + (uint32_t)sizeof(DkSamplerDescriptor),
+                              DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
+    if (!s_post_desc) {
+        fprintf(stderr, "  [DK] post pass: no descriptor memory; the picture stays as shipped\n");
+        return 0;
+    }
+    memset(dkMemBlockGetCpuAddr(s_post_desc), 0,
+           sizeof(DkImageDescriptor) + sizeof(DkSamplerDescriptor));
+    s_post_imgdesc_gpu = dkMemBlockGetGpuAddr(s_post_desc);
+    s_post_sampdesc_gpu = s_post_imgdesc_gpu + sizeof(DkImageDescriptor);
+    /* The blit's own sampling, in descriptor form: linear, clamped. */
+    dkSamplerDefaults(&smp);
+    smp.magFilter = DkFilter_Linear;
+    smp.minFilter = DkFilter_Linear;
+    smp.mipFilter = DkMipFilter_None;
+    smp.wrapMode[0] = DkWrapMode_ClampToEdge;
+    smp.wrapMode[1] = DkWrapMode_ClampToEdge;
+    smp.wrapMode[2] = DkWrapMode_ClampToEdge;
+    samp_cpu = (DkSamplerDescriptor *)((uint8_t *)dkMemBlockGetCpuAddr(s_post_desc)
+                                       + sizeof(DkImageDescriptor));
+    dkSamplerDescriptorInitialize(samp_cpu, &smp);
+    s_post_state = 1;
+    fprintf(stderr, "  [DK] post pass ready (Display: CRT FILTER / VIGNETTE)\n");
+    return 1;
+}
+
+/* Draw the finished picture (surface s) into the bound swapchain
+ * image through the post pass, over the same dst rect the blit
+ * would fill. Returns 0 -- and present() records the blit instead --
+ * when both steps are off or the pass could not be built. The state
+ * bound here is the menu backend's contract: everything it touches
+ * is rebound by the menu's draw after, and by the next frame's
+ * frame_begin for the game. */
+static int post_present(DkSurf *s, const DkImageRect *dst)
+{
+    int crt = dk_ui_post_crt(), vig = dk_ui_post_vig();
+    float fw, fh, x0, y0, x1, y1;
+    float verts[24];
+    float *ubo;
+    uint8_t *vp;
+    DkGpuAddr v_gpu = 0, u_gpu = 0;
+    const DkShader *sh[2];
+    DkRasterizerState rs;
+    DkColorState cs;
+    DkColorWriteState cw;
+    DkBlendState bs;
+    DkDepthStencilState ds;
+    DkResHandle tex;
+    DkBufExtents vb, ub;
+    static const DkVtxAttribState attribs[3] = {
+        { 0, 0, 0,  DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0 },
+        { 0, 0, 8,  DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0 },
+        { 0, 0, 16, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0 },
+    };
+    static const DkVtxBufferState buffers[1] = { { 24, 0 } };
+
+    if (!crt && !vig) return 0;
+    if (!post_init()) return 0;
+
+    /* The descriptor names the picture's image; surfaces are pooled
+     * and reused, so it is rewritten only when the picture moves. */
+    if (s_post_src != &s->img) {
+        DkImageView view;
+        DkImageDescriptor d;
+        dkImageViewDefaults(&view, &s->img);
+        dkImageDescriptorInitialize(&d, &view, false, false);
+        *(DkImageDescriptor *)dkMemBlockGetCpuAddr(s_post_desc) = d;
+        s_post_src = &s->img;
+        dkCmdBufBarrier(s_cmd, DkBarrier_Full, DkInvalidateFlags_Descriptors);
+    }
+
+    /* The dst rect's corners: clip space (y up, the image's first
+     * row at +1), UVs (the surface's image is exactly the picture
+     * the blit's src rect names), and frame pixels for the shader's
+     * raster maths. A triangle strip. */
+    fw = (float)s_fb_w; fh = (float)s_fb_h;
+    x0 = (float)dst->x; y0 = (float)dst->y;
+    x1 = x0 + (float)dst->width; y1 = y0 + (float)dst->height;
+    {
+        const float px[4] = { x0, x1, x0, x1 }, py[4] = { y0, y0, y1, y1 };
+        const float pu[4] = { 0.0f, 1.0f, 0.0f, 1.0f }, pv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        int i;
+        for (i = 0; i < 4; i++) {
+            verts[i * 6 + 0] = px[i] * 2.0f / fw - 1.0f;
+            verts[i * 6 + 1] = 1.0f - py[i] * 2.0f / fh;
+            verts[i * 6 + 2] = pu[i];
+            verts[i * 6 + 3] = pv[i];
+            verts[i * 6 + 4] = px[i];
+            verts[i * 6 + 5] = py[i];
+        }
+    }
+    vp = data_alloc((uint32_t)sizeof verts, 16, &v_gpu);
+    if (!vp) return 0;
+    memcpy(vp, verts, sizeof verts);
+    ubo = (float *)data_alloc(256, DK_UNIFORM_BUF_ALIGNMENT, &u_gpu);
+    if (!ubo) return 0;
+    memset(ubo, 0, 256);
+    ubo[0] = x0; ubo[1] = y0; ubo[2] = (float)dst->width; ubo[3] = (float)dst->height;
+    ubo[4] = 2.0f * fh / 720.0f;
+    ubo[5] = k_post_crt_tab[crt][0];
+    ubo[6] = k_post_crt_tab[crt][1];
+    ubo[7] = k_post_crt_tab[crt][2];
+    ubo[8] = k_post_vig_tab[vig];
+    ubo[9] = POST_VIG_EXP;
+    ubo[10] = POST_VIG_RAD;
+
+    full_rect(s_fb_w, s_fb_h);
+    sh[0] = &s_post_vs; sh[1] = &s_post_fs;
+    dkCmdBufBindShaders(s_cmd, DkStageFlag_GraphicsMask, sh, 2);
+    dkCmdBufBindImageDescriptorSet(s_cmd, s_post_imgdesc_gpu, 1);
+    dkCmdBufBindSamplerDescriptorSet(s_cmd, s_post_sampdesc_gpu, 1);
+    tex = dkMakeTextureHandle(0, 0);
+    dkCmdBufBindTextures(s_cmd, DkStage_Fragment, 0, &tex, 1);
+    dkRasterizerStateDefaults(&rs);
+    rs.cullMode = DkFace_None;
+    dkCmdBufBindRasterizerState(s_cmd, &rs);
+    dkColorStateDefaults(&cs);
+    dkColorStateSetBlendEnable(&cs, 0, false);
+    dkCmdBufBindColorState(s_cmd, &cs);
+    dkColorWriteStateDefaults(&cw);
+    dkCmdBufBindColorWriteState(s_cmd, &cw);
+    dkBlendStateDefaults(&bs);
+    dkCmdBufBindBlendStates(s_cmd, 0, &bs, 1);
+    dkDepthStencilStateDefaults(&ds);
+    ds.depthTestEnable = false;
+    ds.depthWriteEnable = false;
+    dkCmdBufBindDepthStencilState(s_cmd, &ds);
+    dkCmdBufBindVtxAttribState(s_cmd, attribs, 3);
+    dkCmdBufBindVtxBufferState(s_cmd, buffers, 1);
+    vb.addr = v_gpu; vb.size = (uint32_t)sizeof verts;
+    dkCmdBufBindVtxBuffers(s_cmd, 0, &vb, 1);
+    ub.addr = u_gpu; ub.size = 256;
+    dkCmdBufBindUniformBuffers(s_cmd, DkStage_Fragment, 0, &ub, 1);
+    dkCmdBufDraw(s_cmd, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
+    full_rect(s_fb_w, s_fb_h);
+    return 1;
+}
+
 #endif /* XBOXRECOMP_DK_MENU */
 
 /* Record the picture into a swapchain image, submit the frame, present. */
@@ -3301,9 +3565,18 @@ static void present(int show_loading)
         }
 #endif
         dkCmdBufClearColorFloat(s_cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
-        dkImageViewDefaults(&sv, &s->img);
-        dkCmdBufBlitImage(s_cmd, &sv, &src, &fbv, &dst,
-                          DkBlitFlag_FilterLinear | DkBlitFlag_ModeBlit, 0);
+#if defined(XBOXRECOMP_DK_MENU)
+        /* Build J's post pass, when a Display step asks for it: the
+         * picture drawn through the 3D pipeline instead of copied.
+         * Both steps off (the default), post_present declines and
+         * the blit below is recorded exactly as shipped. */
+        if (!post_present(s, &dst))
+#endif
+        {
+            dkImageViewDefaults(&sv, &s->img);
+            dkCmdBufBlitImage(s_cmd, &sv, &src, &fbv, &dst,
+                              DkBlitFlag_FilterLinear | DkBlitFlag_ModeBlit, 0);
+        }
     }
     if (s_heartbeat) {
         /* A square that moves every frame: a hung picture stops it. */

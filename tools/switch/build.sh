@@ -260,6 +260,11 @@ write_default_options() {
         "# GLES only: texture sharpness at an angle (anisotropic filtering), 1 to 16." \
         "aniso=4" \
         "" \
+        "# Post-processing, the Display page's CRT FILTER and" \
+        "# VIGNETTE rows: 0 = off, 1 to 4 = LOW, MED, HIGH, MAX." \
+        "RECOMP_DK_POST_CRT=0" \
+        "RECOMP_DK_POST_VIGNETTE=0" \
+        "" \
         "# Frame rate cap: 60 as on the Xbox. 0 removes the cap (testing only)." \
         "fps=60" \
         "" \
