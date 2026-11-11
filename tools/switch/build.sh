@@ -187,6 +187,22 @@ else
 fi
 fi
 
+# ---------------------------------------------------------------- fp_locals (FP-VALUES; default ON in this tree)
+# Apply skeammer's x87-stack-in-locals pass (tools/regen pass 5) on top of
+# the standard chain (passes 1-3, already present in port/recomp/gen when
+# SKIP_RECOMP=1 reuses it), immediately before the engine build. The pass
+# requires the chained gen (its docstring: inline_leaves must run first),
+# so the block fires only when the build reuses a prepared gen
+# (SKIP_RECOMP=1) -- the route every shipped and candidate build takes; a
+# from-scratch pass leaves the gen untouched for the chain. Unset or 1 is
+# on; JSRF_FP_LOCALS=0 turns the conversion off.
+if [ "${SKIP_RECOMP:-0}" = "1" ] && [ "${JSRF_FP_LOCALS:-1}" != "0" ]; then
+    say "fp_locals: applying jsrf_fp_locals.py --apply to port/recomp/gen (JSRF_FP_LOCALS=0 skips)"
+    python3 tools/regen/jsrf_fp_locals.py port/recomp/gen --apply > "$WORK_DIR/logs/fp_locals-apply.log" 2>&1
+    head -2 "$WORK_DIR/logs/fp_locals-apply.log"
+    echo "fp_locals: converted-mark count in gen: $(grep -h 'x87 stack in locals' port/recomp/gen/recomp_0*.c | wc -l)"
+fi
+
 # ---------------------------------------------------------------- engine build
 say "building the Switch engine (-j$JOBS)"
 cmake -S port -B "$WORK_DIR/build-switch" \
