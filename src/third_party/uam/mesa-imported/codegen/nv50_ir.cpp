@@ -590,6 +590,15 @@ void Instruction::init()
    predSrc = -1;
    flagsDef = -1;
    flagsSrc = -1;
+
+   // jsrf-nx (SwitchWakerHD patch 6, via mvp-nx): SchedDataCalculatorGM107::
+   // setDelay reads the wait mask of the next block's first instruction
+   // before that block's visit sets it; uninitialised, the field carried
+   // whatever a previous compile in the same process left in the recycled
+   // pool objects, so identical GLSL compiled to different DKSH depending
+   // on process history. 0x7e0 (no barriers, nothing to wait on) is what
+   // the scheduler starts every instruction with.
+   sched = 0x7e0;
 }
 
 Instruction::Instruction()

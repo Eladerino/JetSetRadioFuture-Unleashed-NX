@@ -4119,7 +4119,13 @@ SchedDataCalculatorGM107::setDelay(Instruction *insn, int delay,
    if (delay <= GM107_MIN_ISSUE_DELAY && (wr & rd) != 7) {
       // Barriers take one additional clock cycle to become active on top of
       // the clock consumed by the instruction producing it.
-      if (!next) {
+      // jsrf-nx (SwitchWakerHD patch 8, via mvp-nx): Mesa 20.1's rule. A
+      // barrier set by a block's last instruction is not yet active for the
+      // next block's first instruction, whose wait mask is only written
+      // when that block is visited -- asking it (getWtDepBar below) read
+      // the not-yet-set mask and could grant stall 1; the cross-block case
+      // takes stall 2 outright.
+      if (!next || insn->bb != next->bb) {
          delay = 0x2;
       } else {
          int wt = getWtDepBar(next);
@@ -4128,7 +4134,13 @@ SchedDataCalculatorGM107::setDelay(Instruction *insn, int delay,
       }
    }
 
-   if (lastDualIssued || !next || delay > 1 || !targ->canDualIssue(insn, next)) {
+   // jsrf-nx (SwitchWakerHD patch 7, via mvp-nx): no dual issue. A
+   // dual-issued pair in the lit terms of a shader made whole 32-thread
+   // fragment warps (4x8-pixel blocks) flicker with wrong lighting on
+   // SwitchWaker's console; Mesa 20.1 (gfx/gl) never dual-issues. Every
+   // instruction gets its normal stall count instead of a zero-delay pair.
+   static const bool kDualIssue = false;
+   if (!kDualIssue || lastDualIssued || !next || delay > 1 || !targ->canDualIssue(insn, next)) {
       delay = CLAMP(delay, GM107_MIN_ISSUE_DELAY, GM107_MAX_ISSUE_DELAY);
       lastDualIssued = false;
    } else {

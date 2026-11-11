@@ -21,6 +21,7 @@
 
 #include "nv2a_dk_imgui_dk.h"
 #include "nv2a_dk_imgui_bridge.h"
+#include "dk_tilefix.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -103,6 +104,8 @@ void update_texture(ImTextureData *tex)
         m.format = DkImageFormat_RGBA8_Unorm;
         m.dimensions[0] = uint32_t(tex->Width);
         m.dimensions[1] = uint32_t(tex->Height);
+        /* jsrf-nx: deko3d 0.5.0's block-linear tile bug (dk_tilefix.h). */
+        dk_fix_tile_size(&m, uint32_t(tex->Height));
         DkImageLayout layout;
         dkImageLayoutInitialize(&layout, &m);
         uint32_t align = dkImageLayoutGetAlignment(&layout);

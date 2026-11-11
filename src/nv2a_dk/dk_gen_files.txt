@@ -5,3 +5,5 @@ dk_shadergen.h
 dk_shadergen.c
 dk_gen.c
 ../third_party/uam/source/compiler_iface.cpp
+../third_party/uam/mesa-imported/codegen/nv50_ir.cpp
+../third_party/uam/mesa-imported/codegen/nv50_ir_emit_gm107.cpp

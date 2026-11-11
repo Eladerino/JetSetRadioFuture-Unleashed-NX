@@ -8,8 +8,11 @@
 # and the ir_expression_operation headers, made by Python), so this builds
 # with nothing but a C/C++ toolchain. Changes for jsrf-nx are marked
 # "jsrf-nx": the front end kept between compiles, the codegen's buffers
-# freed, DKSH output to memory, and uam.h. The command-line driver
-# (main.cpp) is not built. Licences: LICENSE (uam) and Mesa's own headers.
+# freed, DKSH output to memory, uam.h, and the scheduler correctness
+# fixes (a deterministic sched word, no dual issue, stall 2 before a new
+# block -- SwitchWakerHD patches 6/7/8, via mvp-nx). The command-line
+# driver (main.cpp) is not built. Licences: LICENSE (uam) and Mesa's own
+# headers.
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/sources.cmake)
 

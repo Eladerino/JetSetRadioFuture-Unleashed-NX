@@ -95,6 +95,7 @@
 #include "nv2a_dk_pack.h"
 #include "dk_compile.h"
 #include "dk_font.h"
+#include "dk_tilefix.h"
 #include "../kernel/nv2a_backend.h"
 #if defined(XBOXRECOMP_DK_MENU)
 #include "nv2a_dk_menu.h"
@@ -2347,6 +2348,12 @@ static int tex_storage(DkTex *t, DkImageFormat fmt)
     lm.dimensions[0] = t->w;
     lm.dimensions[1] = t->h;
     lm.mipLevels = t->levels ? t->levels : 1;
+    /* jsrf-nx: deko3d 0.5.0's block-linear tile bug (dk_tilefix.h);
+     * compressed formats count rows of 4x4 blocks. */
+    dk_fix_tile_size(&lm, (fmt == DkImageFormat_RGBA_BC1
+                            || fmt == DkImageFormat_RGBA_BC2
+                            || fmt == DkImageFormat_RGBA_BC3)
+                           ? (t->h + 3) / 4 : t->h);
     dkImageLayoutInitialize(&layout, &lm);
     size = (uint32_t)dkImageLayoutGetSize(&layout);
     align = dkImageLayoutGetAlignment(&layout);
