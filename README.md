@@ -13,15 +13,15 @@ the game, the standalone US disc: no game data is included in this repository
 or in the release downloads.
 
 **It boots and plays.** Logos, title, saving and loading, character
-select and gameplay all work on real hardware. Frame rates in the
-areas tested most, on an overclocked console (CPU 1963 / GPU 1152 /
-memory 2366 MHz): the garage holds the game's 60 fps cap, Shibuya
-Terminal and Dogenzaka Hill sit near 60 with their busiest views
-around 50, Chuo Street around 57, and 99th Street, the heaviest area
-so far, around 49 with dips into the low 30s in its densest views.
-At stock clocks the same areas run slower. It has not been played
-from start to finish, so later areas should be expected to have
-bugs. The port's status and open issues are kept in the
+select and gameplay all work on real hardware. At stock clocks
+(CPU 1020 / GPU 384 / memory 1331 MHz), the heaviest route we
+measure, the 99th Street tower patrol, runs at 36 to 38 steps/s
+with the current build, up from 25.5 before the November
+optimisation work, and lighter areas hold the game's 60 fps cap.
+On an overclocked console (CPU 1963 / GPU 1152 / memory 2366 MHz)
+the garage, Shibuya Terminal and Dogenzaka Hill sit at or near 60.
+It has not been played from start to finish, so later areas should
+be expected to have bugs. The port's status and open issues are kept in the
 [Switch port notes](docs/switch-port.md), and how it is
 tested in the [testing notes](docs/switch-testing-notes.md).
 Switch bugs are best reported as an issue in this repository, with
@@ -61,8 +61,9 @@ from your own copy of the game.
   [latest release](https://github.com/Eladerino/JetSetRadioFuture-Unleashed-NX/releases/latest)
   (the file is named `jsrf-unleashed-<version>-switch.zip`) and
   extract it at the root of the SD card. It puts
-  `jsrf-unleashed.nro`, `options.txt`, a `READ-ME-FIRST.txt` and an
-  empty `game/` folder in
+  `jsrf-unleashed.nro`, `options.txt`, a `READ-ME-FIRST.txt`,
+  `LICENSE`, `NOTICE`, the `LICENSES/` folder and an empty
+  `game/` folder in
   `sdmc:/switch/jsrf-unleashed/`. Then put your game files in that
   `game/` folder: either the extracted files (`default.xbe` and
   `Media/`) or a single `.iso` of the US disc, which the first launch
@@ -87,37 +88,61 @@ from your own copy of the game.
   recompiles from a disc image or an extracted folder, checks the
   result is the standalone US build (9333 of 9342 functions), builds
   the engine and lays out a folder to copy to
-  `sdmc:/switch/jsrf-unleashed/`. `SKIP_RECOMP=1` reuses the generated
-  code for engine-only rebuilds.
-- **Settings live in `options.txt`** beside the `.nro`: plain text
-  that ships in the release and is never overwritten by an update, so
-  copying a new `.nro` over the old one keeps your settings. It
+  `sdmc:/switch/jsrf-unleashed/`. To reproduce the shipped generated
+  code exactly, the build runs in two passes with the standard regen
+  chain ([`tools/regen/README.md`](tools/regen/README.md), passes 1
+  to 3) applied to `port/recomp/gen` between them; `SKIP_RECOMP=1`
+  then reuses the generated code for engine-only rebuilds.
+- **Settings live in two files** beside the `.nro`. The in-game
+  menu's choices are kept in the `settings` file and survive
+  restarts. `options.txt` holds the boot-time settings as plain
+  text, and ships in the release at the defaults below. Copying a
+  new `.nro` over the old one keeps both files; one caution:
+  extracting the whole release zip over an existing install
+  replaces `options.txt` with the fresh release defaults, so
+  upgrade by copying the `.nro` only, or keep your `options.txt`
+  aside first. It
   covers the picture (by default the 4:3 image stretched to fill
   the screen, title and menus included; or true widescreen, 16:9 in
   gameplay with the logos and title screen at 4:3), internal
   resolution (1x to 4x), anisotropic filtering,
-  the 60 fps cap, the shader cache, the run log (off by default;
+  the frame rate cap, the post-processing defaults, the shader cache, the run log (off by default;
   `log=1` writes one), and `fast_gpu`, the asynchronous
   GPU path, which is on by default on Switch; `fast_gpu=0` falls back
   to the serial path.
 - **An in-game menu:** hold Minus (or tap it, or press L+R and Minus
-  together) to open the tabbed overlay. On the Deko3D Switch build, Display,
-  Cheats and Music have their own tabs, with the selected option's help text
-  beside it. The OpenGL menu also has File, Graphics, Controller and Developer
-  tabs, persistent help and confirmations. Cheats separates session-only
-  effects from map jumps that may affect save flow; Music selects one of the
-  game's whole DJ mixes for the next stream open. Its 14 map destinations
-  follow JuMatt's upstream 0.6.6 selector data. Display choices, session cheats
-  and the music override are temporary in the Deko3D menu; the OpenGL menu
-  stores its settings in `options.txt`. File > About lists the build and credits.
+  together) to open the tabbed overlay, with the selected option's help
+  text beside it. It has seven pages: Display, Graphics, Controller,
+  Cheats, Music, Developer and Info. Choices are kept in the settings
+  file beside the .nro (some rows also write `options.txt`) and survive
+  restarts unless marked session-only. Display carries just the frame
+  settings (render scale, the frame rate cap, the counters). Graphics
+  carries the picture (widescreen, stretch to fill the screen,
+  anisotropic filtering) and a post-processing section: a CRT filter,
+  a vignette, anti-aliasing and sharpening, all off by default.
+  Controller carries the right-stick camera (the camera eases back
+  when released by default, and does not hold its view unless you
+  turn that on). Music plays a
+  track, selects one of the game's whole DJ mixes for the next stream
+  open, or plays your own tracks: `.ADX` files dropped in the
+  `custom_tracks` folder beside the .nro are checked when the menu
+  opens. Music also assigns a soundtrack per free-skate area (the
+  game's track sets, a DJ mix, or a custom file), with a NOW PLAYING
+  banner naming what just started. Its 14 map destinations follow
+  JuMatt's upstream 0.6.6 selector data. Cheats separates session-only
+  effects from map jumps that may affect save flow. Info lists the
+  build and the credits, and carries Reset All Settings, which puts
+  every setting on every page back to the values a fresh install
+  starts with (your save is not touched).
 - **Performance and overclocking:** the recommended settings are the
-  shipped defaults (render scale 1x, SMAA off, MSAA off, anisotropic
+  shipped defaults (render scale 1x, post-processing off, anisotropic
   filtering 4x, shadow volumes drawn, the 60 fps cap, every
-  diagnostic and the run log off). Shadows, SMAA and anisotropic
-  filtering at 8x measured within a frame or two of free in testing,
-  since the console's limit is the game's own CPU work rather than
-  the GPU; render scale above 1x is the setting that costs.
-  The frame rates above were measured with the console heavily
+  diagnostic and the run log off). On this build the whole
+  post-processing stack at its maximum measured the same as off,
+  inside measurement noise, so those settings are a matter of taste;
+  render scale above 1x is the setting that costs.
+  The patrol figures above are at stock clocks; the near-60 area
+  figures are from the console heavily
   overclocked, well past Nintendo's stock clocks (CPU 1020 MHz,
   GPU 384 MHz handheld and 768 MHz docked, memory 1331 MHz
   handheld and 1600 MHz docked). **Overclocking is optional and at your

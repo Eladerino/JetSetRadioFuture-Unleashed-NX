@@ -276,7 +276,7 @@ write_default_options() {
         "# GLES only: texture sharpness at an angle (anisotropic filtering), 1 to 16." \
         "aniso=4" \
         "" \
-        "# Post-processing, the Display page's CRT FILTER and" \
+        "# Post-processing, the Graphics page's CRT FILTER and" \
         "# VIGNETTE rows: 0 = off, 1 to 4 = LOW, MED, HIGH, MAX." \
         "RECOMP_DK_POST_CRT=0" \
         "RECOMP_DK_POST_VIGNETTE=0" \
