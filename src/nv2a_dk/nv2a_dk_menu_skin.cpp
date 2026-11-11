@@ -32,6 +32,7 @@
 // rectangles and the font page's ink-run table (layout facts about
 // the files, in the same spirit as a format header).
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -551,6 +552,44 @@ bool load_core(const char *media_root)
     force_opaque(g_atlas, kAtlasW, g_spr[6]);
     force_opaque(g_atlas, kAtlasW, g_spr[7]);
     force_opaque(g_atlas, kAtlasW, g_spr[8]);
+    /* Build I: the footer tiles are square 30x30 sheet art and
+     * read flat in the bar. Round the packed copies' corners --
+     * the sheets on the card are untouched; this is alpha
+     * geometry in our own atlas, applied after force_opaque,
+     * which would otherwise undo it. A and B go fully round; L
+     * and R take the big radius on their outer (shoulder) edge
+     * and a small one inside, so the pair reads as shoulder
+     * buttons. The draw side needs nothing: AddImage already
+     * honours texture alpha (the badge and can rely on it). */
+    {
+        auto round_corners = [](Rect r, int rtl, int rtr, int rbr, int rbl) {
+            auto corner = [&](int ox, int oy, int rad, int dx, int dy) {
+                if (rad <= 0) return;
+                /* The rounding circle's centre, rad px inward
+                 * from the corner in pixel-centre space. */
+                float ccx = ox + dx * (rad - 0.5f);
+                float ccy = oy + dy * (rad - 0.5f);
+                for (int yy = 0; yy < rad; yy++)
+                    for (int xx = 0; xx < rad; xx++) {
+                        int px = ox + dx * xx, py = oy + dy * yy;
+                        float ddx = (px + 0.5f) - ccx, ddy = (py + 0.5f) - ccy;
+                        float f = rad - sqrtf(ddx * ddx + ddy * ddy) + 0.5f;
+                        if (f >= 1.0f) continue;
+                        if (f < 0.0f) f = 0.0f;
+                        uint8_t *p = g_atlas + (size_t(py) * kAtlasW + px) * 4;
+                        p[3] = uint8_t(p[3] * f);
+                    }
+            };
+            corner(r.x, r.y, rtl, +1, +1);
+            corner(r.x + r.w - 1, r.y, rtr, -1, +1);
+            corner(r.x + r.w - 1, r.y + r.h - 1, rbr, -1, -1);
+            corner(r.x, r.y + r.h - 1, rbl, +1, -1);
+        };
+        round_corners(g_spr[5], 10, 10, 10, 10);  /* A */
+        round_corners(g_spr[6], 10, 10, 10, 10);  /* B */
+        round_corners(g_spr[7], 13, 4, 4, 13);    /* L: outer (left) edge big */
+        round_corners(g_spr[8], 4, 13, 13, 4);    /* R: outer (right) edge big */
+    }
     g_font = font;
     font = nullptr;
     ok = true;

@@ -40,7 +40,7 @@ Full credits are in the [Credits](#credits) section below.
 
 The in-game menu on the Switch build, opened with Minus:
 
-![The File page of the in-game menu, showing the build version](docs/images/menu-file.jpg)
+![The Info page of the in-game menu, showing the build version](docs/images/menu-file.jpg)
 
 ![The Display page of the in-game menu](docs/images/menu-display.jpg)
 

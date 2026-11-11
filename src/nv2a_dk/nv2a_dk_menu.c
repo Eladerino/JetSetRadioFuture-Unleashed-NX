@@ -391,7 +391,7 @@ static void reset_run(intptr_t a)
  * over every change this menu writes to options.txt, so the menu
  * would show one value while the next start applies another.
  *
- * This row makes the trap visible: it is on the File page only
+ * This row makes the trap visible: it is on the Info page only
  * while such a file is there (the front-end does not draw an INFO
  * row whose enabled() says no). The probe mirrors the launcher
  * exactly -- the same folder, derived the way options_set derives
@@ -817,9 +817,9 @@ static const DkRow k_cheat_rows[] = {
     CHECK("INFINITE SPRAY CANS", "Spray cans are topped up as you play. This session only; nothing is written to the save.", cans_get, cans_set),
     BUTTON("REFILL SPRAY CANS", "Top spray cans up to 10, once. This session only.", refill_run, tp_ready),
     SECTION("TELEPORT"),
-    { "TELEPORT X", R_SLIDER, "The east-west coordinate the Teleport button moves you to. Seeded from where you are standing; left and right adjust, hold to go faster.", 0, tp_ready, NULL, NULL, NULL, 0, NULL, tp_getf, tp_setf, NULL },
-    { "TELEPORT Y", R_SLIDER, "The height the Teleport button moves you to. Seeded from where you are standing; left and right adjust, hold to go faster.", 1, tp_ready, NULL, NULL, NULL, 0, NULL, tp_getf, tp_setf, NULL },
-    { "TELEPORT Z", R_SLIDER, "The north-south coordinate the Teleport button moves you to. Seeded from where you are standing; left and right adjust, hold to go faster.", 2, tp_ready, NULL, NULL, NULL, 0, NULL, tp_getf, tp_setf, NULL },
+    { "TELEPORT X", R_SLIDER, "The east-west coordinate the Teleport button moves you to. Seeded from where you are standing; left and right adjust, hold to go faster, and hold A while you adjust for steps of 1.", 0, tp_ready, NULL, NULL, NULL, 0, NULL, tp_getf, tp_setf, NULL },
+    { "TELEPORT Y", R_SLIDER, "The height the Teleport button moves you to. Seeded from where you are standing; left and right adjust, hold to go faster, and hold A while you adjust for steps of 1.", 1, tp_ready, NULL, NULL, NULL, 0, NULL, tp_getf, tp_setf, NULL },
+    { "TELEPORT Z", R_SLIDER, "The north-south coordinate the Teleport button moves you to. Seeded from where you are standing; left and right adjust, hold to go faster, and hold A while you adjust for steps of 1.", 2, tp_ready, NULL, NULL, NULL, 0, NULL, tp_getf, tp_setf, NULL },
     BUTTON("TELEPORT TO COORDINATES", "Move to the coordinates set above, on the next game update. Your position before the jump is bookmarked, so Return can undo it. Live memory only; the save is never touched.", teleport_run, tp_ready),
     BUTTON("RETURN TO BOOKMARK", "Go back to where the last teleport started from.", bookmark_run, bookmark_ok),
     SECTION("MAP JUMPS (PROGRESS)"),
@@ -1526,15 +1526,22 @@ static const DkRow k_dev_rows[] = {
     CHECKA("FENCE MIRROR", "Mirror the GPU semaphore values into guest memory from the acknowledgement thread. Off in this build: the executor writes the real values itself. From the next start; kept in options.txt.", sw_get, sw_set, SW_FENCEMIRROR),
 };
 
-enum { PG_FILE, PG_DISPLAY, PG_GRAPHICS, PG_CONTROLLER, PG_CHEATS, PG_MUSIC, PG_DEV, PG_COUNT };
+/* Page order (build I, Brandon's call): Display first -- it is
+ * the page a player opening the menu usually wants -- and the
+ * info page last. The info page was "FILE" until build I: its
+ * rows are the build / renderer / about read-outs plus reset and
+ * close, which is an info page, not file management. The enum
+ * order IS the tab order and the opening page (s_page starts at
+ * 0); everything else names pages through the enum. */
+enum { PG_DISPLAY, PG_GRAPHICS, PG_CONTROLLER, PG_CHEATS, PG_MUSIC, PG_DEV, PG_INFO, PG_COUNT };
 static const DkPage k_pages[PG_COUNT] = {
-    [PG_FILE]       = { "FILE",       k_file_rows,       (int)(sizeof k_file_rows / sizeof k_file_rows[0]) },
     [PG_DISPLAY]    = { "DISPLAY",    k_display_rows,    (int)(sizeof k_display_rows / sizeof k_display_rows[0]) },
     [PG_GRAPHICS]   = { "GRAPHICS",   k_graphics_rows,   (int)(sizeof k_graphics_rows / sizeof k_graphics_rows[0]) },
     [PG_CONTROLLER] = { "CONTROLLER", k_controller_rows, (int)(sizeof k_controller_rows / sizeof k_controller_rows[0]) },
     [PG_CHEATS]     = { "CHEATS",     k_cheat_rows,      (int)(sizeof k_cheat_rows / sizeof k_cheat_rows[0]) },
     [PG_MUSIC]      = { "MUSIC",      k_music_rows,      (int)(sizeof k_music_rows / sizeof k_music_rows[0]) },
     [PG_DEV]        = { "DEVELOPER",  k_dev_rows,        (int)(sizeof k_dev_rows / sizeof k_dev_rows[0]) },
+    [PG_INFO]       = { "INFO",       k_file_rows,       (int)(sizeof k_file_rows / sizeof k_file_rows[0]) },
 };
 
 /* ── State ───────────────────────────────────────────────────────────

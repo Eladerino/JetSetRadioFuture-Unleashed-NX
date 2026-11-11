@@ -387,13 +387,42 @@ void build_menu(int fb_w, int fb_h)
               sh = (dk_menu_skin_ok() ? 4.0f : 3.0f) * u;
         if (dk_menu_skin_ok()) {
             /* The game's TV-static texture, tinted per band, in
-             * the same stepped layout as the flat bands. */
+             * the same stepped layout as the flat bands. Build I:
+             * the grain sweeps. The game's loading screen is a
+             * code-composed composition -- a cyan field whose
+             * NOW LOADING art is moved by the game's code (its
+             * data file, Media/Progress/Progress.dat, holds
+             * sprite models and no textures at all; see the build
+             * I survey) -- so there is no animated asset to lift.
+             * This replicates that mechanism with the game's own
+             * art: the texture window ping-pongs across the static
+             * patch, drawn in two segments so the wrap stays
+             * inside the sprite. One phase drives all three
+             * bands -- the composition moves as one field, the
+             * cyan (the loading screen's colour) on top. */
             ImVec2 uv0, uv1;
             dk_menu_skin_sprite_uv(DK_SPR_STATIC, uv0, uv1);
             ImTextureRef at = dk_menu_skin_atlas_ref();
-            wdl->AddImage(at, p, ImVec2(p.x + w, p.y + sh), uv0, uv1, u32(kCyan));
-            wdl->AddImage(at, ImVec2(p.x, p.y + sh), ImVec2(p.x + w * 0.93f, p.y + 2.0f * sh), uv0, uv1, u32(kOrange));
-            wdl->AddImage(at, ImVec2(p.x, p.y + 2.0f * sh), ImVec2(p.x + w * 0.86f, p.y + 3.0f * sh), uv0, uv1, u32(kMagenta));
+            double t = ImGui::GetTime();
+            double cyc = t / 6.0;
+            double ph = cyc - double((long long)cyc);
+            float tri = ph < 0.5 ? float(ph * 2.0) : float(2.0 - ph * 2.0);
+            float off = tri * 0.45f;   /* of the sprite's width */
+            auto band = [&](float bx, float by, float bw, float bh, ImU32 tint) {
+                if (off <= 0.001f) {
+                    wdl->AddImage(at, ImVec2(bx, by), ImVec2(bx + bw, by + bh), uv0, uv1, tint);
+                    return;
+                }
+                float du = (uv1.x - uv0.x) * off;
+                float split = bw * (1.0f - off);
+                wdl->AddImage(at, ImVec2(bx, by), ImVec2(bx + split, by + bh),
+                              ImVec2(uv0.x + du, uv0.y), uv1, tint);
+                wdl->AddImage(at, ImVec2(bx + split, by), ImVec2(bx + bw, by + bh),
+                              uv0, ImVec2(uv0.x + du, uv1.y), tint);
+            };
+            band(p.x, p.y, w, sh, u32(kCyan));
+            band(p.x, p.y + sh, w * 0.93f, sh, u32(kOrange));
+            band(p.x, p.y + 2.0f * sh, w * 0.86f, sh, u32(kMagenta));
         } else {
             wdl->AddRectFilled(p, ImVec2(p.x + w, p.y + sh), u32(kCyan));
             wdl->AddRectFilled(ImVec2(p.x, p.y + sh), ImVec2(p.x + w * 0.93f, p.y + 2.0f * sh), u32(kOrange));
@@ -659,7 +688,7 @@ void build_menu(int fb_w, int fb_h)
             if (r->kind == DK_R_INFO && !en) {
                 /* An INFO row whose enabled() says no is not drawn
                  * at all: it is a warning that exists only while its
-                 * condition does (the File page's legacy-file row).
+                 * condition does (the Info page's legacy-file row).
                  * Every other row kind keeps the standing shape --
                  * drawn, dimmed, and unfocusable while disabled.
                  * No INFO row carried an enabled() before this, so
@@ -835,6 +864,42 @@ void build_menu(int fb_w, int fb_h)
                 char buf[512];
                 const char *v = r->value ? r->value(r->arg, buf, sizeof buf) : "";
                 float rw = ImGui::GetContentRegionAvail().x;
+                if (dk_menu_skin_ok()) {
+                    /* Build I: in skin mode an INFO block is a
+                     * read-out, not a row. It carries no nav item
+                     * at all, so the cursor steps past it; no
+                     * selection band and no panel wash are drawn;
+                     * what remains is quiet inset text -- a muted
+                     * caption in the game's font over the value, set
+                     * off from the settings grid by a hairline rule
+                     * in the rows' edge ink. Height accounting
+                     * matches the shipped shape (label line + gap +
+                     * wrapped value), so the page's rhythm and
+                     * scroll range are unchanged; only the wrap
+                     * width differs, at the inset. The skin-off path
+                     * below keeps the shipped row exactly. */
+                    const float inset = 14.0f * u;
+                    float wrap_w = rw - inset - 6.0f * u;
+                    float val_h = ImGui::CalcTextSize(v, nullptr, false, wrap_w).y;
+                    float gap_y = ImGui::GetStyle().ItemSpacing.y;
+                    float total_h = fh + gap_y + val_h;
+                    ImVec2 rp = ImGui::GetCursorScreenPos();
+                    dl->AddLine(ImVec2(rp.x + 2.0f * u, rp.y + 3.0f * u),
+                                ImVec2(rp.x + 2.0f * u, rp.y + total_h - 3.0f * u),
+                                u32(kRowsEdge), 2.0f * u);
+                    float tx = rp.x + inset;
+                    if (dk_menu_game_text_covered(r->label))
+                        dk_menu_draw_game_text(dl, ImVec2(tx, rp.y + (fh - 12.0f * u) * 0.5f),
+                                               r->label, 12.0f * u, u32(kMutedBright));
+                    else
+                        dl->AddText(ImVec2(tx, rp.y + (fh - ImGui::GetTextLineHeight()) * 0.5f),
+                                    u32(kMutedBright), r->label);
+                    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                                ImVec2(tx, rp.y + fh + gap_y),
+                                u32(kHelpBody), v, nullptr, wrap_w);
+                    ImGui::Dummy(ImVec2(rw, total_h));
+                    break;
+                }
                 /* The wrap width is measured at the focused inset
                  * in both states, so the value wraps -- and the row
                  * heights itself -- identically whether or not the
@@ -869,6 +934,15 @@ void build_menu(int fb_w, int fb_h)
                 float rw = ImGui::GetContentRegionAvail().x;
                 ImGui::InvisibleButton("##row", ImVec2(rw, rh), ImGuiButtonFlags_EnableNav);
                 note_focus(i, en);
+                /* Fine adjustment (build I): while the row has
+                 * focus and A is held, left/right steps by 1 (see
+                 * the step choice below). A is inert on a slider
+                 * row today -- activation does nothing here -- so
+                 * the modifier costs no existing behaviour, and
+                 * the value's ink turns cyan while it is live so
+                 * the player can see the fine comb is engaged. */
+                const bool fine = ImGui::IsItemFocused() &&
+                                  ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown);
                 float v = r->getf(r->arg);
                 char vbuf[32];
                 snprintf(vbuf, sizeof vbuf, "%.0f", double(v));
@@ -876,7 +950,7 @@ void build_menu(int fb_w, int fb_h)
                 dl->AddText(ImVec2(tx, rp.y + 2.0f * u), u32(en ? kText : kDisabled), r->label);
                 float vw = ImGui::CalcTextSize(vbuf).x;
                 dl->AddText(ImVec2(rp.x + rw - vw, rp.y + 2.0f * u),
-                            u32(en ? kAmber : kDisabled), vbuf);
+                            u32(en ? (fine ? kCyan : kAmber) : kDisabled), vbuf);
                 float reserve = ImGui::CalcTextSize("-10000").x + 10.0f * u;
                 float tx1 = rp.x + rw - reserve;
                 float ty = rp.y + fh + 6.0f * u;
@@ -893,10 +967,14 @@ void build_menu(int fb_w, int fb_h)
                 dl->AddRectFilled(ImVec2(kx - 1.0f * u, ty), ImVec2(kx + 1.0f * u, ty + 3.0f * u),
                                   u32(kWhite));
                 if (ImGui::IsItemFocused()) {
-                    /* The old steps: 10 a press, 40 once the key
-                     * has been held ~40 polls, 160 past ~90 (input
-                     * polls run at the game's frame rate). */
-                    float step = g_hold_l > 1.5f || g_hold_r > 1.5f ? 160.0f
+                    /* Steps: 1 a press while A is held -- the fine
+                     * comb, which never escalates, or holding would
+                     * run away from the very value being combed for.
+                     * Otherwise the old steps: 10 a press, 40 once
+                     * the key has been held ~40 polls, 160 past ~90
+                     * (input polls run at the game's frame rate). */
+                    float step = fine ? 1.0f
+                               : g_hold_l > 1.5f || g_hold_r > 1.5f ? 160.0f
                                : g_hold_l > 0.66f || g_hold_r > 0.66f ? 40.0f : 10.0f;
                     if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, true))
                         r->setf(r->arg, v - step);
@@ -990,12 +1068,23 @@ void build_menu(int fb_w, int fb_h)
         };
         ImGui::PushFont(nullptr, 15.0f * u);  // the key line, a step quieter like the help pane
         {
-            /* A hairline sets the hint bar off from the panels
-             * above it; drawn, not laid out, over the footer's own
-             * reserved height. */
+            /* The hint bar is set off from the panels above it,
+             * drawn, not laid out, over the footer's own reserved
+             * height. Skin mode (build I): the footer sits on a
+             * defined bar -- the game's message panel washed
+             * across the whole strip, under the rows pane and the
+             * help pane alike, so the window's bottom reads as one
+             * composition instead of loose chips on the field; the
+             * panel's own border does the hairline's job at its
+             * top edge. Skin off keeps the hairline exactly. */
             ImVec2 fp = ImGui::GetCursorScreenPos();
             float fw = ImGui::GetContentRegionAvail().x;
-            wdl->AddLine(fp, ImVec2(fp.x + fw, fp.y), u32(kRuleSoft), 1.0f);
+            if (dk_menu_skin_ok())
+                dk_menu_draw_panel_wash(wdl, ImVec2(fp.x - 10.0f * u, fp.y - 3.0f * u),
+                                        ImVec2(fp.x + fw + 10.0f * u, fp.y + 7.0f * u + 24.0f * u + 5.0f * u),
+                                        0.35f, 10.0f * u);
+            else
+                wdl->AddLine(fp, ImVec2(fp.x + fw, fp.y), u32(kRuleSoft), 1.0f);
             ImGui::Dummy(ImVec2(0.0f, 7.0f * u));
         }
         if (dk_menu_skin_ok()) {
@@ -1016,15 +1105,10 @@ void build_menu(int fb_w, int fb_h)
             const float lh = ImGui::GetTextLineHeight();
             float x = fp0.x;
             const ImU32 border = u32(ImGui::GetStyleColorVec4(ImGuiCol_Border));
-            const float round = ImGui::GetStyle().FrameRounding;
-            auto text_chip = [&](const char *key) {
-                float tw = ImGui::CalcTextSize(key).x;
-                float w = tw + 16.0f * u;
-                wdl->AddRectFilled(ImVec2(x, fp0.y), ImVec2(x + w, fp0.y + ih), u32(kKeyFace), round);
-                wdl->AddRect(ImVec2(x, fp0.y), ImVec2(x + w, fp0.y + ih), border, round, 1.0f, 0);
-                wdl->AddText(ImVec2(x + (w - tw) * 0.5f, cy - lh * 0.5f), u32(kKeyText), key);
-                x += w;
-            };
+            /* The drawn chips round at 8u, the footer-scale echo
+             * of the tiles' pack-time corner rounding (build I) --
+             * the whole bar speaks one rounding language. */
+            const float round = 8.0f * u;
             auto tile = [&](DkSkinSprite s) {
                 ImVec2 uv0, uv1;
                 dk_menu_skin_sprite_uv(s, uv0, uv1);
@@ -1035,10 +1119,32 @@ void build_menu(int fb_w, int fb_h)
                 wdl->AddText(ImVec2(x + 6.0f * u, cy - lh * 0.5f), u32(kFootBright), label);
                 x += 6.0f * u + ImGui::CalcTextSize(label).x + 16.0f * u;
             };
+            /* Drawn pictogram chips (build I): no D-pad pictogram
+             * exists anywhere in the game's UI art (the build I
+             * survey covered the SprNorm family, Misc, Garage,
+             * Title and the font pages), so the D-pad is a drawn
+             * cross and Minus a drawn dash, in the footer's own
+             * chip language -- drawn iconography, not game art. */
+            auto dpad_chip = [&]() {
+                wdl->AddRectFilled(ImVec2(x, fp0.y), ImVec2(x + ih, fp0.y + ih), u32(kKeyFace), round);
+                wdl->AddRect(ImVec2(x, fp0.y), ImVec2(x + ih, fp0.y + ih), border, round, 1.0f, 0);
+                const float hw = 3.5f * u, hl = 7.5f * u, cx = x + ih * 0.5f;
+                wdl->AddRectFilled(ImVec2(cx - hw, cy - hl), ImVec2(cx + hw, cy + hl), u32(kKeyText), 1.5f * u);
+                wdl->AddRectFilled(ImVec2(cx - hl, cy - hw), ImVec2(cx + hl, cy + hw), u32(kKeyText), 1.5f * u);
+                x += ih;
+            };
+            auto dash_chip = [&]() {
+                wdl->AddRectFilled(ImVec2(x, fp0.y), ImVec2(x + ih, fp0.y + ih), u32(kKeyFace), round);
+                wdl->AddRect(ImVec2(x, fp0.y), ImVec2(x + ih, fp0.y + ih), border, round, 1.0f, 0);
+                wdl->AddRectFilled(ImVec2(x + ih * 0.5f - 5.0f * u, cy - 1.5f * u),
+                                   ImVec2(x + ih * 0.5f + 5.0f * u, cy + 1.5f * u),
+                                   u32(kKeyText), 1.5f * u);
+                x += ih;
+            };
             /* The game's own button tiles where the sheet has
-             * them (A, B, L, R); the other keys keep their text
-             * chips -- the sheet carries no dpad or minus art. */
-            text_chip("DPAD");
+             * them (A, B, L, R); the D-pad and Minus keys carry
+             * the drawn pictogram chips above. */
+            dpad_chip();
             job("MOVE");
             tile(DK_SPR_TILE_A);
             job("SELECT");
@@ -1052,8 +1158,16 @@ void build_menu(int fb_w, int fb_h)
              * (Minus: a tap, a half-second hold, or L+R+Minus --
              * xinput_device.c's menu_button_tick). Display only,
              * like the other chips. */
-            text_chip("-");
+            dash_chip();
             job("CLOSE");
+            /* While a slider row holds the focus, name the fine
+             * step (build I) where the eye already is: the A tile
+             * plus the words. */
+            if (g_focus_row >= 0 && g_focus_row < pg.nrows && rows[g_focus_row].kind == DK_R_SLIDER) {
+                tile(DK_SPR_TILE_A);
+                wdl->AddText(ImVec2(x + 6.0f * u, cy - lh * 0.5f), u32(kFootBright), "+ DPAD: FINE STEP");
+                x += 6.0f * u + ImGui::CalcTextSize("+ DPAD: FINE STEP").x + 16.0f * u;
+            }
             ImGui::Dummy(ImVec2(0.0f, ih));
         } else {
             chip("DPAD", "MOVE", kKeyFace, kKeyText);
@@ -1064,6 +1178,10 @@ void build_menu(int fb_w, int fb_h)
              * a tap, a half-second hold, or L+R+Minus -- xinput_device.c's
              * menu_button_tick). Display only, like the other chips. */
             chip("-", "CLOSE", kKeyFace, kKeyText);
+            /* The fine step's footer name, shown while a slider
+             * row holds the focus (build I). */
+            if (g_focus_row >= 0 && g_focus_row < pg.nrows && rows[g_focus_row].kind == DK_R_SLIDER)
+                chip("A + DPAD", "FINE STEP", kKeyFace, kKeyText);
         }
         ImGui::PopFont();
     }
