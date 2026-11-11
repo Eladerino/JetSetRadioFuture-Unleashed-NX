@@ -7,9 +7,12 @@
  * the build machine's whole path), announces the build in the log,
  * and starts the flush thread that dumps counters every 60 s -- a
  * HOME-close never runs exit code, so the periodic dump is what
- * guarantees a profile survives the session. A bonus dump hangs off
- * the normal exit path where the platform glue provides one. The
- * flush is serialized on a spin flag: __gcov_dump is not reentrant.
+ * guarantees a profile survives the session. Each flush is a dump
+ * plus a reset (see jsrf_pgo_flush_once for why the reset is
+ * load-bearing) and logs a heartbeat line per tick. A bonus dump
+ * hangs off the normal exit path where the platform glue provides
+ * one. The flush is serialized on a spin flag: __gcov_dump is not
+ * reentrant.
  */
 
 #include <stdio.h>
@@ -19,6 +22,7 @@
 #include <switch.h>
 
 extern void __gcov_dump(void);
+extern void __gcov_reset(void);
 
 #ifndef JSRF_PGO_GCOV_STRIP
 /* Fallback for a compile without the CMake-baked value: the strip
@@ -30,12 +34,26 @@ static volatile int s_pgo_flushing;
 static Thread s_pgo_thread;
 static char s_pgo_stack[64 * 1024] __attribute__((aligned(0x1000)));
 
-static void jsrf_pgo_flush_once(void)
+/* One flush: dump the counters gathered since the last flush, then
+ * reset.  The reset is load-bearing, not hygiene: this libgcov
+ * latches every gcov root "dumped" inside __gcov_dump
+ * (__gcov_dump_one skips a root whose flags byte has bit 0 set, and
+ * sets it after dumping), so a dump-only loop writes exactly one
+ * profile per boot -- proven on hardware 2026-11-11, when boot 3's
+ * clean 3-cycle patrol never reached its .gcda (files frozen at the
+ * first tick, runs=1).  __gcov_reset clears the latch along with
+ * the counters, and each dump merges into the .gcda already on the
+ * card, so the file still ends up holding the whole session's
+ * counts.  This libgcov ships no __gcov_flush, so the pair is
+ * spelled out.  Returns 1 when a flush ran. */
+static int jsrf_pgo_flush_once(void)
 {
     if (__atomic_exchange_n(&s_pgo_flushing, 1, __ATOMIC_ACQ_REL))
-        return;
+        return 0;
     __gcov_dump();
+    __gcov_reset();
     __atomic_store_n(&s_pgo_flushing, 0, __ATOMIC_RELEASE);
+    return 1;
 }
 
 void jsrf_pgo_exit_dump(void)
@@ -45,10 +63,21 @@ void jsrf_pgo_exit_dump(void)
 
 static void jsrf_pgo_flush_thread(void *arg)
 {
+    unsigned tick = 0;
+
     (void)arg;
     for (;;) {
         svcSleepThread(60000000000ULL);   /* 60 s */
-        jsrf_pgo_flush_once();
+        tick++;
+        /* The heartbeat is the recurrence proof: one line per tick,
+         * printed only after the flush returns, so a boot log alone
+         * separates "flushes recurred" from "the first flush never
+         * returned" and from "later flushes were skipped". */
+        if (jsrf_pgo_flush_once())
+            fprintf(stderr, "[pgo] tick %u dumped\n", tick);
+        else
+            fprintf(stderr, "[pgo] tick %u skipped\n", tick);
+        fflush(stderr);
     }
 }
 
