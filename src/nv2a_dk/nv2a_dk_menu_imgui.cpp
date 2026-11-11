@@ -1374,6 +1374,95 @@ void build_menu(int fb_w, int fb_h)
 
 }  // namespace
 
+/* ── NOW PLAYING: the track-name banner ─────────────────────────────
+ * When a chosen track starts (a custom file, the DJ mix's stream, a
+ * district assignment), the kernel publishes its display name
+ * (kernel_file.c); this is the banner that shows it: a small bar in
+ * the top open space of the frame (x 19-59%, y from 5%, clear of the
+ * FPS counter at the left and the health/spray cluster at the
+ * right), the skin's message-panel art washed as the bar, the name
+ * in the game's font. The line -- "NOW PLAYING: " and the name --
+ * scrolls through the bar from right to left, clipped to the bar's
+ * box, one pass; a name short enough to fit stands still instead.
+ * Then the bar is gone until the next chosen track. It is not a
+ * letterbox and never waits for input.
+ *
+ * Scroll speed 230 px/s at 720p, scaled with the frame height -- a
+ * touch faster than the approved mock's ~150 px/s, so the longest
+ * realistic line (a remixed licensed title, ~66 characters) is
+ * through in about six seconds; a fitting name dwells 3.5 s.
+ *
+ * The banner is drawn from two frame paths: while the menu is open,
+ * dk_imgui_menu_frame advances its clock but does not draw it (the
+ * menu's own panel owns the top of the screen then); while the menu
+ * is shut, dk_imgui_overlay_frame runs a frame for it alone. It
+ * fails closed like the skin: without the skin's art and font there
+ * is no banner, rather than one in the wrong dress -- the one
+ * exception is a name the game font's page cannot spell (its
+ * coverage is codes 0x21..0x74), which keeps the caller's normal
+ * text path, the skin's own rule for such strings. */
+static struct {
+    unsigned seen;
+    double t0;
+    char text[192];
+    int active;
+} s_npui;
+
+static void now_playing_update(int fb_w, int fb_h, int draw)
+{
+    char buf[192];
+    unsigned seq = dk_menu_nowplaying_poll(buf, sizeof buf);
+    double now = ImGui::GetTime();
+    if (seq && seq != s_npui.seen) {
+        s_npui.seen = seq;
+        snprintf(s_npui.text, sizeof s_npui.text, "%s", buf);
+        s_npui.t0 = now;
+        s_npui.active = 1;
+    }
+    if (!s_npui.active) return;
+    if (!dk_menu_skin_ok()) { s_npui.active = 0; return; }  /* fail closed */
+    char line[224], up[224];
+    size_t i;
+    snprintf(line, sizeof line, "NOW PLAYING: %s", s_npui.text);
+    for (i = 0; line[i] && i < sizeof up - 1; i++) {
+        char c = line[i];
+        up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+    up[i] = 0;
+    float W = (float)fb_w, H = (float)fb_h;
+    float x0 = 0.19f * W, x1 = 0.59f * W, y0 = 0.05f * H, bh = 0.075f * H;
+    float ink = bh * 0.46f;
+    int covered = dk_menu_game_text_covered(up);
+    float tw = covered
+        ? dk_menu_game_text_width(up, ink)
+        : ImGui::GetFont()->CalcTextSizeA(ink * 1.35f, 1e9f, 0.0f, up).x;
+    float bw = x1 - x0, pad = bh * 0.3f;
+    float speed = 230.0f * (H / 720.0f);
+    double age = now - s_npui.t0, life;
+    float tx;
+    if (tw <= bw - 2.0f * pad) {
+        life = 3.5;
+        tx = x0 + (bw - tw) * 0.5f;
+    } else {
+        life = (double)(tw + bw) / (double)speed;
+        tx = x1 - (float)(age * (double)speed);
+    }
+    if (age >= life) { s_npui.active = 0; return; }
+    if (!draw) return;
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    dk_menu_draw_panel_wash(dl, ImVec2(x0, y0), ImVec2(x1, y0 + bh),
+                            0.92f, 10.0f * (H / 720.0f));
+    dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y0 + bh), true);
+    if (covered)
+        dk_menu_draw_game_text(dl, ImVec2(tx, y0 + (bh - ink) * 0.5f), up,
+                               ink, IM_COL32(255, 255, 255, 255));
+    else
+        dl->AddText(ImGui::GetFont(), ink * 1.35f,
+                    ImVec2(tx, y0 + (bh - ink * 1.35f) * 0.5f),
+                    IM_COL32(255, 255, 255, 255), up);
+    dl->PopClipRect();
+}
+
 /* FLAG -- INIT TIMING (needs a hardware A/B): everything init()
  * does -- the ImGui context, the pl shared-font load, the backend's
  * shader compiles and descriptor memory -- used to happen lazily at
@@ -1426,6 +1515,40 @@ void dk_imgui_menu_frame(uint32_t buttons, int fb_w, int fb_h)
     feed_input(io, buttons);
     ImGui::NewFrame();
     build_menu(fb_w, fb_h);
+    /* The banner's clock runs while the menu is open, but the menu's
+     * own panel owns the top of the screen: advance, do not draw. */
+    now_playing_update(fb_w, fb_h, 0);
+    ImGui::Render();
+    dk_imgui_render(ImGui::GetDrawData(), fb_w, fb_h);
+}
+
+void dk_imgui_overlay_frame(int fb_w, int fb_h)
+{
+    if (g_broken || !g_init) return;
+    /* Self-gate before any frame begins: a live banner, or a publish
+     * not yet seen, is the only reason to run one. */
+    {
+        char buf[192];
+        unsigned seq = dk_menu_nowplaying_poll(buf, sizeof buf);
+        if (!s_npui.active && (!seq || seq == s_npui.seen)) return;
+    }
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(float(fb_w), float(fb_h));
+    {
+        /* Its own delta clock: the menu frame's gap bookkeeping
+         * (g_last_t, the reopen detector) stays exactly as it was,
+         * and each present runs at most one of the two paths. */
+        static double s_last_t;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        double now = double(ts.tv_sec) + double(ts.tv_nsec) / 1e9;
+        io.DeltaTime = s_last_t > 0.0 ? float(now - s_last_t) : 1.0f / 60.0f;
+        if (io.DeltaTime <= 0.0f) io.DeltaTime = 1.0f / 60.0f;
+        if (io.DeltaTime > 0.1f) io.DeltaTime = 0.1f;
+        s_last_t = now;
+    }
+    ImGui::NewFrame();
+    now_playing_update(fb_w, fb_h, 1);
     ImGui::Render();
     dk_imgui_render(ImGui::GetDrawData(), fb_w, fb_h);
 }
@@ -1434,5 +1557,6 @@ void dk_imgui_menu_frame(uint32_t buttons, int fb_w, int fb_h)
 
 void dk_imgui_menu_frame(uint32_t, int, int) {}
 void dk_imgui_menu_warm(void) {}
+void dk_imgui_overlay_frame(int, int) {}
 
 #endif

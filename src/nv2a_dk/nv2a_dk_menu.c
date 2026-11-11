@@ -58,6 +58,8 @@ extern int  recomp_custom_track_state(void);
 extern const char *recomp_custom_track_name(void);
 extern int  recomp_district_music_get(uint32_t mission, uint32_t *id_out, char *leaf_out, size_t leaf_n);
 extern void recomp_district_music_set(uint32_t mission, int kind, uint32_t id, const char *leaf);
+extern void xbox_now_playing_enable(int on);
+extern int  xbox_now_playing_poll(char *buf, size_t n, unsigned *seq_out);
 extern const char *recomp_version(void);
 extern int  nv2a_widescreen(void);
 extern void nv2a_set_widescreen(int on);
@@ -1428,6 +1430,19 @@ static const char *district_status(intptr_t a, char *buf, size_t n)
 }
 static const char *district_about(intptr_t a, char *buf, size_t n)
 { (void)a; snprintf(buf, n, "AN ASSIGNMENT IS THE FIRST MUSIC AN AREA PLAYS: WHEN YOU ENTER THE AREA IT TAKES OVER FROM THE AREA'S OWN MUSIC AT THE FIRST IN-PLAY MOMENT -- ONE OF THE GAME'S TRACKS OR SETS, OR ONE OF YOUR CUSTOM FILES ON THE SET 01A CARRIER -- AND PLAYS UNTIL THE GAME NEXT CHANGES THE MUSIC ITSELF. A TRACK OR CUSTOM FILE YOU PICK BY HAND OUTRANKS AN ASSIGNMENT. IF AN ASSIGNMENT'S STREAM WOULD BE REWRITTEN BY THE DJ MIX, THE MIX IS SET BACK TO USE AREA MIX AS THE ASSIGNMENT FIRES, LIKE A MANUAL PICK. ASSIGNMENTS ARE KEPT IN THE SETTINGS FILE. THEY APPLY TO THE FREE-SKATE AREAS LISTED HERE; STORY MISSIONS IN THE SAME STREETS KEEP THE GAME'S MUSIC."); return buf; }
+
+/* ── Now playing ───────────────────────────────────────────────────
+ * The toggle for the track-name banner. The banner itself lives in
+ * the front-end and the kernel (kernel_file.c publishes the name
+ * when a chosen track starts); this row is the switch: the settings
+ * file's now_playing key is the store, and the setter also pushes
+ * the live value into the kernel, whose own lazy seed reads the
+ * same key before the first banner of a session. */
+static int  np_get(intptr_t a) { (void)a; return cfg_get("now_playing", 1); }
+static void np_set(intptr_t a, int on)
+{ (void)a; on = !!on; cfg_set("now_playing", on); xbox_now_playing_enable(on); }
+static const char *np_about(intptr_t a, char *buf, size_t n)
+{ (void)a; snprintf(buf, n, "WHEN A TRACK YOU CHOSE STARTS -- A CUSTOM FILE, THE DJ MIX'S NEXT STREAM, OR AN AREA'S ASSIGNED TRACK -- ITS NAME SCROLLS ONCE THROUGH A SMALL BAR AT THE TOP OF THE SCREEN AND IS GONE. GAME TRACKS SHOW THEIR REAL NAMES; A CUSTOM TRACK SHOWS ITS FILE NAME, WITH UNDERSCORES AS SPACES, SO NAME THE FILE WHAT YOU WANT SHOWN. THE BAR NEEDS THE GAME-ASSETS SKIN'S ART AND FONT, LIKE THE MENU: WITHOUT THEM IT STAYS AWAY RATHER THAN SHOW IN THE WRONG DRESS."); return buf; }
 static const DkRow k_music_rows[] = {
     SECTION("MUSIC"),
     CHOICE("DJ MIX (NEXT STREAM)", "Which of the game's DJ mixes plays, instead of each area's own. Use Area Mix gives the choice back to the game. Left and right stage a pick; open the list and select it to apply it. It takes over on the next music stream the game starts, never mid-track. This session only.", music_get, music_set, k_music_names),
@@ -1443,6 +1458,9 @@ static const DkRow k_music_rows[] = {
     CHOICEA("PLAY A CUSTOM TRACK", "Play one of your own .adx files from the custom_tracks folder in the app folder. Left and right stage a pick; open the list and select it to play it. It starts at the next in-play moment and runs until the game changes the music itself. Picking a custom track also resets the DJ mix to USE AREA MIX. This session only.", custom_get, custom_set, s_custom_names, 0, custom_avail),
     INFO("CUSTOM STATUS", "What the custom folder holds, and what you have latched.", custom_status),
     INFO("ABOUT CUSTOM TRACKS", "What a custom track is, and the rules its file has to follow.", custom_about),
+    SECTION("NOW PLAYING"),
+    CHECK("SHOW TRACK NAMES", "Show the name of each track you chose as it starts, in a small bar at the top of the screen.", np_get, np_set),
+    INFO("ABOUT NOW PLAYING", "When the banner appears, and where its names come from.", np_about),
     SECTION("DISTRICT SOUNDTRACKS"),
     SECTION("SHIBUYA-CHO"),
     CHOICEA("Shibuya Terminal", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 0, NULL),
@@ -1916,6 +1934,7 @@ static void reset_apply(void)
     /* Music: district assignments back to DEFAULT (their settings
      * lines are dropped like any other cleared setting). */
     district_clear_all();
+    np_set(0, 1);           /* now_playing back on */
     /* Developer: game */
     if (recomp_mission_redirect_state()) recomp_mission_redirect_toggle();
     switch_reset(&k_sw[SW_MUTE], 0);
@@ -2035,7 +2054,13 @@ void nv2a_dk_menu_input(uint32_t buttons)
 
 void nv2a_dk_menu_draw(void)
 {
-    if (!xbox_MenuIsOpen()) return;
+    if (!xbox_MenuIsOpen()) {
+        /* The menu is shut, but the NOW PLAYING banner may still
+         * have something to show: it lives in the front-end's
+         * overlay frame, which self-gates when there is nothing. */
+        dk_imgui_overlay_frame(dk_ui_fb_w(), dk_ui_fb_h());
+        return;
+    }
     dk_imgui_menu_frame(__atomic_load_n(&s_buttons, __ATOMIC_ACQUIRE),
                         dk_ui_fb_w(), dk_ui_fb_h());
 }
@@ -2084,6 +2109,12 @@ int dk_menu_custom_stage(void) { return custom_stage(); }
 void dk_menu_custom_stage_step(const DkRow *r, int d) { custom_stage_step(r, d); }
 int dk_menu_district_stage(const DkRow *r) { return district_stage_of(r->arg); }
 void dk_menu_district_stage_step(const DkRow *r, int d) { district_stage_step(r, d); }
+unsigned dk_menu_nowplaying_poll(char *buf, size_t n)
+{
+    unsigned s = 0;
+    if (!xbox_now_playing_poll(buf, n, &s)) return 0;
+    return s;
+}
 
 int dk_menu_modal_action(void)
 {

@@ -72,6 +72,7 @@ int  dk_menu_custom_stage(void);
 void dk_menu_custom_stage_step(const DkRow *r, int d);
 int  dk_menu_district_stage(const DkRow *r);
 void dk_menu_district_stage_step(const DkRow *r, int d);
+unsigned dk_menu_nowplaying_poll(char *buf, size_t n);
 int  dk_menu_modal_action(void);
 const char *dk_menu_modal_title(void);
 const char *dk_menu_modal_body(void);
@@ -83,6 +84,12 @@ void dk_menu_modal_cancel(void);
  * into the renderer's command buffer. Renderer thread, called from
  * nv2a_dk_menu_draw() while the menu is open. */
 void dk_imgui_menu_frame(uint32_t buttons, int fb_w, int fb_h);
+
+/* The NOW PLAYING banner's frame, for when the menu is shut: runs
+ * a front-end frame holding only the banner. Self-gating: with no
+ * banner live it returns before any ImGui frame begins. Renderer
+ * thread, called from nv2a_dk_menu_draw() while the menu is closed. */
+void dk_imgui_overlay_frame(int fb_w, int fb_h);
 
 /* Pay the front-end's one-time init (ImGui context, the shared
  * font, the backend's shaders and descriptors) ahead of the first

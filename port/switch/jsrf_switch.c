@@ -330,7 +330,11 @@ static void drop_custom_tracks_readme(const char *dir)
 "files: 44.1 kHz, stereo, unencrypted.\n"
 "\n"
 "A pick plays through the game's own music changer, riding on the\n"
-"SET 01A stream, and lasts until the game changes the music itself.\n",
+"SET 01A stream, and lasts until the game changes the music itself.\n"
+"\n"
+"The name shown for a track (the NOW PLAYING banner) is the file\n"
+"name with the .adx removed and underscores shown as spaces, so\n"
+"name the file what you want shown.\n",
         f);
     fclose(f);
 }

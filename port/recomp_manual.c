@@ -1692,6 +1692,7 @@ extern void xbox_custom_track_arm(const char *abs_host_path);
 extern void xbox_custom_track_disarm(void);
 extern int  xbox_music_mix_override(void);
 extern void xbox_music_mix_select(int set);
+extern void xbox_now_playing_notify_id(uint32_t id);
 
 void recomp_custom_track_request(const char *leaf)
 {
@@ -1903,6 +1904,77 @@ static int district_custom_leaf_ok(const char *leaf)
             | ((uint32_t)hdr[14] << 8) | (uint32_t)hdr[15];
     if (rate < 8000u || rate > 96000u) return 0;
     if (samples == 0) return 0;
+    return 1;
+}
+
+/* ---- now playing: the banner's state -------------------------------
+ * kernel_file.c resolves the display name of a track the player
+ * chose (a custom file served through the carrier, the DJ mix's
+ * stream, a district assignment's fire) and hands it here; the
+ * menu's front-end polls it to run the banner. The state lives in
+ * this file -- not in the kernel's -- because the executable's link
+ * order puts libxbox_kernel.a before libxbox_nv2a_dk.a: a poll
+ * defined there is invisible to the menu object that calls it,
+ * while this file's objects are always linked. The toggle is the
+ * settings file's now_playing key (the Music page's NOW PLAYING row
+ * writes it and pushes the live value through
+ * xbox_now_playing_enable); the seed read is lazy, on first use,
+ * the way district_load reads the same file. Default ON. */
+static char s_np_text[192];
+static volatile unsigned s_np_seq;
+static char s_np_last[192];
+static long s_np_last_s;
+static volatile int s_np_enabled = -1;   /* -1: not seeded yet */
+
+static int np_enabled(void)
+{
+    int v = __atomic_load_n(&s_np_enabled, __ATOMIC_ACQUIRE);
+    const char *sf;
+    FILE *f;
+    char line[256];
+    if (v >= 0) return v;
+    v = 1;
+    sf = getenv("JSRF_SETTINGS_FILE");
+    if (sf && *sf && (f = fopen(sf, "r")) != NULL) {
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "now_playing=", 12)) {
+                v = atoi(line + 12) != 0;
+                break;
+            }
+        fclose(f);
+    }
+    __atomic_store_n(&s_np_enabled, v, __ATOMIC_RELEASE);
+    return v;
+}
+
+void xbox_now_playing_enable(int on)
+{
+    __atomic_store_n(&s_np_enabled, on ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+void recomp_now_playing_publish(const char *display)
+{
+    long now;
+    if (!display || !*display || !np_enabled()) return;
+    now = (long)time(NULL);
+    if (!strcmp(s_np_last, display) && now - s_np_last_s < 20)
+        return;   /* the same track again inside 20 s is not news */
+    snprintf(s_np_text, sizeof s_np_text, "%s", display);
+    snprintf(s_np_last, sizeof s_np_last, "%s", display);
+    s_np_last_s = now;
+    __atomic_add_fetch(&s_np_seq, 1u, __ATOMIC_RELEASE);
+    fprintf(stderr, "[NP] %s\n", display);
+}
+
+/* The front-end's poll: 1 and the current display in buf when a
+ * banner is live, with the publish sequence in *seq_out so the
+ * front-end can tell a new track from the one already scrolling. */
+int xbox_now_playing_poll(char *buf, size_t n, unsigned *seq_out)
+{
+    unsigned s = __atomic_load_n(&s_np_seq, __ATOMIC_ACQUIRE);
+    if (seq_out) *seq_out = s;
+    if (!s || !np_enabled()) return 0;
+    if (buf && n) snprintf(buf, n, "%s", s_np_text);
     return 1;
 }
 
@@ -2697,7 +2769,8 @@ static void music_district_step(uint32_t flow, double state_at, double now)
                   now, (unsigned)GetCurrentThreadId(), g_esp, id, mission,
                   id9c, idb8);
           { uint32_t r = guest_call_cdecl(sub_00116F50, 0x00116F50u, 3, a);
-            fprintf(stderr, "[DISTRICT] PlayBGM(%u) returned %08X\n", id, r); } }
+            fprintf(stderr, "[DISTRICT] PlayBGM(%u) returned %08X\n", id, r);
+            xbox_now_playing_notify_id(id); } }
     } else {   /* DISTRICT_KIND_CUSTOM */
         char abs[320];
         if (!district_custom_leaf_ok(leaf)) {
