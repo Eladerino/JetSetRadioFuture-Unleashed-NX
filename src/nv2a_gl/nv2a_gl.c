@@ -1796,7 +1796,7 @@ static volatile int g_rstick_ease = -1;
 int nv_window_pref_rstick_ease(void);
 int nv_window_pref_rstick_ease(void)
 {
-    if (g_rstick_ease < 0) g_rstick_ease = sdl_cfg_get("rstick_easeback", 0) != 0;
+    if (g_rstick_ease < 0) g_rstick_ease = sdl_cfg_get("rstick_easeback", 1) != 0;
     return g_rstick_ease;
 }
 static void nv_window_set_rstick_ease(int on)

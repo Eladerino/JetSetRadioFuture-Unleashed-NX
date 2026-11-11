@@ -274,17 +274,17 @@ int nv_window_pref_rstick_camera(void)
 
 int nv_window_pref_rstick_ease(void)
 {
-    if (s_rcam_ease < 0) s_rcam_ease = cfg_get("rstick_easeback", 0) != 0;
+    if (s_rcam_ease < 0) s_rcam_ease = cfg_get("rstick_easeback", 1) != 0;
     return s_rcam_ease;
 }
 
 /* Stage 1 of the camera plan: while this is on, the ease back only
  * runs when the movement stick is also untouched (see recomp_manual.c).
- * This build's trial default is on; the GL build has no definition,
- * so its weak default keeps today's behaviour there. */
+ * Default off since Nov 11 2026 (the ease back defaults on instead);
+ * the GL build has no definition, so its weak default agrees there. */
 int nv_window_pref_rstick_holdview(void)
 {
-    if (s_rcam_hold < 0) s_rcam_hold = cfg_get("rstick_holdview", 1) != 0;
+    if (s_rcam_hold < 0) s_rcam_hold = cfg_get("rstick_holdview", 0) != 0;
     return s_rcam_hold;
 }
 
@@ -722,8 +722,8 @@ static void camwalls_set(intptr_t a, int on)
 static const DkRow k_controller_rows[] = {
     SECTION("CAMERA"),
     CHOICE("RIGHT-STICK CAMERA", "Off: the right stick is the game's own (its first-person look). Camera: the stick turns the view and the skater's heading with it, so up on the left stick goes where the camera looks. Tracking: the stick turns the view only; the skater keeps his heading. Applies at once; kept in the settings file.", rcam_get, rcam_set, k_rcam_choices),
-    CHECK("CAMERA EASES BACK WHEN RELEASED", "After you let go of the right stick, the view drifts back behind the skater. Off on the Switch by default: the held view is the point, and the L trigger already resets the turn. Kept in the settings file.", ease_get, ease_set),
-    CHECK("CAMERA HOLDS ITS VIEW", "With the ease back on, it only drifts home while the movement stick is also untouched: pan, let go of the right stick and keep skating, and the view stays where you put it. This build's camera trial; turn it off for the shipped behaviour. Kept in the settings file.", hold_get, hold_set),
+    CHECK("CAMERA EASES BACK WHEN RELEASED", "After you let go of the right stick, the view drifts back behind the skater. On by default; turn it off to keep the view where you put it, and the L trigger already resets the turn. Kept in the settings file.", ease_get, ease_set),
+    CHECK("CAMERA HOLDS ITS VIEW", "With the ease back on, it only drifts home while the movement stick is also untouched: pan, let go of the right stick and keep skating, and the view stays where you put it. Off by default; turn it on to hold the view while you skate. Kept in the settings file.", hold_get, hold_set),
     CHECK("GRAFFITI CAMERA", "On, as on the Xbox: spraying graffiti cuts the camera to frame the spot, then snaps it back behind you, and talking to someone turns the view to face them. Off: the camera stays behind your skater for both. Applies at once; kept in options.txt.", grafcam_get, grafcam_set),
     CHECK("CAMERA WALLS (RESTART)", "On: the game's camera is kept out of walls, so at a glancing angle scenery never swallows the view at the screen edges. Off: the game's own camera exactly, blind spots included. The fix reads this once at start, so a change here applies from the next start; kept in options.txt.", camwalls_get, camwalls_set),
     SECTION("PAD"),
