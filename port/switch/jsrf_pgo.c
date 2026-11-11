@@ -26,7 +26,7 @@ extern void __gcov_reset(void);
 
 #ifndef JSRF_PGO_GCOV_STRIP
 /* Fallback for a compile without the CMake-baked value: the strip
- * for the standard ~/jsrf-switch-build-*/build-switch layout. */
+ * for the standard jsrf-switch-build-<name>/build-switch layout. */
 #define JSRF_PGO_GCOV_STRIP 3
 #endif
 
