@@ -3916,7 +3916,7 @@ static void present(int show_loading)
         } else if (now - t_win >= freq / 2) {
             double secs = (double)(now - t_win) / (double)freq;
             unsigned fdelta = s_frames - f_win;
-            snprintf(line, sizeof line, "%.0f FPS",
+            snprintf(line, sizeof line, "%.0f",
                      (double)fdelta / secs);
             line2[0] = 0;
             if (s_fps_ms > 0)
