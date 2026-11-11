@@ -347,9 +347,14 @@ endif()
 # The gcda path strip is baked from the build directory's depth, and
 # the pgo runtime TU joins the Switch glue whenever this tree builds
 # for the console; its start call is gated on JSRF_PGO_GENERATE.
+# _jsrf_bin_n counts one component too many: splitting an absolute
+# path on "/" yields a leading empty component, so the strip
+# subtracts 2, not 1.  (At components - 1 the strip also ate the
+# build-switch component and the .gcda landed one level shallow:
+# pgo/CMakeFiles/... instead of pgo/build-switch/CMakeFiles/....)
 string(REPLACE "/" ";" _jsrf_bin_parts "${CMAKE_BINARY_DIR}")
 list(LENGTH _jsrf_bin_parts _jsrf_bin_n)
-math(EXPR JSRF_PGO_GCOV_STRIP "${_jsrf_bin_n} - 1")
+math(EXPR JSRF_PGO_GCOV_STRIP "${_jsrf_bin_n} - 2")
 set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/switch/jsrf_pgo.c" APPEND PROPERTY
     COMPILE_DEFINITIONS "JSRF_PGO_GCOV_STRIP=${JSRF_PGO_GCOV_STRIP}")
 if(JSRF_PGO_GENERATE)

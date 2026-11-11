@@ -21,7 +21,9 @@
 extern void __gcov_dump(void);
 
 #ifndef JSRF_PGO_GCOV_STRIP
-#define JSRF_PGO_GCOV_STRIP 4
+/* Fallback for a compile without the CMake-baked value: the strip
+ * for the standard ~/jsrf-switch-build-*/build-switch layout. */
+#define JSRF_PGO_GCOV_STRIP 3
 #endif
 
 static volatile int s_pgo_flushing;
