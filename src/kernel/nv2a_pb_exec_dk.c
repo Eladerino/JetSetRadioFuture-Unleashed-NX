@@ -2110,6 +2110,37 @@ static inline void shadow_write(uint32_t method, uint32_t param)
     s_reg_dirty[SHADOW_BLOCK(word)] = 1;
 }
 
+/* RECOMP_PB_VPBATCH: batch vp_upload_run's per-word work. Present and
+ * != "0" = on, read per call; absent (or "0") = the shipped per-word
+ * code path in vp_upload_run, kept verbatim. */
+static int vp_batch_on(void)
+{
+    const char *e = getenv("RECOMP_PB_VPBATCH");
+
+    return e && strcmp(e, "0") != 0;
+}
+
+/* shadow_write for a run of consecutive shadow words: compare and copy
+ * in 64-byte block chunks -- a chunk is memcpy'd into the shadow and
+ * flagged in s_reg_dirty only when memcmp says it changed, so the end
+ * state and dirty set are exactly the per-word result. */
+static void shadow_write_run(uint32_t method, const uint32_t *p, uint32_t n)
+{
+    uint32_t word = (method & 0x1FFCu) / 4;
+    uint32_t i = 0;
+
+    while (i < n) {
+        uint32_t chunk = 16 - (word + i) % 16;
+        if (chunk > n - i)
+            chunk = n - i;
+        if (memcmp(s_reg + word + i, p + i, (size_t)chunk * 4) != 0) {
+            memcpy(s_reg + word + i, p + i, (size_t)chunk * 4);
+            s_reg_dirty[SHADOW_BLOCK(word + i)] = 1;
+        }
+        i += chunk;
+    }
+}
+
 /* Time the executor spends stalled on NOP traps (waiting for the title's
  * PGRAPH handler), for the [perf] line. */
 static uint64_t s_trap_us, s_trap_n;
@@ -2544,6 +2575,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 static uint32_t vp_upload_run(uint32_t method, const uint32_t *p, uint32_t n)
 {
     uint32_t i = 0, kp = 0, k = (NV097_SET_TRANSFORM_CONSTANT + 0x80 - method) / 4, load;
+    int batch = vp_batch_on();
 
     if (k > n)
         k = n;
@@ -2551,31 +2583,81 @@ static uint32_t vp_upload_run(uint32_t method, const uint32_t *p, uint32_t n)
         kp = (NV097_SET_TRANSFORM_CONSTANT - method) / 4;
         if (kp > k)
             kp = k;
+        if (batch)
+            shadow_write_run(method, p, kp);
         load = s_vp.prog_load;
-        for (; i < kp; i++) {
-            uint32_t slot = (method + i * 4 - NV097_SET_TRANSFORM_PROGRAM) / 4;
-            shadow_write(method + i * 4, p[i]);
-            if (load < VP_SLOTS)
-                s_vp.prog[load][slot % 4] = p[i];
-            load += slot % 4 == 3;
+        if (batch) {
+            uint32_t base_slot = (method - NV097_SET_TRANSFORM_PROGRAM) / 4;
+            while (i < kp) {
+                uint32_t slot = base_slot + i;
+                uint32_t lane = slot % 4;
+                if (lane == 0 && kp - i >= 4) {
+                    if (load < VP_SLOTS)
+                        memcpy(s_vp.prog[load], p + i, 16);
+                    load += 1;
+                    i += 4;
+                } else {
+                    if (load < VP_SLOTS)
+                        s_vp.prog[load][lane] = p[i];
+                    load += lane == 3;
+                    i++;
+                }
+            }
+        } else {
+            for (; i < kp; i++) {
+                uint32_t slot = (method + i * 4 - NV097_SET_TRANSFORM_PROGRAM) / 4;
+                shadow_write(method + i * 4, p[i]);
+                if (load < VP_SLOTS)
+                    s_vp.prog[load][slot % 4] = p[i];
+                load += slot % 4 == 3;
+            }
         }
         s_vp.prog_load = load;
         s_vp.prog_gen += kp;
         s_ws.prog += kp;
     }
+    if (batch)
+        shadow_write_run(method + kp * 4, p + kp, k - kp);
     load = s_vp.const_load;
     {
         uint32_t first = VP_CONSTS, last = 0;     /* rows written */
-        for (; i < k; i++) {
-            uint32_t slot = (method + i * 4 - NV097_SET_TRANSFORM_CONSTANT) / 4;
-            shadow_write(method + i * 4, p[i]);
-            if (load < VP_CONSTS) {
-                memcpy(&s_vp.c[load][slot % 4], &p[i], 4);
-                if (first == VP_CONSTS)
-                    first = load;
-                last = load;
+        if (batch) {
+            uint32_t base_slot = (method + kp * 4 - NV097_SET_TRANSFORM_CONSTANT) / 4;
+            while (i < k) {
+                uint32_t slot = base_slot + (i - kp);
+                uint32_t lane = slot % 4;
+                if (lane == 0 && k - i >= 4) {
+                    if (load < VP_CONSTS) {
+                        memcpy(s_vp.c[load], p + i, 16);
+                        if (first == VP_CONSTS)
+                            first = load;
+                        last = load;
+                    }
+                    load += 1;
+                    i += 4;
+                } else {
+                    if (load < VP_CONSTS) {
+                        memcpy(&s_vp.c[load][lane], &p[i], 4);
+                        if (first == VP_CONSTS)
+                            first = load;
+                        last = load;
+                    }
+                    load += lane == 3;
+                    i++;
+                }
             }
-            load += slot % 4 == 3;
+        } else {
+            for (; i < k; i++) {
+                uint32_t slot = (method + i * 4 - NV097_SET_TRANSFORM_CONSTANT) / 4;
+                shadow_write(method + i * 4, p[i]);
+                if (load < VP_CONSTS) {
+                    memcpy(&s_vp.c[load][slot % 4], &p[i], 4);
+                    if (first == VP_CONSTS)
+                        first = load;
+                    last = load;
+                }
+                load += slot % 4 == 3;
+            }
         }
         if (first < VP_CONSTS) {
             vp_const_dirty(first);
