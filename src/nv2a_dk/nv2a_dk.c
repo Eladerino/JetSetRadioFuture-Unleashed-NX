@@ -3266,23 +3266,36 @@ int dk_ui_post_vig(void)
 void dk_ui_set_post_crt(int step) { s_post_crt = step < 0 ? 0 : step > 4 ? 4 : step; }
 void dk_ui_set_post_vig(int step) { s_post_vig = step < 0 ? 0 : step > 4 ? 4 : step; }
 
-/* The steps as shader parameters. The mixes Brandon picked from
- * were made at 720p from the campaign's park capture: CRT HEAVY is
- * a scanline depth of 0.42 at a 2-pixel period, a grille of +-10%
- * and a compensating brightness of 1.12; VIGNETTE STRONG falls to
- * 18% brightness at the corners, a 2.2 exponent over a radius of
- * 0.62 of the picture's half-size. Those mixes are the MAX step
- * verbatim; the steps below divide the dose. The scanline period
- * is in presented pixels and scales with the swapchain's height
- * (2 px at 720p, 3 px at 1080p): the raster belongs to the screen,
- * not to the internal size the dynamic scale is currently using. */
+/* The steps as shader parameters. The first hardware run (Nov 5)
+ * showed the transplant from the Tier B stills was misjudged at real
+ * output scale: the +-10% grille darkened the two channels it did
+ * not boost (net x0.855 light at MAX before the vignette), the grade
+ * was too weak to notice, and the vignette's 0.62 radius put its
+ * falloff over most of the frame. The values below are the
+ * POSTPASS-DIAGNOSIS rebalance -- dial-in starting points, desk-
+ * checked as a ladder over a game capture, not final values. The
+ * grille is luminance-neutral (the phased channel gets 1+2g, the
+ * other two 1-g, so a full 3-column cycle averages exactly 1.0) and
+ * capped at 4%; the brightness column is the scanline's own
+ * compensation 1/(1-depth/2), capped at 1.25 so MAX does not blow
+ * highlights; the grade the CRT row was missing rides alongside in
+ * k_post_grade_tab. The vignette keeps the picked corner values but
+ * over a 0.90 radius at exponent 2.6, so the falloff lives in the
+ * corners instead of everywhere. The scanline period is in
+ * presented pixels and scales with the swapchain's height (2 px at
+ * 720p, 3 px at 1080p): the raster belongs to the screen, not to
+ * the internal size the dynamic scale is currently using. */
 static const float k_post_crt_tab[5][3] = {   /* depth, grille, brightness */
-    { 0.00f, 0.00f, 1.00f }, { 0.12f, 0.03f, 1.03f }, { 0.22f, 0.05f, 1.06f },
-    { 0.32f, 0.08f, 1.09f }, { 0.42f, 0.10f, 1.12f },
+    { 0.00f, 0.00f, 1.00f }, { 0.15f, 0.01f, 1.08f }, { 0.28f, 0.02f, 1.17f },
+    { 0.40f, 0.03f, 1.25f }, { 0.55f, 0.04f, 1.25f },
 };
-static const float k_post_vig_tab[5] = { 1.00f, 0.75f, 0.55f, 0.35f, 0.18f };
-#define POST_VIG_EXP 2.2f
-#define POST_VIG_RAD 0.62f
+static const float k_post_grade_tab[5][2] = {   /* saturation, contrast, by CRT step */
+    { 1.00f, 1.00f }, { 1.05f, 1.02f }, { 1.10f, 1.04f },
+    { 1.18f, 1.07f }, { 1.28f, 1.10f },
+};
+static const float k_post_vig_tab[5] = { 1.00f, 0.82f, 0.64f, 0.42f, 0.18f };
+#define POST_VIG_EXP 2.6f
+#define POST_VIG_RAD 0.90f
 
 /* The pass's shader pair, compiled by uam on first use like the
  * menu backend's (nv2a_dk_imgui_dk.cpp). Positions arrive in clip
@@ -3312,6 +3325,7 @@ static const char kPostFsGlsl[] =
     "    vec4 u_dst;\n"
     "    vec4 u_crt;\n"
     "    vec4 u_vig;\n"
+    "    vec4 u_grade;\n"
     "};\n"
     "void main() {\n"
     "    vec3 c = texture(image, vUv).rgb;\n"
@@ -3319,10 +3333,13 @@ static const char kPostFsGlsl[] =
     "    float scan = 1.0 - u_crt.y * step(1.0 - 1.0 / u_crt.x, fract(lp.y / u_crt.x));\n"
     "    vec3 grille = vec3(1.0 - u_crt.z);\n"
     "    float gph = mod(lp.x, 3.0);\n"
-    "    if (gph < 1.0) grille.r = 1.0 + u_crt.z;\n"
-    "    else if (gph < 2.0) grille.g = 1.0 + u_crt.z;\n"
-    "    else grille.b = 1.0 + u_crt.z;\n"
+    "    if (gph < 1.0) grille.r = 1.0 + 2.0 * u_crt.z;\n"
+    "    else if (gph < 2.0) grille.g = 1.0 + 2.0 * u_crt.z;\n"
+    "    else grille.b = 1.0 + 2.0 * u_crt.z;\n"
     "    c *= scan * grille * u_crt.w;\n"
+    "    float lum = dot(c, vec3(0.299, 0.587, 0.114));\n"
+    "    c = mix(vec3(lum), c, u_grade.x);\n"
+    "    c = (c - 0.5) * u_grade.y + 0.5;\n"
     "    vec2 q = vec2((lp.x - 0.5 * u_dst.z) / (u_dst.z * u_vig.z),\n"
     "                  (lp.y - 0.5 * u_dst.w) / (u_dst.w * u_vig.z));\n"
     "    float r = clamp(length(q), 0.0, 1.0);\n"
@@ -3334,7 +3351,9 @@ static int        s_post_state;        /* 0 untried, 1 ready, -1 failed for the 
 static DkShader   s_post_vs, s_post_fs;
 static DkMemBlock s_post_desc;         /* one image descriptor, then one sampler descriptor */
 static DkGpuAddr  s_post_imgdesc_gpu, s_post_sampdesc_gpu;
-static const DkImage *s_post_src;      /* the image the descriptor currently names */
+static const DkImage *s_post_src;      /* the image the descriptor currently names, */
+static DkMemBlock s_post_src_mem;      /* in this storage, at this shape -- pooled */
+static uint32_t s_post_src_pw, s_post_src_ph; /* surfaces are recreated in place */
 
 static int post_init(void)
 {
@@ -3411,15 +3430,21 @@ static int post_present(DkSurf *s, const DkImageRect *dst)
     if (!crt && !vig) return 0;
     if (!post_init()) return 0;
 
-    /* The descriptor names the picture's image; surfaces are pooled
-     * and reused, so it is rewritten only when the picture moves. */
-    if (s_post_src != &s->img) {
+    /* The descriptor names the picture's image. Surfaces are pooled:
+     * a scale step destroys and recreates a surface in the same slot,
+     * so the same DkImage address can come back over different
+     * storage at a different shape -- the cache key is all four. */
+    if (s_post_src != &s->img || s_post_src_mem != s->mem
+            || s_post_src_pw != s->pw || s_post_src_ph != s->ph) {
         DkImageView view;
         DkImageDescriptor d;
         dkImageViewDefaults(&view, &s->img);
         dkImageDescriptorInitialize(&d, &view, false, false);
         *(DkImageDescriptor *)dkMemBlockGetCpuAddr(s_post_desc) = d;
         s_post_src = &s->img;
+        s_post_src_mem = s->mem;
+        s_post_src_pw = s->pw;
+        s_post_src_ph = s->ph;
         dkCmdBufBarrier(s_cmd, DkBarrier_Full, DkInvalidateFlags_Descriptors);
     }
 
@@ -3457,6 +3482,8 @@ static int post_present(DkSurf *s, const DkImageRect *dst)
     ubo[8] = k_post_vig_tab[vig];
     ubo[9] = POST_VIG_EXP;
     ubo[10] = POST_VIG_RAD;
+    ubo[12] = k_post_grade_tab[crt][0];
+    ubo[13] = k_post_grade_tab[crt][1];
 
     full_rect(s_fb_w, s_fb_h);
     sh[0] = &s_post_vs; sh[1] = &s_post_fs;
