@@ -725,7 +725,12 @@ static const DkRow k_controller_rows[] = {
     CHECK("CAMERA EASES BACK WHEN RELEASED", "After you let go of the right stick, the view drifts back behind the skater. On by default; turn it off to keep the view where you put it, and the L trigger already resets the turn. Kept in the settings file.", ease_get, ease_set),
     CHECK("CAMERA HOLDS ITS VIEW", "With the ease back on, it only drifts home while the movement stick is also untouched: pan, let go of the right stick and keep skating, and the view stays where you put it. Off by default; turn it on to hold the view while you skate. Kept in the settings file.", hold_get, hold_set),
     CHECK("GRAFFITI CAMERA", "On, as on the Xbox: spraying graffiti cuts the camera to frame the spot, then snaps it back behind you, and talking to someone turns the view to face them. Off: the camera stays behind your skater for both. Applies at once; kept in options.txt.", grafcam_get, grafcam_set),
+    /* CAMERA WALLS row hidden for this release (Brandon, Nov 11): with
+     * RECOMP_CAM_WALLS=1 the game crashes in gameplay (data abort in
+     * view_corner); the row returns once that is diagnosed. The feature
+     * and its key stay in the build, default off.
     CHECK("CAMERA WALLS (RESTART)", "On: the game's camera is kept out of walls, so at a glancing angle scenery never swallows the view at the screen edges. Off: the game's own camera exactly, blind spots included. The fix reads this once at start, so a change here applies from the next start; kept in options.txt.", camwalls_get, camwalls_set),
+    */
     SECTION("PAD"),
     CHECK("NINTENDO LAYOUT (A/B, X/Y)", "The face buttons by their printed names: A does what A says, and B what B says. The game's own prompts are drawn for an Xbox pad and do not move. Applies at once; kept in the settings file and options.txt.", layout_get, layout_set_row),
     CHECKA("BOTH STICKS IN GAME MENUS (RESTART)", "The left and the right sticks both move through the game's own menus. Takes effect from the next start; kept in options.txt.", sw_get, sw_set, SW_STICKBOTH),

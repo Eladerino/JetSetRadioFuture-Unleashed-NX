@@ -292,7 +292,7 @@ write_default_options() {
         "# (the game's own wall test covers only the centre line, so" \
         "# the picture's edges can clip through a wall, more so in" \
         "# widescreen). 0 = the game's behaviour exactly." \
-        "RECOMP_CAM_WALLS=1" \
+        "RECOMP_CAM_WALLS=0" \
         "" \
         "# Graffiti camera: 1 = spraying cuts the camera to the spot and" \
         "# talking turns the view to face them, as on the Xbox. 0 = the" \
