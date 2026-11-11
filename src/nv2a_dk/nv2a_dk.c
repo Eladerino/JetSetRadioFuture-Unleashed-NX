@@ -3114,8 +3114,17 @@ void dk_ui_request_ez_test(int on)     { __atomic_store_n(&s_ez_req, on, __ATOMI
  *    handful, and this title's loader is driven by its frame loop,
  *    so capping presents caps loading with them). Once seen, the
  *    cap is the cap -- a low-geometry screen later is not a load.
- *  - A cap at or above the grid's own rate (60) never engages: the
- *    guest cannot complete frames faster than the clock pacing it.
+ *  - A cap at or above the grid's own rate (60) cannot divide the
+ *    grid, so it holds the shipped minimum interval instead. The
+ *    earlier assumption here -- that the guest cannot complete
+ *    frames faster than the clock pacing it -- is false in this
+ *    build: guest frame completion is released by the backend
+ *    queue at consume speed, and with vsync off the swapchain
+ *    adds no wait, so light scenes ran uncapped (observed near
+ *    120 fps) and frame-locked game speed scaled with the
+ *    production rate. Spacing presents at least one cap period
+ *    apart, release to release, restores the shipped discipline,
+ *    and queue backpressure then gates the guest at that rate.
  *    A hand-set cap the grid cannot divide evenly (a CUSTOM 45)
  *    falls back to GL's advancing monotonic deadline -- the same
  *    disciplines without the count release.
@@ -3133,6 +3142,7 @@ static int      s_frame_period_set;
 static int      s_cap_fps;             /* the latched rate itself */
 static uint64_t s_pace_slot;           /* vblank the last present released on; 0 = unanchored */
 static uint64_t s_pace_deadline_ns;    /* advancing deadline, undividable caps; 0 = unanchored */
+static uint64_t s_pace_last_ns;        /* ns the last present released; 0 = none yet */
 static uint64_t s_pace_wait_ns;        /* total hold, for [perf] */
 static int      s_pace_seen_scene;
 static uint32_t s_pace_prev_draws;
@@ -3189,6 +3199,7 @@ static void frame_period_latch(int fps)
     s_cap_fps = fps;
     s_pace_slot = 0;            /* the new cap re-anchors both grids */
     s_pace_deadline_ns = 0;
+    s_pace_last_ns = 0;
     pace_interval();
 }
 
@@ -3270,8 +3281,25 @@ static void fpscap_throttle(int show_loading)
         s_pace_slot = slot;
         return;
     }
-    if (period_ns && !k)
-        return;                 /* at/above the grid's rate: never engages */
+    if (period_ns && !k) {
+        /* At/above the grid's rate: the shipped minimum-interval
+         * hold (see the block comment above). The hold goes through
+         * pace_hold with no target count, so it uses the same
+         * sliced-sleep/spin discipline as every other hold here and
+         * is accounted in s_pace_wait_ns ([perf] t_pace) the same
+         * way. The interval is measured release to release:
+         * s_pace_last_ns is read again after the hold, exactly as
+         * the shipped throttle re-read its last-present tick after
+         * its sleep, so present spacing is at least one cap period.
+         * A scene already slower than the cap arrives past the
+         * interval and never waits. */
+        uint64_t target_ns = 1000000000ull / (uint64_t)s_cap_fps;
+        uint64_t now = pace_now_ns();
+        if (s_pace_last_ns && now < s_pace_last_ns + target_ns)
+            s_pace_wait_ns += pace_hold(s_pace_last_ns + target_ns, 0, period_ns);
+        s_pace_last_ns = pace_now_ns();
+        return;
+    }
     /* An undividable hand-set cap, or no grid to divide: GL's
      * advancing deadline, its restart rule, its sliced sleep. */
     {
