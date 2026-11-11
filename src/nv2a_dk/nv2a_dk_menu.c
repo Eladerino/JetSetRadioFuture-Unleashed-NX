@@ -56,6 +56,8 @@ extern uint32_t recomp_music_now_id(void);
 extern void recomp_custom_track_request(const char *leaf);
 extern int  recomp_custom_track_state(void);
 extern const char *recomp_custom_track_name(void);
+extern int  recomp_district_music_get(uint32_t mission, uint32_t *id_out, char *leaf_out, size_t leaf_n);
+extern void recomp_district_music_set(uint32_t mission, int kind, uint32_t id, const char *leaf);
 extern const char *recomp_version(void);
 extern int  nv2a_widescreen(void);
 extern void nv2a_set_widescreen(int on);
@@ -817,6 +819,16 @@ static const char *s_custom_names[CUSTOM_MAX];
 static int s_custom_count, s_custom_invalid, s_custom_capped;
 static volatile int s_custom_choice;
 
+/* District soundtracks: the shared choice list (DEFAULT, the track
+ * table's names, the scanned custom leaves) is likewise declared
+ * here for row_nchoices; the editor itself lives with the Music
+ * rows below, where the track table (and so N_TRACKS) is known.
+ * The capacity leaves the track table generous headroom; the fill
+ * count is what row_nchoices reports. */
+#define DISTRICT_CHOICES_MAX (1 + 64 + CUSTOM_MAX)
+static const char *s_district_choices[DISTRICT_CHOICES_MAX];
+static int s_district_nchoices;
+
 /* The district rows' choice arrays have room for 8 names, but only
  * s_map_counts[d] slots are filled; the rest are NULL. Seven more
  * rows carry a trailing CUSTOM entry that exists only while a
@@ -841,6 +853,8 @@ static int row_nchoices(const DkRow *r)
         return s_map_counts[r->arg];
     if (r->choices == s_custom_names)
         return s_custom_count;
+    if (r->choices == s_district_choices)
+        return s_district_nchoices;
     if (r->choices == k_scale_choices) return scale_custom() ? 8 : 7;
     if (r->choices == k_fpscap_choices) return fpscap_custom() ? 3 : 2;
     if (r->get == gpu_get) return gpu_custom() ? 5 : 4;
@@ -1242,6 +1256,178 @@ static const char *custom_status(intptr_t a, char *buf, size_t n)
 }
 static const char *custom_about(intptr_t a, char *buf, size_t n)
 { (void)a; snprintf(buf, n, "CUSTOM TRACKS ARE YOUR OWN .ADX FILES, READ FROM THE CUSTOM_TRACKS FOLDER IN THE APP FOLDER (SDMC:/SWITCH/JSRF-UNLEASHED/CUSTOM_TRACKS) EACH TIME THE MENU OPENS. ONLY REAL CRI ADX FILES ARE LISTED: THE GAME DECODES ADX ITSELF, AND A FILE THAT IS NOT ADX CAN RAISE ITS DISC ERROR, SO ANYTHING ELSE IS KEPT OUT. LOOPS COME FROM THE FILE'S OWN HEADER, SO CONVERT WITH LOOP POINTS SET (VGAUDIO ENCODES ADX AND WRITES THEM). A PICK RIDES ON THE GAME'S SET 01A STREAM, WHICH IS WHY THE GAME'S OWN MUSIC DISPLAY CALLS IT SET 01A WHILE YOUR FILE PLAYS."); return buf; }
+
+/* ── District soundtracks: an assignment per free-skate area ─────────
+ * One assignment for each area of jsrf_maps.h -- the same 14
+ * free-skate missions the map jumps offer, grouped by their
+ * districts: DEFAULT (the game's own music), one of the track
+ * table's entries (the licensed songs, the standalones and every
+ * DJ set share that id namespace, so "a set, or a specific track"
+ * is one list), or one of the scanned custom tracks. The engine
+ * (recomp_manual.c) owns the table, loads it from the settings
+ * file at the first flow frame, and fires an area's assignment
+ * through the game's own PlayBGM when the area is entered; this
+ * page is the editor. A commit here updates the engine's table
+ * and rewrites the area's settings line (district_music_<MISSION>
+ * = T<id> or C<leaf>; DEFAULT drops the line) through the same
+ * file_set every other setting uses, so an assignment survives
+ * exactly like a setting does.
+ *
+ * Staged like the custom pick, per row: left and right move the
+ * row's stage, the list confirms. All 14 rows share one choice
+ * list -- DEFAULT, then the track names, then the custom leaves,
+ * rebuilt at every menu open after the scan -- and each row's get
+ * returns its own stage, seeded from the committed assignment at
+ * the same open. */
+#define DISTRICT_KIND_TRACK  1   /* recomp_manual.c's kinds; keep in step */
+#define DISTRICT_KIND_CUSTOM 2
+static volatile int s_district_stage[JSRF_MAP_COUNT];
+
+static void district_build_choices(void)
+{
+    int i, n = 0;
+    s_district_choices[n++] = "DEFAULT";
+    for (i = 0; i < N_TRACKS && n < DISTRICT_CHOICES_MAX; i++)
+        s_district_choices[n++] = k_track_names[i];
+    for (i = 0; i < s_custom_count && n < DISTRICT_CHOICES_MAX; i++)
+        s_district_choices[n++] = s_custom_names[i];
+    s_district_nchoices = n;
+}
+/* The shared-list index of an area's committed assignment. A stored
+ * leaf the current scan no longer lists (deleted, or the folder
+ * changed) has no index: the row shows DEFAULT while the engine
+ * keeps the assignment and falls back to the game's music if the
+ * file is still gone at the fire -- DISTRICT STATUS names the gap,
+ * and the assignment works again if the file comes back. */
+static int district_index_of(uint32_t mission)
+{
+    uint32_t id = 0;
+    char leaf[CUSTOM_NAME_MAX];
+    int kind = recomp_district_music_get(mission, &id, leaf, sizeof leaf), i;
+    if (kind == DISTRICT_KIND_TRACK) {
+        i = track_index_for_id(id);
+        return i >= 0 ? 1 + i : 0;
+    }
+    if (kind == DISTRICT_KIND_CUSTOM) {
+        for (i = 0; i < s_custom_count; i++)
+            if (!strcmp(s_custom_leaf[i], leaf)) return 1 + N_TRACKS + i;
+        return 0;
+    }
+    return 0;
+}
+static void district_seed(void)
+{
+    int i;
+    district_build_choices();
+    for (i = 0; i < JSRF_MAP_COUNT; i++)
+        __atomic_store_n(&s_district_stage[i],
+                         district_index_of(k_jsrf_maps[i].mission),
+                         __ATOMIC_RELEASE);
+}
+static int district_stage_of(intptr_t a)
+{
+    int v = __atomic_load_n(&s_district_stage[a], __ATOMIC_ACQUIRE);
+    if (v < 0) v = 0;
+    if (v >= s_district_nchoices) v = s_district_nchoices - 1;
+    return v < 0 ? 0 : v;
+}
+static int  district_get(intptr_t a) { return district_stage_of(a); }
+static void district_stage_step(const DkRow *row, int d)
+{
+    int nc = row_nchoices(row), v;
+    if (nc <= 0) return;
+    v = district_stage_of(row->arg) + d;
+    if (v < 0) v = nc - 1;
+    else if (v >= nc) v = 0;
+    __atomic_store_n(&s_district_stage[row->arg], v, __ATOMIC_RELEASE);
+}
+static void district_store(uint32_t mission, const char *val)
+{
+    char path[1024], key[32];
+    cfg_path(path, sizeof path);
+    if (!path[0]) return;
+    snprintf(key, sizeof key, "district_music_%08X", mission);
+    file_set(path, key, val ? val : "", val == NULL);
+}
+static void district_set(intptr_t a, int i)   /* the commit: list confirm only */
+{
+    uint32_t mission = k_jsrf_maps[a].mission;
+    if (i < 0) i = 0;
+    if (i >= s_district_nchoices) i = s_district_nchoices - 1;
+    if (i == 0) {
+        recomp_district_music_set(mission, 0, 0, NULL);
+        district_store(mission, NULL);
+        fprintf(stderr, "[DISTRICT] menu: %s -> DEFAULT (the game's own music)\n",
+                k_jsrf_maps[a].name);
+    } else if (i <= N_TRACKS) {
+        uint32_t id = k_track_ids[i - 1];
+        char val[16];
+        recomp_district_music_set(mission, DISTRICT_KIND_TRACK, id, NULL);
+        snprintf(val, sizeof val, "T%u", id);
+        district_store(mission, val);
+        fprintf(stderr, "[DISTRICT] menu: %s -> %s (table id %u)\n",
+                k_jsrf_maps[a].name, k_track_names[i - 1], id);
+    } else if (i - 1 - N_TRACKS < s_custom_count) {
+        const char *leaf = s_custom_leaf[i - 1 - N_TRACKS];
+        char val[CUSTOM_NAME_MAX + 2];
+        recomp_district_music_set(mission, DISTRICT_KIND_CUSTOM, 0, leaf);
+        snprintf(val, sizeof val, "C%s", leaf);
+        district_store(mission, val);
+        fprintf(stderr, "[DISTRICT] menu: %s -> custom track %s\n",
+                k_jsrf_maps[a].name, leaf);
+    }
+    __atomic_store_n(&s_district_stage[a], district_index_of(mission),
+                     __ATOMIC_RELEASE);
+}
+static void district_clear_all(void)
+{
+    int i;
+    for (i = 0; i < JSRF_MAP_COUNT; i++) {
+        recomp_district_music_set(k_jsrf_maps[i].mission, 0, 0, NULL);
+        district_store(k_jsrf_maps[i].mission, NULL);
+        __atomic_store_n(&s_district_stage[i], 0, __ATOMIC_RELEASE);
+    }
+}
+static const char *district_status(intptr_t a, char *buf, size_t n)
+{
+    size_t off = 0;
+    int i, any = 0;
+    (void)a;
+    for (i = 0; i < JSRF_MAP_COUNT; i++) {
+        uint32_t id = 0;
+        char leaf[CUSTOM_NAME_MAX];
+        int kind = recomp_district_music_get(k_jsrf_maps[i].mission,
+                                             &id, leaf, sizeof leaf), j, t;
+        char name[48];
+        if (!kind || off >= n) continue;
+        any = 1;
+        snprintf(name, sizeof name, "%s", k_jsrf_maps[i].name);
+        for (t = 0; name[t]; t++)
+            if (name[t] >= 'a' && name[t] <= 'z')
+                name[t] = (char)(name[t] - 'a' + 'A');
+        if (kind == DISTRICT_KIND_TRACK) {
+            const char *nm = track_name_for_id(id);
+            if (nm)
+                off += (size_t)snprintf(buf + off, n - off, "%s%s: %s.",
+                                        off ? "\n" : "", name, nm);
+            else
+                off += (size_t)snprintf(buf + off, n - off, "%s%s: TABLE ID %u.",
+                                        off ? "\n" : "", name, id);
+        } else {
+            int found = 0;
+            for (j = 0; j < s_custom_count; j++)
+                if (!strcmp(s_custom_leaf[j], leaf)) { found = 1; break; }
+            off += (size_t)snprintf(buf + off, n - off, "%s%s: %s%s.",
+                                    off ? "\n" : "", name, leaf,
+                                    found ? "" : " (NOT IN THE FOLDER NOW - THE GAME'S MUSIC PLAYS)");
+        }
+    }
+    if (!any)
+        snprintf(buf, n, "NO AREA ASSIGNMENTS. EVERY AREA PLAYS THE GAME'S OWN MUSIC.");
+    return buf;
+}
+static const char *district_about(intptr_t a, char *buf, size_t n)
+{ (void)a; snprintf(buf, n, "AN ASSIGNMENT IS THE FIRST MUSIC AN AREA PLAYS: WHEN YOU ENTER THE AREA IT TAKES OVER FROM THE AREA'S OWN MUSIC AT THE FIRST IN-PLAY MOMENT -- ONE OF THE GAME'S TRACKS OR SETS, OR ONE OF YOUR CUSTOM FILES ON THE SET 01A CARRIER -- AND PLAYS UNTIL THE GAME NEXT CHANGES THE MUSIC ITSELF. A TRACK OR CUSTOM FILE YOU PICK BY HAND OUTRANKS AN ASSIGNMENT. IF AN ASSIGNMENT'S STREAM WOULD BE REWRITTEN BY THE DJ MIX, THE MIX IS SET BACK TO USE AREA MIX AS THE ASSIGNMENT FIRES, LIKE A MANUAL PICK. ASSIGNMENTS ARE KEPT IN THE SETTINGS FILE. THEY APPLY TO THE FREE-SKATE AREAS LISTED HERE; STORY MISSIONS IN THE SAME STREETS KEEP THE GAME'S MUSIC."); return buf; }
 static const DkRow k_music_rows[] = {
     SECTION("MUSIC"),
     CHOICE("DJ MIX (NEXT STREAM)", "Which of the game's DJ mixes plays, instead of each area's own. Use Area Mix gives the choice back to the game. Left and right stage a pick; open the list and select it to apply it. It takes over on the next music stream the game starts, never mid-track. This session only.", music_get, music_set, k_music_names),
@@ -1257,6 +1443,26 @@ static const DkRow k_music_rows[] = {
     CHOICEA("PLAY A CUSTOM TRACK", "Play one of your own .adx files from the custom_tracks folder in the app folder. Left and right stage a pick; open the list and select it to play it. It starts at the next in-play moment and runs until the game changes the music itself. Picking a custom track also resets the DJ mix to USE AREA MIX. This session only.", custom_get, custom_set, s_custom_names, 0, custom_avail),
     INFO("CUSTOM STATUS", "What the custom folder holds, and what you have latched.", custom_status),
     INFO("ABOUT CUSTOM TRACKS", "What a custom track is, and the rules its file has to follow.", custom_about),
+    SECTION("DISTRICT SOUNDTRACKS"),
+    SECTION("SHIBUYA-CHO"),
+    CHOICEA("Shibuya Terminal", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 0, NULL),
+    CHOICEA("Chuo Street", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 1, NULL),
+    CHOICEA("Dogenzaka Hill", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 2, NULL),
+    CHOICEA("Hikage Street", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 3, NULL),
+    SECTION("KOGANE-CHO"),
+    CHOICEA("Rokkaku-dai Heights", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 4, NULL),
+    CHOICEA("Tokyo Underground Sewage Facility", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 5, NULL),
+    CHOICEA("Kibogaoka Hill", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 6, NULL),
+    CHOICEA("Bottom Point of the Sewage Facility", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 7, NULL),
+    CHOICEA("Fortified Residential Zone", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 8, NULL),
+    SECTION("BENTEN-CHO"),
+    CHOICEA("99th Street", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 9, NULL),
+    CHOICEA("Sky Dinosaurian Square", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 10, NULL),
+    CHOICEA("Rokkaku Expo Stadium", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 11, NULL),
+    CHOICEA("Highway Zero", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 12, NULL),
+    CHOICEA("Skyscraper District", "The first music this area plays when you enter it: DEFAULT (the game's own music), one of the game's tracks or sets, or one of your custom files. Left and right stage a pick; open the list and select it to set it. Kept in the settings file.", district_get, district_set, s_district_choices, 13, NULL),
+    INFO("DISTRICT STATUS", "Which areas have an assignment, and what will play.", district_status),
+    INFO("ABOUT DISTRICT SOUNDTRACKS", "How area assignments take effect, and how they rank against your other picks.", district_about),
     SECTION("AUDIO"),
     CHECKA("MUTE (RESTART)", "Silence ALL of the game's audio, music and sound effects alike. It applies from the next start: flipping it now changes nothing you hear this session, and the state shown is the one the next start will use. Kept in options.txt.", sw_get, sw_set, SW_MUTE),
 };
@@ -1652,6 +1858,7 @@ void xbox_MenuSetOpen(int on)
         __atomic_store_n(&s_music_choice, xbox_music_mix_override(), __ATOMIC_RELEASE);
         __atomic_store_n(&s_track_choice, track_get(0), __ATOMIC_RELEASE);
         custom_scan();
+        district_seed();
         if (!__atomic_load_n(&s_tp_seeded, __ATOMIC_ACQUIRE)) tp_seed();
         /* The pad latch restarts clean, so a button held across the
          * open reads as a level, never a stale edge. */
@@ -1706,6 +1913,9 @@ static void reset_apply(void)
     switch_reset(&k_sw[SW_STICKBOTH], 0);
     /* Cheats */
     warn_set(0, 1);         /* cheat_warnings back on */
+    /* Music: district assignments back to DEFAULT (their settings
+     * lines are dropped like any other cleared setting). */
+    district_clear_all();
     /* Developer: game */
     if (recomp_mission_redirect_state()) recomp_mission_redirect_toggle();
     switch_reset(&k_sw[SW_MUTE], 0);
@@ -1858,6 +2068,7 @@ unsigned dk_menu_row_flags(const DkRow *r)
     if (r->set == music_set) f |= DK_ROW_F_MUSIC;
     if (r->set == track_set) f |= DK_ROW_F_TRACK;
     if (r->set == custom_set) f |= DK_ROW_F_CUSTOM;
+    if (r->set == district_set) f |= DK_ROW_F_DISTRICT;
     if (r->set == map_set) f |= DK_ROW_F_MAP;
     if (r->enabled == tp_ready) f |= DK_ROW_F_TPGATE;
     return f;
@@ -1871,6 +2082,8 @@ int dk_menu_track_stage(void) { return track_stage(); }
 void dk_menu_track_stage_step(const DkRow *r, int d) { track_stage_step(r, d); }
 int dk_menu_custom_stage(void) { return custom_stage(); }
 void dk_menu_custom_stage_step(const DkRow *r, int d) { custom_stage_step(r, d); }
+int dk_menu_district_stage(const DkRow *r) { return district_stage_of(r->arg); }
+void dk_menu_district_stage_step(const DkRow *r, int d) { district_stage_step(r, d); }
 
 int dk_menu_modal_action(void)
 {

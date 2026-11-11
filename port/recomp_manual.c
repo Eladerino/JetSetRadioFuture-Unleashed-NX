@@ -1690,6 +1690,8 @@ static volatile uint32_t s_menu_custom_seq;
 
 extern void xbox_custom_track_arm(const char *abs_host_path);
 extern void xbox_custom_track_disarm(void);
+extern int  xbox_music_mix_override(void);
+extern void xbox_music_mix_select(int set);
 
 void recomp_custom_track_request(const char *leaf)
 {
@@ -1717,6 +1719,191 @@ const char *recomp_custom_track_name(void)
 {
     return __atomic_load_n(&s_menu_custom_state, __ATOMIC_ACQUIRE)
         ? s_menu_custom_leaf : NULL;
+}
+
+/* ---- per-area soundtrack assignments: the District Soundtracks rows --
+ *
+ * The Music page's District Soundtracks editor keeps one assignment
+ * per free-skate area (the missions of jsrf_maps.h, the same list the
+ * map jumps offer): DEFAULT (the game's own music), a BGM table id
+ * (a licensed song, a standalone, or one of the DJ sets -- the table
+ * is one namespace), or a custom track leaf riding the SET 01A
+ * carrier like a manual custom pick. Brandon's semantics, in his
+ * words: the assignment is "something set as the first thing to play
+ * when entering an area -- whether it be a set, or a specific track".
+ *
+ * The durable store is the settings file itself: one line per area,
+ * district_music_<MISSION>=T<id> or =C<leaf>, written by the menu
+ * through the same file_set helper every other setting uses. The
+ * engine reads the file once, lazily (district_load, on the first
+ * flow frame -- no menu open required), and the menu's later commits
+ * arrive through recomp_district_music_set. The engine never writes
+ * the file.
+ *
+ * The fire lives in music_district_step, inside the flow wrapper
+ * beside the two pick consumers, under their settle gate. It cannot
+ * precede the game's own entry request: PlayBGM, PlayStream and the
+ * stage dispatcher have no entry hooks (see bgm_watch's header), so,
+ * exactly like the menu's own picks, the assignment replaces the
+ * area's entry music at the first in-play moment -- and the step
+ * first waits for the entry request to land (the [BGM] watcher's
+ * publish that follows the mission change), so nothing the game
+ * starts a beat later can talk over it. Precedence, argued at the
+ * consumer: a manual pick outranks an assignment, and an assignment
+ * protects its own stream from the DJ-mix override the way the
+ * manual picks reconcile it. */
+#define DISTRICT_MAX 40
+#define DISTRICT_KIND_NONE   0
+#define DISTRICT_KIND_TRACK  1   /* a BGM table id: song, standalone or set */
+#define DISTRICT_KIND_CUSTOM 2   /* a leaf in custom_tracks, on the carrier */
+
+typedef struct {
+    uint32_t mission;
+    int kind;
+    uint32_t id;
+    char leaf[96];
+} DistrictAssign;
+
+static DistrictAssign s_district[DISTRICT_MAX];
+static volatile unsigned s_district_version;   /* bumped after every write */
+static volatile int s_district_loaded;
+
+/* The menu (renderer thread) writes entries; the flow thread reads.
+ * Writers fill the entry's fields and bump the version last; readers
+ * snapshot the version, copy out, and retry if it moved, so a torn
+ * leaf string can never reach the fire path (which re-validates the
+ * file regardless). Returns the kind (DISTRICT_KIND_NONE = DEFAULT). */
+int recomp_district_music_get(uint32_t mission, uint32_t *id_out,
+                              char *leaf_out, size_t leaf_n)
+{
+    int i, k;
+    unsigned v0, v1;
+    for (;;) {
+        v0 = __atomic_load_n(&s_district_version, __ATOMIC_ACQUIRE);
+        k = DISTRICT_KIND_NONE;
+        if (id_out) *id_out = 0;
+        if (leaf_out && leaf_n) leaf_out[0] = 0;
+        for (i = 0; i < DISTRICT_MAX; i++) {
+            if (s_district[i].mission == mission
+             && s_district[i].kind != DISTRICT_KIND_NONE) {
+                k = s_district[i].kind;
+                if (id_out) *id_out = s_district[i].id;
+                if (leaf_out && leaf_n)
+                    snprintf(leaf_out, leaf_n, "%s", s_district[i].leaf);
+                break;
+            }
+        }
+        v1 = __atomic_load_n(&s_district_version, __ATOMIC_ACQUIRE);
+        if (v0 == v1) return k;
+    }
+}
+
+void recomp_district_music_set(uint32_t mission, int kind, uint32_t id,
+                               const char *leaf)
+{
+    int i, slot = -1, free_slot = -1;
+    if (!mission) return;
+    if (kind != DISTRICT_KIND_TRACK && kind != DISTRICT_KIND_CUSTOM)
+        kind = DISTRICT_KIND_NONE;
+    for (i = 0; i < DISTRICT_MAX; i++) {
+        if (s_district[i].mission == mission) { slot = i; break; }
+        if (free_slot < 0 && s_district[i].kind == DISTRICT_KIND_NONE)
+            free_slot = i;
+    }
+    if (slot < 0) slot = free_slot;
+    if (slot < 0) return;   /* 40 missions is far past the map list */
+    s_district[slot].mission = mission;
+    s_district[slot].id = kind == DISTRICT_KIND_TRACK ? id : 0;
+    snprintf(s_district[slot].leaf, sizeof s_district[slot].leaf, "%s",
+             kind == DISTRICT_KIND_CUSTOM && leaf ? leaf : "");
+    s_district[slot].kind = kind;
+    __atomic_add_fetch(&s_district_version, 1u, __ATOMIC_RELEASE);
+}
+
+static void district_load(void)
+{
+    const char *sf;
+    FILE *f;
+    char line[512];
+    int n = 0;
+    if (__atomic_load_n(&s_district_loaded, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&s_district_loaded, 1, __ATOMIC_RELEASE);
+    sf = getenv("JSRF_SETTINGS_FILE");
+    if (!sf || !*sf || !(f = fopen(sf, "r"))) return;
+    while (fgets(line, sizeof line, f)) {
+        unsigned mission;
+        char tag, rest[160];
+        if (sscanf(line, "district_music_%8x=%c%159[^\n]",
+                   &mission, &tag, rest) == 3 && mission) {
+            if (tag == 'T') {
+                recomp_district_music_set(mission, DISTRICT_KIND_TRACK,
+                    (uint32_t)strtoul(rest, NULL, 10), NULL);
+                n++;
+            } else if (tag == 'C' && rest[0]) {
+                recomp_district_music_set(mission, DISTRICT_KIND_CUSTOM,
+                                          0, rest);
+                n++;
+            }
+        }
+    }
+    fclose(f);
+    if (n)
+        fprintf(stderr, "[DISTRICT] loaded %d area assignment(s) from the settings file\n", n);
+}
+
+/* The mix index naming the same file as a set id, for the 14 a/b sets
+ * the kernel's override formula covers; mirrors the menu's
+ * track_mix_for_id -- the two must agree, and both mirror
+ * kernel_file.c's formula. -1: the id's stream leaf can never match
+ * the override's s_set_NN[ab].adx pattern (songs, standalones, the
+ * single-file sets), so an active mix cannot rewrite its open. */
+static int district_mix_for_id(uint32_t id)
+{
+    switch (id) {
+    case 0x3C: return 1;  case 0x3D: return 2;  case 0x3E: return 3;
+    case 0x3F: return 4;  case 0x40: return 5;  case 0x4B: return 6;
+    case 0x41: return 9;  case 0x42: return 10; case 0x45: return 13;
+    case 0x46: return 14; case 0x47: return 15; case 0x48: return 16;
+    case 0x49: return 17; case 0x4A: return 18;
+    default:   return -1;
+    }
+}
+
+/* The menu's scan is the wall that keeps a bad file from the game's
+ * disc-error screen, but an assignment outlives any one scan -- the
+ * file can be deleted or swapped between sessions -- so the fire
+ * re-checks the leaf against the same rules (the constants of the
+ * menu's custom_adx_header_valid) before arming the redirect. A leaf
+ * that fails is not fired: the area keeps the game's music, which is
+ * the DEFAULT fallback, and DISTRICT STATUS in the menu names the
+ * gap. 0: do not fire this leaf. */
+static int district_custom_leaf_ok(const char *leaf)
+{
+    char path[320];
+    unsigned char hdr[32];
+    FILE *f;
+    size_t rd;
+    long total;
+    uint32_t rate, samples;
+    snprintf(path, sizeof path,
+             "sdmc:/switch/jsrf-unleashed/custom_tracks/%s", leaf);
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    rd = fread(hdr, 1, sizeof hdr, f);
+    total = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    fclose(f);
+    if (total < 64 || rd < 32) return 0;
+    if (hdr[0] != 0x80 || hdr[1] != 0x00) return 0;         /* signature */
+    if (hdr[2] != 0x03 && hdr[2] != 0x04) return 0;         /* encoding */
+    if (hdr[6] != 3 && hdr[6] != 4) return 0;               /* version */
+    if (hdr[7] < 1 || hdr[7] > 2) return 0;                 /* channels */
+    rate = ((uint32_t)hdr[8] << 24) | ((uint32_t)hdr[9] << 16)
+         | ((uint32_t)hdr[10] << 8) | (uint32_t)hdr[11];
+    samples = ((uint32_t)hdr[12] << 24) | ((uint32_t)hdr[13] << 16)
+            | ((uint32_t)hdr[14] << 8) | (uint32_t)hdr[15];
+    if (rate < 8000u || rate > 96000u) return 0;
+    if (samples == 0) return 0;
+    return 1;
 }
 
 int recomp_cheat_infinite_cans_state(void)
@@ -2386,6 +2573,154 @@ static void music_custom_step(uint32_t flow, double state_at, double now)
         fprintf(stderr, "[CUSTOM] PlayBGM(60) returned %08X; '%s' plays as SET 01A until the game changes the music\n",
                 r, s_menu_custom_leaf); } }
 }
+/* ---- the district consumer: an area's assignment, on entry ----------
+ *
+ * Called from the flow wrapper after the two pick consumers, under
+ * their gate (in-play state 15 or 31, not the title mission, the
+ * state at least a second old). One decision per entry: the statics
+ * below remember the mission last seen; a change opens a new entry,
+ * and the decision -- fire, defer to a manual pick, or stand down --
+ * is taken once for it.
+ *
+ * What "entry" means here, precisely: the game's own area music
+ * starts as a stage request through the dispatcher during the load,
+ * and there is no hook on that call (bgm_watch's header), so the
+ * first observable is its landing in the sound manager -- a [BGM]
+ * publish after the mission change. The step waits for that publish
+ * (three seconds of in-play time at the outside: an area whose entry
+ * re-requests the id already current makes the dispatcher bail
+ * before calling, so no publish ever comes) and then fires through
+ * the game's own PlayBGM, crossfading over the entry music within
+ * the settle second -- the same "next in-play moment" semantics the
+ * menu's picks already ship with. An area that makes no music call
+ * on entry and has nothing playing publishes nothing and, past the
+ * valve, fires over silence; no such area is in the free-skate list.
+ *
+ * Precedence:
+ *  - A manual pick outranks an assignment. One latched when the
+ *    decision comes fires through its own consumer instead; a
+ *    custom pick already sounding from this entry stays; and if
+ *    the sound manager's current id is neither the game's entry id
+ *    nor the assignment's own, a manual fire got there first.
+ *  - The DJ mix is a file-level override under every stream open:
+ *    it would rewrite the carrier's open (and an assigned set's)
+ *    to the mix's own file. Where it would rewrite the fire's
+ *    stream, the fire clears it to USE AREA MIX first -- the
+ *    manual picks' reconciliation -- and says so in the log. Where
+ *    the assigned id's leaf can never match the override's
+ *    pattern, the mix is left alone.
+ *  - In-area changes the game makes after the fire are untouched:
+ *    the fire is one PlayBGM, like any pick.
+ */
+static void music_district_step(uint32_t flow, double state_at, double now)
+{
+    static uint32_t s_seen_mission;
+    static uint32_t s_entry_seq;
+    static uint32_t s_entry_id;
+    static int s_entry_id_valid, s_done = 1;
+    static double s_change_at;
+    uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+    uint32_t state, mission, id = 0;
+    char leaf[96];
+    int kind;
+    district_load();
+    state = *(uint32_t *)(m + flow + 0x5Cu);
+    mission = *(uint32_t *)(m + flow + 0x58u);
+    if (mission != s_seen_mission) {
+        s_seen_mission = mission;
+        s_entry_seq = recomp_music_now_seq();
+        s_entry_id_valid = 0;
+        s_change_at = now;
+        s_done = recomp_district_music_get(mission, NULL, NULL, 0)
+                 == DISTRICT_KIND_NONE;
+    }
+    if (s_done) return;
+    if ((state != 15u && state != 31u) || mission == 0x5Au
+     || now - state_at < 1.0)
+        return;
+    /* The game's entry request, when it lands, is the first publish
+     * after the mission change; note its id before deciding. */
+    if (!s_entry_id_valid && recomp_music_now_seq() != s_entry_seq) {
+        uint32_t nid = recomp_music_now_id();
+        if (nid != 0xFFFFFFFFu) {
+            s_entry_id = nid;
+            s_entry_id_valid = 1;
+        }
+    }
+    if (!s_entry_id_valid && now - s_change_at < 3.0)
+        return;   /* give the game's entry request its moment first */
+    kind = recomp_district_music_get(mission, &id, leaf, sizeof leaf);
+    if (kind == DISTRICT_KIND_NONE) { s_done = 1; return; }
+    /* A manual pick outranks the assignment (see the header). */
+    if (recomp_music_track_pending() >= 0
+     || __atomic_load_n(&s_menu_custom_state, __ATOMIC_ACQUIRE) == 1
+     || (__atomic_load_n(&s_menu_custom_state, __ATOMIC_ACQUIRE) == 2
+         && __atomic_load_n(&s_menu_custom_seq, __ATOMIC_ACQUIRE) + 1
+                >= s_entry_seq)) {
+        fprintf(stderr, "[DISTRICT] t=%.2f mission %08X: a manual pick outranks the assignment; not fired\n",
+                now, mission);
+        s_done = 1;
+        return;
+    }
+    if (s_entry_id_valid) {
+        uint32_t now_id = recomp_music_now_id();
+        uint32_t ours = kind == DISTRICT_KIND_TRACK ? id : 0x3Cu;
+        if (now_id != 0xFFFFFFFFu && now_id != s_entry_id
+         && now_id != ours) {
+            fprintf(stderr, "[DISTRICT] t=%.2f mission %08X: the music already moved on (id %u); assignment not fired\n",
+                    now, mission, now_id);
+            s_done = 1;
+            return;
+        }
+    }
+    s_done = 1;   /* one decision per entry, whatever it is */
+    if (kind == DISTRICT_KIND_TRACK) {
+        uint32_t sm = s_bgm_sndmgr;
+        uint32_t id9c = 0xFFFFFFFFu, idb8 = 0xFFFFFFFFu;
+        int mix = xbox_music_mix_override(), fm;
+        if (sm >= 0x10000u && sm + 0x120u < (64u << 20)) {
+            id9c = *(uint32_t *)(m + sm + 0x9Cu);
+            idb8 = *(uint32_t *)(m + sm + 0xB8u);
+        }
+        if (id9c == id || idb8 == id) {
+            fprintf(stderr, "[DISTRICT] t=%.2f mission %08X: assigned track id %u is already current; not fired\n",
+                    now, mission, id);
+            return;
+        }
+        fm = district_mix_for_id(id);
+        if (mix > 0 && fm >= 0 && fm != mix) {
+            xbox_music_mix_select(0);
+            fprintf(stderr, "[DISTRICT] file override -> USE AREA MIX (it would have rewritten the assigned set's stream)\n");
+        }
+        { uint32_t a[3]; a[0] = id; a[1] = 0; a[2] = 1;
+          fprintf(stderr, "[DISTRICT] t=%.2f tid %u esp %08X: PlayBGM(%u, 0, 1) -- area assignment, mission %08X; was id9c %08X idb8 %08X\n",
+                  now, (unsigned)GetCurrentThreadId(), g_esp, id, mission,
+                  id9c, idb8);
+          { uint32_t r = guest_call_cdecl(sub_00116F50, 0x00116F50u, 3, a);
+            fprintf(stderr, "[DISTRICT] PlayBGM(%u) returned %08X\n", id, r); } }
+    } else {   /* DISTRICT_KIND_CUSTOM */
+        char abs[320];
+        if (!district_custom_leaf_ok(leaf)) {
+            fprintf(stderr, "[DISTRICT] t=%.2f mission %08X: assigned file '%s' is missing or not valid ADX; the game's music stands\n",
+                    now, mission, leaf);
+            return;
+        }
+        if (xbox_music_mix_override() > 0) {
+            xbox_music_mix_select(0);
+            fprintf(stderr, "[DISTRICT] file override -> USE AREA MIX (a mix rewrites the carrier stream)\n");
+        }
+        snprintf(abs, sizeof abs,
+                 "sdmc:/switch/jsrf-unleashed/custom_tracks/%s", leaf);
+        xbox_custom_track_arm(abs);
+        { uint32_t a[3]; a[0] = 0x3Cu; a[1] = 0; a[2] = 1;
+          fprintf(stderr, "[DISTRICT] t=%.2f tid %u esp %08X: PlayBGM(60, 0, 1) -- carrier SET 01A for assigned '%s', mission %08X\n",
+                  now, (unsigned)GetCurrentThreadId(), g_esp, leaf, mission);
+          { uint32_t r = guest_call_cdecl(sub_00116F50, 0x00116F50u, 3, a);
+            xbox_custom_track_disarm();
+            fprintf(stderr, "[DISTRICT] PlayBGM(60) returned %08X; '%s' plays as SET 01A until the game changes the music\n",
+                    r, leaf); } }
+    }
+}
 extern void sub_00051FC0_gen(void);
 void sub_00051FC0(void)
 {
@@ -2428,6 +2763,9 @@ void sub_00051FC0(void)
         music_track_step(flow, map_state_at, now);
         /* A latched custom-track pick, under the same gate. */
         music_custom_step(flow, map_state_at, now);
+        /* An area's soundtrack assignment, on entry, under the same
+         * gate -- after the picks, whose precedence it checks. */
+        music_district_step(flow, map_state_at, now);
         /* JSRF_GMVAR_SET="t:idx=val[,idx=val...]" (test only): write game
          * manager variables (+0x7868 + 4*idx) once, at t seconds. */
         { static int gs = -1; static double gt; static char spec[256];

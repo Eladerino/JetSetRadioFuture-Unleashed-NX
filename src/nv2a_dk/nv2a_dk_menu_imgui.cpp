@@ -800,6 +800,13 @@ void build_menu(int fb_w, int fb_h)
                             dk_menu_custom_stage_step(r, -1);
                         if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, true))
                             dk_menu_custom_stage_step(r, +1);
+                    } else if (flags & DK_ROW_F_DISTRICT) {
+                        /* District picks likewise: staged here, set
+                         * only when the list confirms them. */
+                        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, true))
+                            dk_menu_district_stage_step(r, -1);
+                        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, true))
+                            dk_menu_district_stage_step(r, +1);
                     } else if (!(flags & DK_ROW_F_MAP) && nc > 0) {
                         if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, true))
                             r->set(r->arg, (cur + nc - 1) % nc);
@@ -1219,6 +1226,7 @@ void build_menu(int fb_w, int fb_h)
             int cur = flags & DK_ROW_F_MUSIC ? dk_menu_music_stage()
                     : flags & DK_ROW_F_TRACK ? dk_menu_track_stage()
                     : flags & DK_ROW_F_CUSTOM ? dk_menu_custom_stage()
+                    : flags & DK_ROW_F_DISTRICT ? dk_menu_district_stage(r)
                     : r->get(r->arg);
             for (int j = 0; j < nc; j++) {
                 bool sel = j == cur;

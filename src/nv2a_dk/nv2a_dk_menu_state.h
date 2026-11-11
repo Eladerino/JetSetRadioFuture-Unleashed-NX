@@ -50,6 +50,7 @@ enum {
     DK_ROW_F_MUSIC  = 1u << 0,  /* left/right stage a pick; only the list commits */
     DK_ROW_F_TRACK  = 1u << 3,  /* the Music page's track row: same staging, its own stage */
     DK_ROW_F_CUSTOM = 1u << 4,  /* the Music page's custom-track row: same staging, its own stage */
+    DK_ROW_F_DISTRICT = 1u << 5,  /* the Music page's district rows: same staging, a stage per row */
     DK_ROW_F_MAP    = 1u << 1,  /* a district jump: picked from the list, never cycled into */
     DK_ROW_F_TPGATE = 1u << 2,  /* enabled() is the teleport-ready query, shared by its rows */
 };
@@ -69,6 +70,8 @@ int  dk_menu_track_stage(void);
 void dk_menu_track_stage_step(const DkRow *r, int d);
 int  dk_menu_custom_stage(void);
 void dk_menu_custom_stage_step(const DkRow *r, int d);
+int  dk_menu_district_stage(const DkRow *r);
+void dk_menu_district_stage_step(const DkRow *r, int d);
 int  dk_menu_modal_action(void);
 const char *dk_menu_modal_title(void);
 const char *dk_menu_modal_body(void);
