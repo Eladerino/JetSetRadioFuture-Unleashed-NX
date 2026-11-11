@@ -1877,7 +1877,15 @@ static int district_mix_for_id(uint32_t id)
  * menu's custom_adx_header_valid) before arming the redirect. A leaf
  * that fails is not fired: the area keeps the game's music, which is
  * the DEFAULT fallback, and DISTRICT STATUS in the menu names the
- * gap. 0: do not fire this leaf. */
+ * gap. 0: do not fire this leaf.
+ *
+ * Correction (validator-crew-driven): this check mirrors the
+ * validator's documented-correct offsets -- encoding at byte 4 and
+ * version at byte 18. The surviving Build K patch carried the same
+ * buggy offsets as the shipped validator (byte 2 for encoding,
+ * byte 6 for version; byte 2 is the copyright offset and byte 6 is
+ * the sample bit depth) and was never fixed in the candidate; the
+ * two offsets are corrected here, acceptance values unchanged. */
 static int district_custom_leaf_ok(const char *leaf)
 {
     char path[320];
@@ -1895,8 +1903,8 @@ static int district_custom_leaf_ok(const char *leaf)
     fclose(f);
     if (total < 64 || rd < 32) return 0;
     if (hdr[0] != 0x80 || hdr[1] != 0x00) return 0;         /* signature */
-    if (hdr[2] != 0x03 && hdr[2] != 0x04) return 0;         /* encoding */
-    if (hdr[6] != 3 && hdr[6] != 4) return 0;               /* version */
+    if (hdr[4] != 0x03 && hdr[4] != 0x04) return 0;         /* encoding */
+    if (hdr[18] != 3 && hdr[18] != 4) return 0;             /* version */
     if (hdr[7] < 1 || hdr[7] > 2) return 0;                 /* channels */
     rate = ((uint32_t)hdr[8] << 24) | ((uint32_t)hdr[9] << 16)
          | ((uint32_t)hdr[10] << 8) | (uint32_t)hdr[11];
