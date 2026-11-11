@@ -3245,13 +3245,19 @@ void dk_ui_set_stretch(int on) { s_stretch = on ? 1 : 0; }
  * on the next frame. Both steps at 0 skip the pass entirely --
  * present() records the blit exactly as shipped -- and the pass's
  * shaders are not even built until a step first asks for them. */
-static int s_post_crt = -1, s_post_vig = -1;
+static int s_post_crt = -1, s_post_vig = -1, s_post_aa = -1, s_post_sharp = -1;
 
 static int post_step_read(const char *var)
 {
     const char *e = getenv(var);
     int v = e ? atoi(e) : 0;
     return v < 0 ? 0 : v > 4 ? 4 : v;
+}
+static int post_step_read_max(const char *var, int max)
+{
+    const char *e = getenv(var);
+    int v = e ? atoi(e) : 0;
+    return v < 0 ? 0 : v > max ? max : v;
 }
 int dk_ui_post_crt(void)
 {
@@ -3263,8 +3269,20 @@ int dk_ui_post_vig(void)
     if (s_post_vig < 0) s_post_vig = post_step_read("RECOMP_DK_POST_VIGNETTE");
     return s_post_vig;
 }
+int dk_ui_post_aa(void)
+{
+    if (s_post_aa < 0) s_post_aa = post_step_read_max("RECOMP_DK_POST_AA", 1);
+    return s_post_aa;
+}
+int dk_ui_post_sharp(void)
+{
+    if (s_post_sharp < 0) s_post_sharp = post_step_read_max("RECOMP_DK_POST_SHARPEN", 3);
+    return s_post_sharp;
+}
 void dk_ui_set_post_crt(int step) { s_post_crt = step < 0 ? 0 : step > 4 ? 4 : step; }
 void dk_ui_set_post_vig(int step) { s_post_vig = step < 0 ? 0 : step > 4 ? 4 : step; }
+void dk_ui_set_post_aa(int step) { s_post_aa = step < 0 ? 0 : step > 1 ? 1 : step; }
+void dk_ui_set_post_sharp(int step) { s_post_sharp = step < 0 ? 0 : step > 3 ? 3 : step; }
 
 /* The steps as shader parameters. The first hardware run (Nov 5)
  * showed the transplant from the Tier B stills was misjudged at real
@@ -3286,13 +3304,14 @@ void dk_ui_set_post_vig(int step) { s_post_vig = step < 0 ? 0 : step > 4 ? 4 : s
  * 720p, 3 px at 1080p): the raster belongs to the screen, not to
  * the internal size the dynamic scale is currently using. */
 static const float k_post_crt_tab[5][3] = {   /* depth, grille, brightness */
-    { 0.00f, 0.00f, 1.00f }, { 0.15f, 0.01f, 1.08f }, { 0.28f, 0.02f, 1.17f },
-    { 0.40f, 0.03f, 1.25f }, { 0.55f, 0.04f, 1.25f },
+    { 0.00f, 0.000f, 1.00f }, { 0.38f, 0.025f, 1.22f }, { 0.55f, 0.04f, 1.25f },
+    { 0.70f, 0.06f, 1.32f }, { 0.85f, 0.09f, 1.38f },
 };
 static const float k_post_grade_tab[5][2] = {   /* saturation, contrast, by CRT step */
-    { 1.00f, 1.00f }, { 1.05f, 1.02f }, { 1.10f, 1.04f },
-    { 1.18f, 1.07f }, { 1.28f, 1.10f },
+    { 1.00f, 1.00f }, { 1.16f, 1.06f }, { 1.28f, 1.10f },
+    { 1.36f, 1.13f }, { 1.45f, 1.16f },
 };
+static const float k_post_sharp_tab[4] = { 0.00f, 0.35f, 0.65f, 1.00f };   /* sharpen dose, by SHARPEN step */
 static const float k_post_vig_tab[5] = { 1.00f, 0.82f, 0.64f, 0.42f, 0.18f };
 #define POST_VIG_EXP 2.6f
 #define POST_VIG_RAD 0.90f
@@ -3326,9 +3345,49 @@ static const char kPostFsGlsl[] =
     "    vec4 u_crt;\n"
     "    vec4 u_vig;\n"
     "    vec4 u_grade;\n"
+    "    vec4 u_fx;\n"
     "};\n"
     "void main() {\n"
     "    vec3 c = texture(image, vUv).rgb;\n"
+    "    /* The picture treatments, on the picture as drawn, before\n"
+    "     * the tube simulation below is laid over it: anti-aliasing\n"
+    "     * in the FXAA shape (the four diagonal taps find an edge and\n"
+    "     * the filter runs along it) and an unsharp-mask sharpen\n"
+    "     * against the same four taps' average. The taps are fetched\n"
+    "     * once and shared; a treatment at 0 skips its block. */\n"
+    "    if (u_fx.z > 0.5 || u_fx.w > 0.0) {\n"
+    "        vec3 tNW = texture(image, vUv + vec2(-u_fx.x, -u_fx.y)).rgb;\n"
+    "        vec3 tNE = texture(image, vUv + vec2( u_fx.x, -u_fx.y)).rgb;\n"
+    "        vec3 tSW = texture(image, vUv + vec2(-u_fx.x,  u_fx.y)).rgb;\n"
+    "        vec3 tSE = texture(image, vUv + vec2( u_fx.x,  u_fx.y)).rgb;\n"
+    "        if (u_fx.z > 0.5) {\n"
+    "            float lNW = dot(tNW, vec3(0.299, 0.587, 0.114));\n"
+    "            float lNE = dot(tNE, vec3(0.299, 0.587, 0.114));\n"
+    "            float lSW = dot(tSW, vec3(0.299, 0.587, 0.114));\n"
+    "            float lSE = dot(tSE, vec3(0.299, 0.587, 0.114));\n"
+    "            float lM  = dot(c,   vec3(0.299, 0.587, 0.114));\n"
+    "            float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));\n"
+    "            float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));\n"
+    "            if (lMax - lMin > max(0.03125, lMax * 0.125)) {\n"
+    "                vec2 dir;\n"
+    "                dir.x = -((lNW + lNE) - (lSW + lSE));\n"
+    "                dir.y =  ((lNW + lSW) - (lNE + lSE));\n"
+    "                float dirReduce = max((lNW + lNE + lSW + lSE) * (0.25 * 0.125), 1.0 / 128.0);\n"
+    "                float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);\n"
+    "                dir = clamp(dir * rcpDirMin, vec2(-8.0), vec2(8.0)) * u_fx.xy;\n"
+    "                vec3 rgbA = 0.5 * (texture(image, vUv + dir * (1.0 / 3.0 - 0.5)).rgb +\n"
+    "                                   texture(image, vUv + dir * (2.0 / 3.0 - 0.5)).rgb);\n"
+    "                vec3 rgbB = rgbA * 0.5 + 0.25 * (texture(image, vUv + dir * -0.5).rgb +\n"
+    "                                                 texture(image, vUv + dir * 0.5).rgb);\n"
+    "                float lB = dot(rgbB, vec3(0.299, 0.587, 0.114));\n"
+    "                c = (lB < lMin || lB > lMax) ? rgbA : rgbB;\n"
+    "            }\n"
+    "        }\n"
+    "        if (u_fx.w > 0.0) {\n"
+    "            vec3 blur = 0.25 * (tNW + tNE + tSW + tSE);\n"
+    "            c = clamp(c + u_fx.w * (c - blur), 0.0, 1.0);\n"
+    "        }\n"
+    "    }\n"
     "    vec2 lp = vPix - u_dst.xy;\n"
     "    float scan = 1.0 - u_crt.y * step(1.0 - 1.0 / u_crt.x, fract(lp.y / u_crt.x));\n"
     "    vec3 grille = vec3(1.0 - u_crt.z);\n"
@@ -3393,7 +3452,7 @@ static int post_init(void)
                                        + sizeof(DkImageDescriptor));
     dkSamplerDescriptorInitialize(samp_cpu, &smp);
     s_post_state = 1;
-    fprintf(stderr, "  [DK] post pass ready (Display: CRT FILTER / VIGNETTE)\n");
+    fprintf(stderr, "  [DK] post pass ready (Display: CRT FILTER / VIGNETTE / ANTI-ALIASING / SHARPEN)\n");
     return 1;
 }
 
@@ -3407,6 +3466,7 @@ static int post_init(void)
 static int post_present(DkSurf *s, const DkImageRect *dst)
 {
     int crt = dk_ui_post_crt(), vig = dk_ui_post_vig();
+    int aa = dk_ui_post_aa(), sharp = dk_ui_post_sharp();
     float fw, fh, x0, y0, x1, y1;
     float verts[24];
     float *ubo;
@@ -3427,7 +3487,7 @@ static int post_present(DkSurf *s, const DkImageRect *dst)
     };
     static const DkVtxBufferState buffers[1] = { { 24, 0 } };
 
-    if (!crt && !vig) return 0;
+    if (!crt && !vig && !aa && !sharp) return 0;
     if (!post_init()) return 0;
 
     /* The descriptor names the picture's image. Surfaces are pooled:
@@ -3484,6 +3544,10 @@ static int post_present(DkSurf *s, const DkImageRect *dst)
     ubo[10] = POST_VIG_RAD;
     ubo[12] = k_post_grade_tab[crt][0];
     ubo[13] = k_post_grade_tab[crt][1];
+    ubo[16] = 1.0f / (float)s->pw;
+    ubo[17] = 1.0f / (float)s->ph;
+    ubo[18] = aa ? 1.0f : 0.0f;
+    ubo[19] = k_post_sharp_tab[sharp];
 
     full_rect(s_fb_w, s_fb_h);
     sh[0] = &s_post_vs; sh[1] = &s_post_fs;

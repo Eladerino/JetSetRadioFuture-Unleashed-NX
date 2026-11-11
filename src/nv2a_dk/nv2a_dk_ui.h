@@ -37,6 +37,10 @@ int         dk_ui_post_crt(void);      /* the post pass's CRT step, 0..4 */
 void        dk_ui_set_post_crt(int step);
 int         dk_ui_post_vig(void);      /* the post pass's vignette step, 0..4 */
 void        dk_ui_set_post_vig(int step);
+int         dk_ui_post_aa(void);       /* the post pass's anti-aliasing switch, 0..1 */
+void        dk_ui_set_post_aa(int step);
+int         dk_ui_post_sharp(void);    /* the post pass's sharpen step, 0..3 */
+void        dk_ui_set_post_sharp(int step);
 unsigned    dk_ui_frames(void);        /* presented frames since boot */
 unsigned    dk_ui_draws(void);         /* draws recorded since boot */
 const char *dk_ui_data_dir(void);      /* the port's folder on the card */

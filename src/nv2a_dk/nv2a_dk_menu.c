@@ -512,6 +512,18 @@ static void postvig_set(intptr_t a, int i)
 { char b[8]; (void)a; dk_ui_set_post_vig(i);
   snprintf(b, sizeof b, "%d", i); setenv("RECOMP_DK_POST_VIGNETTE", b, 1);
   options_set_int("RECOMP_DK_POST_VIGNETTE", i); }
+static const char *k_post_aa_choices[] = { "OFF", "ON" };
+static int  postaa_get(intptr_t a) { (void)a; return dk_ui_post_aa(); }
+static void postaa_set(intptr_t a, int i)
+{ char b[8]; (void)a; dk_ui_set_post_aa(i);
+  snprintf(b, sizeof b, "%d", i); setenv("RECOMP_DK_POST_AA", b, 1);
+  options_set_int("RECOMP_DK_POST_AA", i); }
+static const char *k_post_sharp_choices[] = { "OFF", "LOW", "MED", "HIGH" };
+static int  postsharp_get(intptr_t a) { (void)a; return dk_ui_post_sharp(); }
+static void postsharp_set(intptr_t a, int i)
+{ char b[8]; (void)a; dk_ui_set_post_sharp(i);
+  snprintf(b, sizeof b, "%d", i); setenv("RECOMP_DK_POST_SHARPEN", b, 1);
+  options_set_int("RECOMP_DK_POST_SHARPEN", i); }
 
 /* The frame rate cap, the GL menu's row in this renderer's terms:
  * fps= in options.txt (the launcher maps it to RECOMP_FPS, default 60)
@@ -624,6 +636,8 @@ static const DkRow k_display_rows[] = {
     SECTION("POST-PROCESSING"),
     CHOICE("CRT FILTER", "The texture of a CRT television over the picture: fine dark lines between the picture's rows and the colour grille a tube's mask makes, stronger towards MAX. Applies at once; kept in options.txt.", postcrt_get, postcrt_set, k_post_choices),
     CHOICE("VIGNETTE", "The picture's corners and edges fall off into shadow, as a tube's light does; the middle is untouched. Stronger towards MAX. Applies at once; kept in options.txt.", postvig_get, postvig_set, k_post_choices),
+    CHOICE("ANTI-ALIASING", "Smooths the jagged edges where shapes meet in the picture: edges are found and filtered along their run, while flat areas and fine detail are left alone. Applies at once; kept in options.txt.", postaa_get, postaa_set, k_post_aa_choices),
+    CHOICE("SHARPEN", "Adds edge definition back to the picture, sharpening detail against a softened copy of itself; the dose is stronger towards HIGH. Applies at once; kept in options.txt.", postsharp_get, postsharp_set, k_post_sharp_choices),
 };
 
 /* Graphics */
@@ -1670,6 +1684,8 @@ static void reset_apply(void)
     fpsdrw_set(0, 0);       /* show_fps_drw=0 */
     postcrt_set(0, 0);       /* post-processing off: the shipped defaults */
     postvig_set(0, 0);
+    postaa_set(0, 0);
+    postsharp_set(0, 0);
     /* Graphics */
     wide_set(0, 1);         /* widescreen=1 */
     stretch_set(0, 1);      /* JSRF_WIDE_STRETCH is a line in the shipped file */
