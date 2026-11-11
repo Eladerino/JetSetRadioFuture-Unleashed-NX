@@ -1100,18 +1100,22 @@ static int custom_name_is_adx(const char *name)
         && (e[2] == 'd' || e[2] == 'D')
         && (e[3] == 'x' || e[3] == 'X');
 }
-/* The ADX header is self-describing and big-endian: signature 0x8000,
- * encoding type (0x03 standard ADPCM, 0x04 ADPCM with scale; 0x10 and
- * up are AHX, a different codec), then version, channel count, sample
- * rate and total samples. Anything else is not a file the game's
- * decoder can be handed. */
+/* The ADX header is self-describing and big-endian: signature 0x8000
+ * at bytes 0-1, the copyright/data-start offset at bytes 2-3 (header
+ * padding, not a format field; not tested), encoding type at byte 4
+ * (0x03 standard ADPCM, 0x04 ADPCM with scale; 0x10 and up are AHX, a
+ * different codec), channel count at byte 7, sample rate and total
+ * samples as big-endian u32s at bytes 8-11 and 12-15, and the format
+ * version (3 or 4) at byte 18. Byte 6 is the sample bit depth, not
+ * the version. Anything else is not a file the game's decoder can be
+ * handed. */
 static int custom_adx_header_valid(const unsigned char *hdr, size_t rd, long total)
 {
     uint32_t rate, samples;
     if (total < 64 || rd < 32) return 0;
     if (hdr[0] != 0x80 || hdr[1] != 0x00) return 0;
-    if (hdr[2] != 0x03 && hdr[2] != 0x04) return 0;
-    if (hdr[6] != 3 && hdr[6] != 4) return 0;
+    if (hdr[4] != 0x03 && hdr[4] != 0x04) return 0;
+    if (hdr[18] != 3 && hdr[18] != 4) return 0;
     if (hdr[7] < 1 || hdr[7] > 2) return 0;
     rate = ((uint32_t)hdr[8] << 24) | ((uint32_t)hdr[9] << 16)
          | ((uint32_t)hdr[10] << 8) | (uint32_t)hdr[11];
