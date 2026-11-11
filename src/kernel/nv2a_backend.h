@@ -35,6 +35,14 @@
  * the logical surface at 16:9 instead of 4:3. */
 int xbox_video_widescreen(void);
 
+/* The kernel vblank tick's grid (kernel_bridge.c), for a renderer
+ * pacing itself against the guest's frame clock: *count is the
+ * interrupts delivered so far, *next_ns the CLOCK_MONOTONIC time the
+ * next one is due, *period_ns the grid period (0 = the clock is off
+ * or has not ticked). The count is the release condition; the times
+ * are sleep estimates. */
+void kernel_vblank_grid(unsigned long *count, uint64_t *next_ns, uint64_t *period_ns);
+
 typedef struct {
     uint32_t color_va;          /* guest address of pixel (0,0) */
     uint32_t width, height;     /* clip rectangle size, real pixels */

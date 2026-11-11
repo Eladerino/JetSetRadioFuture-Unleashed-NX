@@ -528,14 +528,19 @@ static void postsharp_set(intptr_t a, int i)
 /* The frame rate cap, the GL menu's row in this renderer's terms:
  * fps= in options.txt (the launcher maps it to RECOMP_FPS, default 60)
  * and a live request to the renderer, which enforces it between
- * presents. 0 is Unlimited, the GL convention. */
-/* The cap itself takes any number -- the renderer's throttle
- * honours it as-is -- so a hand-set value outside the list is shown
- * as itself in a fourth entry that exists only while it is live,
- * never rounded to a neighbour (45 and 120 both showed as "60"). */
+ * presents. */
+/* The row offers the two rates that are real here: 60, the game's
+ * own rate, and 30. There is no UNLIMITED entry -- the guest's frame
+ * loop is paced by the vblank, so a rate above it is not a cadence
+ * this engine can show, and the entry only ever promised speed the
+ * port does not have. The renderer still honours any number the
+ * options file hands it, so a hand-set value outside the list is
+ * shown as itself in a third entry that exists only while it is
+ * live, never rounded to a neighbour (45 and 120 both showed as
+ * "60", once). */
 static char s_fpscap_custom[24] = "CUSTOM";
-static const char *k_fpscap_choices[] = { "60", "30", "UNLIMITED", s_fpscap_custom };
-static const int   k_fpscap_values[]  = { 60, 30, 0 };
+static const char *k_fpscap_choices[] = { "60", "30", s_fpscap_custom };
+static const int   k_fpscap_values[]  = { 60, 30 };
 static int s_fpscap_value = -1;
 static int fpscap_value(void)
 {
@@ -548,22 +553,21 @@ static int fpscap_value(void)
 static int fpscap_custom(void)
 {
     int v = fpscap_value();
-    return v > 0 && v != 60 && v != 30;
+    return v != 60 && v != 30;
 }
 static int  fpscap_get(intptr_t a)
 {
     int v = fpscap_value();
     (void)a;
-    if (v <= 0) return 2;
     if (v == 30) return 1;
     if (v == 60) return 0;
     snprintf(s_fpscap_custom, sizeof s_fpscap_custom, "CUSTOM (%d)", v);
-    return 3;
+    return 2;
 }
 static void fpscap_set(intptr_t a, int i)
 {
     (void)a;
-    if (i == 3) {   /* re-selecting the custom entry keeps the value as it is */
+    if (i == 2) {   /* re-selecting the custom entry keeps the value as it is */
         dk_ui_request_fps_cap(s_fpscap_value);
         options_set_int("fps", s_fpscap_value);
         return;
@@ -628,7 +632,7 @@ static const DkRow k_display_rows[] = {
     SECTION("FRAME"),
     CHOICE("RENDER SCALE", "How much detail the picture is drawn with inside, before it is shown at the screen's size. Auto follows the screen; Max is the sharpest and the slowest. Applies at once and is kept in options.txt.", scale_get, scale_set, k_scale_choices),
     CHOICE("AUTO SCALE GPU BUDGET (RESTART)", "How much GPU time a frame may take before Auto render scale steps the picture down to hold the frame rate, and how far under it frames must run before it steps back up. Only matters while RENDER SCALE is AUTO. The renderer reads it when the scale is set up, so it applies from the next start. Kept in options.txt.", gpubudget_get, gpubudget_set, k_gpubudget_choices),
-    CHOICE("FRAME RATE", "The fastest the picture may change, in frames per second; Unlimited lets the game run as fast as it can. Applies at once and is kept in options.txt.", fpscap_get, fpscap_set, k_fpscap_choices),
+    CHOICE("FRAME RATE", "The fastest the picture may change, in frames per second. 30 holds each picture for two frames: an even cadence at full game speed, which smooths scenes that wobble between rates -- heavy scenes run no faster for it, and the menu redraws at the capped rate while it is on. Applies at once and is kept in options.txt.", fpscap_get, fpscap_set, k_fpscap_choices),
     CHECK("VSYNC (RESTART)", "Wait for the screen's refresh before showing each frame: on is smooth and tear-free; off shows each frame the moment it is ready, which can tear. The swapchain is built with it, so it applies from the next start. Kept in the settings file and options.txt.", vsync_get, vsync_set),
     CHECK("SHOW FRAME RATE", "A small counter in the corner of the picture: frames shown each second. SHOW FRAME TIME (MS) and SHOW DRAWS (DRW/F), the two rows under this one, can each add a figure under the number. Applies at once and is kept in options.txt.", fps_get, fps_set),
     CHECK("SHOW FRAME TIME (MS)", "Add the longest gap between two frames, in milliseconds, under the frame rate counter's number: a stutter shows here even while the rate reads high. It appears only while SHOW FRAME RATE is on. Applies at once and is kept in options.txt.", fpsms_get, fpsms_set),
@@ -838,7 +842,7 @@ static int row_nchoices(const DkRow *r)
     if (r->choices == s_custom_names)
         return s_custom_count;
     if (r->choices == k_scale_choices) return scale_custom() ? 8 : 7;
-    if (r->choices == k_fpscap_choices) return fpscap_custom() ? 4 : 3;
+    if (r->choices == k_fpscap_choices) return fpscap_custom() ? 3 : 2;
     if (r->get == gpu_get) return gpu_custom() ? 5 : 4;
     if (r->get == gpubudget_get) return gpubudget_custom() ? 6 : 5;
     if (r->get == texmb_get) return texmb_custom() ? 4 : 3;

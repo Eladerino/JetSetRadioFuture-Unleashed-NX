@@ -115,6 +115,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>   /* clock_gettime: the frame cap's monotonic clock */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -213,6 +214,7 @@ static const uint32_t *s_regs;          /* the executor's method shadow */
 enum { SYNC_DATA, SYNC_SURF, SYNC_DEPTH, SYNC_EVICT, SYNC_CMD, SYNC_DEFER, SYNC_N };
 static struct {
     uint64_t t_draw, t_clear, t_flip, t_fence, t_sync;  /* CPU ticks */
+    uint64_t t_pace;                    /* the frame cap's hold, apart from t_flip */
     uint64_t t_copy, t_check;           /* in t_draw: data ring writes, texture checks */
     uint32_t checks, checks_skipped;    /* texture content checks done / put off */
     uint64_t gpu_ns;
@@ -1391,6 +1393,11 @@ static uint32_t swap_interval(void)
     return e && e[0] == '0' ? 0u : 1u;
 }
 
+/* The swap interval the frame cap's vsync divider wants on the chain
+ * (defined with the cap, far below): the configured interval above,
+ * or a multiple of it while a sub-vblank cap paces by swap interval. */
+static uint32_t pace_interval_want(void);
+
 static int swapchain_make(uint32_t w, uint32_t h)
 {
     DkImageLayoutMaker lm;
@@ -1420,7 +1427,7 @@ static int swapchain_make(uint32_t w, uint32_t h)
     s_swap = dkSwapchainCreate(&sm);
     if (!s_swap)
         return 0;
-    dkSwapchainSetSwapInterval(s_swap, swap_interval());
+    dkSwapchainSetSwapInterval(s_swap, pace_interval_want());
     s_fb_w = w;
     s_fb_h = h;
     fprintf(stderr, "  [DK] screen %ux%u (%s), %u MB of swapchain images\n", w, h,
@@ -3072,37 +3079,212 @@ void dk_ui_request_at_prove(int on)    { __atomic_store_n(&s_at_prove_req, on, _
 void dk_ui_request_ez_test(int on)     { __atomic_store_n(&s_ez_req, on, __ATOMIC_RELEASE); }
 
 /* The frame-rate cap (RECOMP_FPS at bring-up; the Display page's Frame
- * rate row live): a minimum interval between presents, in system
- * ticks; 0 is unthrottled. Present-path state only -- nothing in the
- * queue thread's inner loop reads it. */
+ * rate row live): an even display cadence at full game speed, held
+ * between presents. Present-path state only -- nothing in the queue
+ * thread's inner loop reads it.
+ *
+ * Phase 1 of the half-rate fix rewrote the throttle this block used
+ * to hold. The old one slept once a present against a deadline that
+ * reset to the post-sleep time every frame, on a wall-clock phase
+ * unrelated to the guest's clock: every sleep's overshoot folded into
+ * the next frame's budget forever, and the cap's cadence beat against
+ * the vblank's into judder. (The GL backend's frame_pace documents
+ * the same bug in its own past -- nv2a_gl.c:11717+ -- and the
+ * disciplines it fixed it with; none had been ported here.)
+ *
+ * What stands here instead:
+ *
+ *  - Presents release on the vblank grid (kernel_vblank_grid). A cap
+ *    whose period is a whole number K of vblanks -- 30 against the
+ *    grid's 17 ms: K = 2 -- gives each present a slot, every Kth
+ *    vblank, and the slot advances by K per present, never re-based
+ *    on when a wait ended: one cadence left in the system, so
+ *    nothing beats. A frame that arrives after its slot releases at
+ *    once (an overshoot costs only itself); one two or more slots
+ *    late re-anchors its phase to the grid instead of sprinting
+ *    (GL's restart rule). A scene already slower than the cap --
+ *    the 99th Street patrol at a 30 cap -- therefore never waits
+ *    at all: the divider disengages by construction.
+ *  - The wait sleeps in slices of a millisecond and spins the last
+ *    ~1.2 ms, per GL, and it is guarded: a stalled grid (the vblank
+ *    clock off, the interrupt gone) costs a present at most about
+ *    a period past its slot, never a hang.
+ *  - No cap before the first real scene (GL's draw-count rule: a
+ *    frame with 100+ draws is a scene; a loading frame has a
+ *    handful, and this title's loader is driven by its frame loop,
+ *    so capping presents caps loading with them). Once seen, the
+ *    cap is the cap -- a low-geometry screen later is not a load.
+ *  - A cap at or above the grid's own rate (60) never engages: the
+ *    guest cannot complete frames faster than the clock pacing it.
+ *    A hand-set cap the grid cannot divide evenly (a CUSTOM 45)
+ *    falls back to GL's advancing monotonic deadline -- the same
+ *    disciplines without the count release.
+ *  - With RECOMP_VSYNC=1 the swapchain itself quantises presents
+ *    to the panel, so a divisible cap does not sleep at all: the
+ *    divider counts swapchain presents instead, by carrying a swap
+ *    interval of K (pace_interval_want) -- one master clock per
+ *    configuration, the panel when vsync is on, the vblank grid
+ *    when it is off.
+ *
+ * The hold is accounted in [perf] as its own figure (t_pace), never
+ * inside the timed present time. */
 static uint64_t s_frame_period;        /* ticks; 0 = no cap */
 static int      s_frame_period_set;
-static uint64_t s_last_present;        /* tick the last present began */
+static int      s_cap_fps;             /* the latched rate itself */
+static uint64_t s_pace_slot;           /* vblank the last present released on; 0 = unanchored */
+static uint64_t s_pace_deadline_ns;    /* advancing deadline, undividable caps; 0 = unanchored */
+static uint64_t s_pace_wait_ns;        /* total hold, for [perf] */
+static int      s_pace_seen_scene;
+static uint32_t s_pace_prev_draws;
+static int      s_pace_interval = -1;  /* swap interval the divider last set; -1 = untouched */
+
+static uint64_t pace_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* The cap's divisor against the grid: how many vblanks one capped
+ * present spans -- 0 when there is nothing to divide (no cap, no
+ * grid, or a cap at/above the grid's own rate). */
+static uint64_t pace_divisor(uint64_t period_ns)
+{
+    uint64_t target_ns;
+    if (!s_cap_fps || !period_ns)
+        return 0;
+    target_ns = 1000000000ull / (uint64_t)s_cap_fps;
+    if (target_ns <= period_ns)
+        return 0;
+    return (target_ns + period_ns / 2) / period_ns;
+}
+
+static uint32_t pace_interval_want(void)
+{
+    uint32_t base = swap_interval();
+    unsigned long count;
+    uint64_t next_ns, period_ns, k;
+    if (!base || !s_pace_seen_scene)
+        return base;
+    kernel_vblank_grid(&count, &next_ns, &period_ns);
+    k = pace_divisor(period_ns);
+    return k >= 2 ? base * (uint32_t)k : base;
+}
+
+/* Carry the vsync divider's interval on the live chain, when it
+ * differs from what the divider last set. */
+static void pace_interval(void)
+{
+    uint32_t want = pace_interval_want();
+    if (s_swap && (int)want != s_pace_interval) {
+        dkSwapchainSetSwapInterval(s_swap, want);
+        s_pace_interval = (int)want;
+    }
+}
 
 static void frame_period_latch(int fps)
 {
     s_frame_period = fps > 0 ? armGetSystemTickFreq() / (uint64_t)fps : 0;
     s_frame_period_set = 1;
+    s_cap_fps = fps;
+    s_pace_slot = 0;            /* the new cap re-anchors both grids */
+    s_pace_deadline_ns = 0;
+    pace_interval();
 }
 
-/* Once per present, before any work: hold this present until the cap's
- * interval has passed since the last one began. */
-static void fpscap_throttle(void)
+/* Hold this present: in slices of a millisecond until ~1.2 ms before
+ * the deadline, then spun. `target` is the vblank count that releases
+ * the hold (0 for a purely timed hold); the count, not the clock, is
+ * the release condition when there is one. The guard ends the hold
+ * about a grid period past the deadline whatever happens. Returns
+ * the nanoseconds held. */
+static uint64_t pace_hold(uint64_t deadline_ns, unsigned long target, uint64_t period_ns)
 {
-    uint64_t now, earliest;
+    uint64_t t0 = pace_now_ns();
+    uint64_t spin_from = deadline_ns > 1200000ull ? deadline_ns - 1200000ull : 0;
+    uint64_t give_up = deadline_ns + (period_ns ? period_ns : 20000000ull);
+    for (;;) {
+        uint64_t now = pace_now_ns();
+        if (target) {
+            unsigned long count;
+            uint64_t next_ns, period;
+            kernel_vblank_grid(&count, &next_ns, &period);
+            if (count >= target || now >= give_up)
+                break;
+        } else if (now >= deadline_ns) {
+            break;
+        }
+        if (now < spin_from) {
+            uint64_t rest = spin_from - now;
+            svcSleepThread((int64_t)(rest > 1000000ull ? 1000000ull : rest));
+        }
+    }
+    return pace_now_ns() - t0;
+}
+
+/* Once per present, before any work: hold this present to the cap's
+ * cadence. */
+static void fpscap_throttle(int show_loading)
+{
+    unsigned long count;
+    uint64_t next_ns, period_ns, k;
+
     if (!s_frame_period_set) {
         const char *e = getenv("RECOMP_FPS");
         frame_period_latch(e ? atoi(e) : 60);
     }
-    now = armGetSystemTick();
-    if (!s_frame_period) { s_last_present = now; return; }
-    earliest = s_last_present + s_frame_period;
-    if (s_last_present && now < earliest) {
-        uint64_t ns = (earliest - now) * 1000000000ull / armGetSystemTickFreq();
-        if (ns) svcSleepThread((int64_t)ns);
-        now = armGetSystemTick();
+    /* The pre-scene gate, GL's rule: the draws of the frame just
+     * flipped say whether a scene exists yet. Loading presents (the
+     * loader thread's) never pace and never set it. */
+    {
+        uint32_t frame_draws = s_draws - s_pace_prev_draws;
+        s_pace_prev_draws = s_draws;
+        if (!show_loading && frame_draws >= 100 && !s_pace_seen_scene) {
+            s_pace_seen_scene = 1;
+            pace_interval();    /* the vsync divider starts with the scene */
+        }
     }
-    s_last_present = now;
+    if (show_loading || !s_pace_seen_scene || !s_frame_period)
+        return;
+    kernel_vblank_grid(&count, &next_ns, &period_ns);
+    k = pace_divisor(period_ns);
+    if (period_ns && k >= 2) {
+        uint64_t slot;
+        if (swap_interval()) {
+            pace_interval();    /* the panel paces; do not sleep against it */
+            return;
+        }
+        if (!s_pace_slot)
+            s_pace_slot = (uint64_t)count / k * k;
+        slot = s_pace_slot + k;
+        if (slot <= (uint64_t)count) {
+            /* The slot has already gone -- at the patrol, every
+             * frame's does. Release at once; two slots late or more,
+             * the phase went with them, so re-anchor (GL's restart). */
+            s_pace_slot = (uint64_t)count - slot >= 2 * k
+                        ? (uint64_t)count / k * k : slot;
+            return;
+        }
+        s_pace_wait_ns += pace_hold(next_ns + (slot - (uint64_t)count - 1) * period_ns,
+                                    (unsigned long)slot, period_ns);
+        s_pace_slot = slot;
+        return;
+    }
+    if (period_ns && !k)
+        return;                 /* at/above the grid's rate: never engages */
+    /* An undividable hand-set cap, or no grid to divide: GL's
+     * advancing deadline, its restart rule, its sliced sleep. */
+    {
+        uint64_t target_ns = 1000000000ull / (uint64_t)s_cap_fps;
+        uint64_t now = pace_now_ns();
+        if (!s_pace_deadline_ns || s_pace_deadline_ns + 1000000000ull < now)
+            s_pace_deadline_ns = now;
+        s_pace_deadline_ns += target_ns;
+        if (now > s_pace_deadline_ns + 4 * target_ns)
+            s_pace_deadline_ns = now;   /* genuinely behind: start again here */
+        else if (now < s_pace_deadline_ns)
+            s_pace_wait_ns += pace_hold(s_pace_deadline_ns, 0, period_ns);
+    }
 }
 
 int dk_ui_scale_choice(void)
@@ -3611,7 +3793,7 @@ static void present(int show_loading)
         }
     }
     dk_menu_apply_pending();
-    fpscap_throttle();
+    fpscap_throttle(show_loading);
 #endif
     if (s_ts_cpu) {
         dkCmdBufReportCounter(s_cmd, DkCounter_Timestamp, s_ts_gpu + s_slot * 32 + 16);
@@ -5438,13 +5620,20 @@ static void dk_flip(void)
 {
     static uint32_t last_report;
     uint64_t t0 = armGetSystemTick();
+    uint64_t pace0, held;
     if (!ready())
         return;
+    pace0 = s_pace_wait_ns;
     present(0);
     hitch_check();
     if (s_keylen && (s_frames % 120) == 0)
         keys_flush();
-    s_st.t_flip += armGetSystemTick() - t0;
+    /* The frame cap's hold inside present() is not present work:
+     * account it apart (t_pace), so the [perf] present figure stays
+     * the cost of presenting. */
+    held = (s_pace_wait_ns - pace0) * armGetSystemTickFreq() / 1000000000ull;
+    s_st.t_pace += held;
+    s_st.t_flip += armGetSystemTick() - t0 - held;
     s_rs_valid = 0;                     /* present set its own viewport and scissor */
     if (s_trace && s_frames - last_report >= 600) {
         last_report = s_frames;
@@ -5554,7 +5743,7 @@ void nv2a_dk_perf(char *buf, size_t n, double secs)
              "[perf] deko3d: GPU %.1f ms/frame at x%.2f%s (picture %ux%u, screen %ux%u);"
              " renderer CPU %.1f ms/frame (draws %.1f [data copies %.1f, texture checks %.2f:"
              " %.0f/frame, %.0f put off], clears %.1f,"
-             " present %.1f, of which waiting for the GPU %.1f + syncs %.1f); %u draws (%.0f/frame,"
+             " present %.1f, of which waiting for the GPU %.1f + syncs %.1f; frame cap held %.1f); %u draws (%.0f/frame,"
              " %.0f vertices/draw), pack shaders on %u%% of vertex-program draws and %u%% of draws'"
              " combiners (%u%% of draws without the alpha test: early depth)\n"
              "[perf] deko3d: %u syncs (data %u surface %u depth %u evict %u cmd %u defer %u),"
@@ -5571,7 +5760,7 @@ void nv2a_dk_perf(char *buf, size_t n, double secs)
              (double)s_st.t_check * tick_ms / f, s_st.checks / f, s_st.checks_skipped / f,
              (double)s_st.t_clear * tick_ms / f,
              (double)s_st.t_flip * tick_ms / f, (double)s_st.t_fence * tick_ms / f,
-             (double)s_st.t_sync * tick_ms / f,
+             (double)s_st.t_sync * tick_ms / f, (double)s_st.t_pace * tick_ms / f,
              s_st.draws, s_st.draws / f, s_st.draws ? (double)s_st.verts / s_st.draws : 0.0,
              (s_st.spec_vs + s_st.uber_vs_vp) ? 100u * s_st.spec_vs / (s_st.spec_vs + s_st.uber_vs_vp) : 0u,
              s_st.draws ? 100u * s_st.spec_fs / s_st.draws : 0u,

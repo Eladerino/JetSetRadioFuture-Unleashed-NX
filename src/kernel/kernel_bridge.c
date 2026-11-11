@@ -2783,6 +2783,16 @@ unsigned long g_vblank_count;
 static uint64_t s_vblank_period_ns;   /* 16,666,667 ns at hz = 60 */
 static uint64_t s_vblank_next_ns;     /* next due time, CLOCK_MONOTONIC */
 
+/* The fallback tick's grid: whether the clock runs, when the next
+ * interrupt is due, and the period -- the last two on GetTickCount64()'s
+ * millisecond clock, the clock the fallback tick itself runs on.
+ * Written only by the timer thread, inside kernel_vblank_tick()
+ * (the next/period pair only on its fallback path); read through
+ * the accessor below. */
+static int       s_vblank_enabled = -1;
+static long long s_vblank_next_ms;
+static long long s_vblank_period_ms = -1;
+
 static int vblank_ns_on(void)
 {
     static int on = -1;
@@ -2851,15 +2861,44 @@ int kernel_vblank_jitter(double *mean_us, double *p50_us,
     return (int)n;
 }
 
+/* kernel_vblank_grid -- the vblank grid, for a consumer pacing itself
+ * against the guest's frame clock (the renderer's frame cap).
+ * *count is the interrupts delivered so far; *next_ns and *period_ns
+ * are the due time of the next interrupt and the grid period, in
+ * CLOCK_MONOTONIC nanoseconds -- GetTickCount64() is CLOCK_MONOTONIC
+ * in whole milliseconds (win32_compat.c), so the conversion is exact,
+ * not a second clock. *period_ns is 0 when the clock is disabled or
+ * has not ticked yet.
+ *
+ * The snapshot is an estimate by construction -- the timer thread
+ * keeps writing while it is read -- so a consumer must treat *count
+ * as the release condition and the times as sleep estimates, never
+ * the reverse. This accessor reads whichever grid the tick is
+ * actually running: the exact-nanosecond state when RECOMP_VBLANK_NS
+ * selects it (the tick's own vblank_ns_on() latch), or the promoted
+ * whole-millisecond fallback state otherwise. */
+void kernel_vblank_grid(unsigned long *count, uint64_t *next_ns, uint64_t *period_ns)
+{
+    unsigned long c = __atomic_load_n(&g_vblank_count, __ATOMIC_ACQUIRE);
+    *count = c;
+    if (vblank_ns_on()) {
+        *next_ns = s_vblank_next_ns;
+        *period_ns = s_vblank_period_ns;
+    } else {
+        long long nxt = s_vblank_next_ms;
+        long long per = s_vblank_period_ms;
+        *next_ns = nxt > 0 ? (uint64_t)nxt * 1000000ull : 0;
+        *period_ns = per > 0 ? (uint64_t)per * 1000000ull : 0;
+    }
+}
+
 static void kernel_vblank_tick(void)
 {
-    static int enabled = -1;
-    static long long next_ms;
     long long now;
 
-    if (enabled < 0)
-        enabled = getenv("RECOMP_VBLANK") != NULL;
-    if (!enabled)
+    if (s_vblank_enabled < 0)
+        s_vblank_enabled = getenv("RECOMP_VBLANK") != NULL;
+    if (!s_vblank_enabled)
         return;
 
     /* The period, in milliseconds, and why it is not simply 16.
@@ -2900,21 +2939,20 @@ static void kernel_vblank_tick(void)
                              : now_ns + s_vblank_period_ns;
         }
     } else {
-            static long long period = -1;
-            if (period < 0) {
+            if (s_vblank_period_ms < 0) {
                 const char *e = getenv("RECOMP_VBLANK_HZ");
                 double hz = e ? atof(e) : 60.0;
                 if (hz < 1.0) hz = 60.0;
-                period = (long long)(1000.0 / hz + 0.5);
-                if (period < 1) period = 1;
+                s_vblank_period_ms = (long long)(1000.0 / hz + 0.5);
+                if (s_vblank_period_ms < 1) s_vblank_period_ms = 1;
             }
             now = (long long)GetTickCount64();
-            if (now < next_ms)
+            if (now < s_vblank_next_ms)
                 return;
             /* Catch up rather than drift: a late tick should not push the next one
              * a full period further out. */
-            next_ms = (next_ms && now - next_ms < period * 4) ? next_ms + period
-                                                              : now + period;
+            s_vblank_next_ms = (s_vblank_next_ms && now - s_vblank_next_ms < s_vblank_period_ms * 4) ? s_vblank_next_ms + s_vblank_period_ms
+                                                              : now + s_vblank_period_ms;
     }
 
     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
