@@ -51,8 +51,12 @@ import sys
 MAX_STATEMENTS = 24
 # Longer ones the console profile found hot in JSRF's busiest scenes (the
 # matrix library's 0x001BAB20 and 0x001BADB0, 0x0006E130, D3D's 0x00190750):
-# inlined up to HOT_STATEMENTS.
-HOT = {"sub_001BAB20", "sub_0006E130", "sub_001BADB0", "sub_00190750"}
+# inlined up to HOT_STATEMENTS. sub_00190FB0 joins them on the 2026-11-11
+# PGO census (0.83% of executed arcs, the heaviest chain3 miss): a 37-
+# statement straight-line struct copy, single return, no calls, so the
+# inlined form adds no control flow to its callers.
+HOT = {"sub_001BAB20", "sub_0006E130", "sub_001BADB0", "sub_00190750",
+       "sub_00190FB0"}
 HOT_STATEMENTS = 72
 
 FUNC = re.compile(r"^void (sub_[0-9A-F]{8})\(void\)$")
