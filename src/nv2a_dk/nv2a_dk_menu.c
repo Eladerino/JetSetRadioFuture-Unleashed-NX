@@ -716,7 +716,7 @@ static void grafcam_set(intptr_t a, int on)
  * options.txt for the next start, and the label says so. Off unless
  * the key is 1: the game's behaviour is the default. */
 static int  camwalls_get(intptr_t a)
-{ (void)a; const char *e = getenv("RECOMP_CAM_WALLS"); return !(e && e[0] == '0'); }
+{ (void)a; const char *e = getenv("RECOMP_CAM_WALLS"); return (e && e[0] == '1'); }
 static void camwalls_set(intptr_t a, int on)
 { (void)a; options_set_int("RECOMP_CAM_WALLS", on); }
 static const DkRow k_controller_rows[] = {
