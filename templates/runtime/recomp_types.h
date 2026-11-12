@@ -877,25 +877,25 @@ static inline void recomp_mmio_write_fast(uint32_t a, uint32_t v, unsigned size)
 }
 #define RECOMP_HOST(T, a) ((T *)((uintptr_t)(uint32_t)(a) + g_xbox_mem_offset))
 
-static inline volatile uint8_t *recomp_p8(uint32_t a) {
+static __forceinline volatile uint8_t *recomp_p8(uint32_t a) {
     static RECOMP_TLS uint8_t scr;
     volatile uint8_t *p = RECOMP_HOST(volatile uint8_t, a);
     if (RECOMP_IS_MMIO(a)) { scr = (uint8_t)recomp_mmio_read_fast(a, 1); return &scr; }
     return p;
 }
-static inline volatile uint16_t *recomp_p16(uint32_t a) {
+static __forceinline volatile uint16_t *recomp_p16(uint32_t a) {
     static RECOMP_TLS uint16_t scr;
     volatile uint16_t *p = RECOMP_HOST(volatile uint16_t, a);
     if (RECOMP_IS_MMIO(a)) { scr = (uint16_t)recomp_mmio_read_fast(a, 2); return &scr; }
     return p;
 }
-static inline volatile uint32_t *recomp_p32(uint32_t a) {
+static __forceinline volatile uint32_t *recomp_p32(uint32_t a) {
     static RECOMP_TLS uint32_t scr;
     volatile uint32_t *p = RECOMP_HOST(volatile uint32_t, a);
     if (RECOMP_IS_MMIO(a)) { scr = recomp_mmio_read_fast(a, 4); return &scr; }
     return p;
 }
-static inline volatile uint64_t *recomp_p64(uint32_t a) {
+static __forceinline volatile uint64_t *recomp_p64(uint32_t a) {
     static RECOMP_TLS uint64_t scr;
     volatile uint64_t *p = RECOMP_HOST(volatile uint64_t, a);
     if (RECOMP_IS_MMIO(a)) {
@@ -984,22 +984,22 @@ static inline uint64_t recomp_ld64(uint32_t a) {
 #else
 #define RECOMP_STORE32(a, v) (MEM32(a) = (uint32_t)(v))
 
-static inline volatile uint8_t *recomp_p8(uint32_t a) {
+static __forceinline volatile uint8_t *recomp_p8(uint32_t a) {
     static RECOMP_TLS uint8_t scr;
     if (RECOMP_IS_MMIO(a)) { scr = (uint8_t)recomp_mmio_read(a, 1); return &scr; }
     return (volatile uint8_t *)XBOX_PTR(a);
 }
-static inline volatile uint16_t *recomp_p16(uint32_t a) {
+static __forceinline volatile uint16_t *recomp_p16(uint32_t a) {
     static RECOMP_TLS uint16_t scr;
     if (RECOMP_IS_MMIO(a)) { scr = (uint16_t)recomp_mmio_read(a, 2); return &scr; }
     return (volatile uint16_t *)XBOX_PTR(a);
 }
-static inline volatile uint32_t *recomp_p32(uint32_t a) {
+static __forceinline volatile uint32_t *recomp_p32(uint32_t a) {
     static RECOMP_TLS uint32_t scr;
     if (RECOMP_IS_MMIO(a)) { scr = recomp_mmio_read(a, 4); return &scr; }
     return (volatile uint32_t *)XBOX_PTR(a);
 }
-static inline volatile uint64_t *recomp_p64(uint32_t a) {
+static __forceinline volatile uint64_t *recomp_p64(uint32_t a) {
     static RECOMP_TLS uint64_t scr;
     if (RECOMP_IS_MMIO(a)) {
         scr = (uint64_t)recomp_mmio_read(a, 4) | ((uint64_t)recomp_mmio_read(a + 4, 4) << 32);
@@ -1053,62 +1053,62 @@ static inline void *recomp_memcpy_watched(void *d, const void *s, size_t n) {
 #endif
 
 #ifdef RECOMP_FAST_MEM
-static inline void recomp_w8(uint32_t a, uint8_t v) {
+static __forceinline void recomp_w8(uint32_t a, uint8_t v) {
     volatile recomp_st8_t *p = RECOMP_HOST(volatile recomp_st8_t, a);
     RECOMP_WATCH(a, 1);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write_fast(a, v, 1); else *p = v;
 }
-static inline void recomp_w16(uint32_t a, uint16_t v) {
+static __forceinline void recomp_w16(uint32_t a, uint16_t v) {
     volatile recomp_st16_t *p = RECOMP_HOST(volatile recomp_st16_t, a);
     RECOMP_WATCH(a, 2);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write_fast(a, v, 2); else *p = v;
 }
-static inline void recomp_w32(uint32_t a, uint32_t v) {
+static __forceinline void recomp_w32(uint32_t a, uint32_t v) {
     volatile recomp_st32_t *p = RECOMP_HOST(volatile recomp_st32_t, a);
     RECOMP_WATCH(a, 4);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write_fast(a, v, 4); else *p = v;
 }
-static inline void recomp_wf(uint32_t a, float v) {
+static __forceinline void recomp_wf(uint32_t a, float v) {
     uint32_t b; memcpy(&b, &v, 4);
     recomp_w32(a, b);
 }
-static inline void recomp_wd(uint32_t a, double v) {
+static __forceinline void recomp_wd(uint32_t a, double v) {
     volatile recomp_st64_t *p = RECOMP_HOST(volatile recomp_st64_t, a);
     uint64_t b; memcpy(&b, &v, 8);
     RECOMP_WATCH(a, 8);
     if (RECOMP_IS_MMIO(a)) { recomp_mmio_write_fast(a, (uint32_t)b, 4); recomp_mmio_write_fast(a + 4, (uint32_t)(b >> 32), 4); }
     else *p = b;
 }
-static inline void recomp_w64(uint32_t a, uint64_t b) {
+static __forceinline void recomp_w64(uint32_t a, uint64_t b) {
     volatile recomp_st64_t *p = RECOMP_HOST(volatile recomp_st64_t, a);
     RECOMP_WATCH(a, 8);
     if (RECOMP_IS_MMIO(a)) { recomp_mmio_write_fast(a, (uint32_t)b, 4); recomp_mmio_write_fast(a + 4, (uint32_t)(b >> 32), 4); }
     else *p = b;
 }
 #else
-static inline void recomp_w8(uint32_t a, uint8_t v) {
+static __forceinline void recomp_w8(uint32_t a, uint8_t v) {
     RECOMP_WATCH(a, 1);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write(a, v, 1); else *(volatile uint8_t *)XBOX_PTR(a) = v;
 }
-static inline void recomp_w16(uint32_t a, uint16_t v) {
+static __forceinline void recomp_w16(uint32_t a, uint16_t v) {
     RECOMP_WATCH(a, 2);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write(a, v, 2); else *(volatile uint16_t *)XBOX_PTR(a) = v;
 }
-static inline void recomp_w32(uint32_t a, uint32_t v) {
+static __forceinline void recomp_w32(uint32_t a, uint32_t v) {
     RECOMP_WATCH(a, 4);
     if (RECOMP_IS_MMIO(a)) recomp_mmio_write(a, v, 4); else *(volatile uint32_t *)XBOX_PTR(a) = v;
 }
-static inline void recomp_wf(uint32_t a, float v) {
+static __forceinline void recomp_wf(uint32_t a, float v) {
     RECOMP_WATCH(a, 4);
     if (RECOMP_IS_MMIO(a)) { uint32_t b; memcpy(&b, &v, 4); recomp_mmio_write(a, b, 4); }
     else *(volatile float *)XBOX_PTR(a) = v;
 }
-static inline void recomp_wd(uint32_t a, double v) {
+static __forceinline void recomp_wd(uint32_t a, double v) {
     RECOMP_WATCH(a, 8);
     if (RECOMP_IS_MMIO(a)) { uint64_t b; memcpy(&b, &v, 8); recomp_mmio_write(a, (uint32_t)b, 4); recomp_mmio_write(a + 4, (uint32_t)(b >> 32), 4); }
     else *(volatile double *)XBOX_PTR(a) = v;
 }
-static inline void recomp_w64(uint32_t a, uint64_t v) {
+static __forceinline void recomp_w64(uint32_t a, uint64_t v) {
     RECOMP_WATCH(a, 8);
     if (RECOMP_IS_MMIO(a)) { recomp_mmio_write(a, (uint32_t)v, 4); recomp_mmio_write(a + 4, (uint32_t)(v >> 32), 4); }
     else *(volatile uint64_t *)XBOX_PTR(a) = v;
@@ -1228,14 +1228,14 @@ static inline RecompXmm XMM_SCALAR_BITS(uint32_t bits) {
  * Addresses are guest VAs, so they go through MEM32 like every other
  * access. Done lane-wise, which is also unaligned-safe for movups. */
 
-static inline RecompXmm XMM_MEM(uint32_t addr) {
+static __forceinline RecompXmm XMM_MEM(uint32_t addr) {
     RecompXmm r;
     r.u[0] = MEM32(addr);      r.u[1] = MEM32(addr + 4);
     r.u[2] = MEM32(addr + 8);  r.u[3] = MEM32(addr + 12);
     return r;
 }
 
-static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
+static __forceinline void XMM_STORE(uint32_t addr, RecompXmm v) {
     RECOMP_WATCH(addr, 16);
     RECOMP_STORE32(addr, v.u[0]);     RECOMP_STORE32(addr + 4, v.u[1]);
     RECOMP_STORE32(addr + 8, v.u[2]); RECOMP_STORE32(addr + 12, v.u[3]);
@@ -1248,13 +1248,13 @@ static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
 #define XMM_STORE_LOW(addr, src)  recomp_xmm_store_half((addr), (src), 0)
 #define XMM_STORE_HIGH(addr, src) recomp_xmm_store_half((addr), (src), 1)
 
-static inline void recomp_xmm_load_half(RecompXmm *dst, uint32_t addr,
+static __forceinline void recomp_xmm_load_half(RecompXmm *dst, uint32_t addr,
                                         int high) {
     dst->u[high * 2]     = MEM32(addr);
     dst->u[high * 2 + 1] = MEM32(addr + 4);
 }
 
-static inline void recomp_xmm_store_half(uint32_t addr, RecompXmm src,
+static __forceinline void recomp_xmm_store_half(uint32_t addr, RecompXmm src,
                                          int high) {
     RECOMP_WATCH(addr, 8);
     RECOMP_STORE32(addr, src.u[high * 2]);
