@@ -6097,8 +6097,8 @@ void sub_000A5070(void)
  * and a scene's shown through another skater's camera. This supplies the
  * line test, the game's own.
  *
- * On unless RECOMP_CAM_WALLS=0 (options.txt): the fix is the default, the
- * key is the way back to the game's exact behaviour. */
+ * Off unless RECOMP_CAM_WALLS=1 (options.txt): the game's exact behaviour
+ * is the default, the key turns the fix on. */
 #include "camera_walls.h"
 
 #define CAM_FOLLOWS        0x024u      /* the character it follows (sub_00011BD0) */
@@ -6127,7 +6127,7 @@ static int cam_walls_on(void)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("RECOMP_CAM_WALLS");
-        on = !(e && e[0] == '0');
+        on = (e && e[0] == '1');
     }
     return on;
 }
