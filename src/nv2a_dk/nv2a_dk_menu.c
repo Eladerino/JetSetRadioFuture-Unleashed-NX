@@ -713,8 +713,8 @@ static void grafcam_set(intptr_t a, int on)
 /* The camera wall fix (port/recomp_manual.c): it reads
  * RECOMP_CAM_WALLS once and latches the answer, so unlike the
  * graffiti row this one cannot apply live -- the setter writes
- * options.txt for the next start, and the label says so. On unless
- * the key is 0: the fix is the default. */
+ * options.txt for the next start, and the label says so. Off unless
+ * the key is 1: the game's behaviour is the default. */
 static int  camwalls_get(intptr_t a)
 { (void)a; const char *e = getenv("RECOMP_CAM_WALLS"); return !(e && e[0] == '0'); }
 static void camwalls_set(intptr_t a, int on)
