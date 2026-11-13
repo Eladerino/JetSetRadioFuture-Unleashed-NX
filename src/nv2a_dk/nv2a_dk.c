@@ -5827,6 +5827,51 @@ void nv2a_dk_perf(char *buf, size_t n, double secs)
                  (double)(sleep_us - last_sleep) / 1000.0 / f, (double)(sleeps - last_sleeps) / f,
                  (double)(hits - last_hits) / f, kicks - last_kicks);
     {
+        /* RECOMP_SEGTIME=1 (P1-DESIGN-V2.md section 1.4): the index
+         * segment's own time over this same window, beside the word
+         * counts above: the two bulk ingest paths in the walk, split
+         * by encoding, and the queue's narrow. Cycles/word at the
+         * stock 1020 MHz. Printed only with the key set. */
+        extern int nv2a_segtime_on(void);
+        extern void nv2a_pb_exec_segtime(uint64_t out[6]);
+        extern void nv2a_backend_queue_segtime(uint64_t out[6]);
+        static uint64_t last_sg[6], last_qg[6];
+        if (nv2a_segtime_on()) {
+            uint64_t sg[6], qg[6], dsg[6], dqg[6];
+            double draws = s_st.draws ? (double)s_st.draws : 1.0;
+            size_t at = strlen(buf);
+            int i2;
+            nv2a_pb_exec_segtime(sg);
+            nv2a_backend_queue_segtime(qg);
+            for (i2 = 0; i2 < 6; i2++) {
+                dsg[i2] = sg[i2] - last_sg[i2];
+                last_sg[i2] = sg[i2];
+                dqg[i2] = qg[i2] - last_qg[i2];
+                last_qg[i2] = qg[i2];
+            }
+            if (at < n)
+                snprintf(buf + at, n - at,
+                         "\n[perf] segtime: ingest16 %.1f us/f, %.2f us/draw, %.0f w/f, %.1f cyc/w, %.0f runs/f;"
+                         " ingest32 %.1f us/f, %.2f us/draw, %.0f w/f, %.1f cyc/w, %.0f runs/f;"
+                         " narrow %.1f us/f, %.2f us/draw, %.0f idx/f, %.0f draws/f;"
+                         " wide %.1f us/f;"
+                         " total %.1f us/f = %.3f ms/f",
+                         (double)dsg[0] / f, (double)dsg[0] / draws,
+                         (double)dsg[2] / f,
+                         dsg[2] ? (double)dsg[0] * 1020.0 / (double)dsg[2] : 0.0,
+                         (double)dsg[4] / f,
+                         (double)dsg[1] / f, (double)dsg[1] / draws,
+                         (double)dsg[3] / f,
+                         dsg[3] ? (double)dsg[1] * 1020.0 / (double)dsg[3] : 0.0,
+                         (double)dsg[5] / f,
+                         (double)dqg[0] / f, (double)dqg[0] / draws,
+                         (double)dqg[2] / f, (double)dqg[4] / f,
+                         (double)dqg[1] / f,
+                         (double)(dsg[0] + dsg[1] + dqg[0]) / f,
+                         (double)(dsg[0] + dsg[1] + dqg[0]) / 1000.0 / f);
+        }
+    }
+    {
         /* Which methods "the rest" is: the slow path's words, by method. */
         uint32_t m[6], c[6];
         int k, nt = nv2a_pb_exec_rest_top(m, c, 6);

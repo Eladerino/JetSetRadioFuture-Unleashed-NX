@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
 #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
 /* The swizzle decoder the D3D8 layer already uses -- one implementation of
@@ -2051,6 +2052,47 @@ void nv2a_pb_exec_words(uint64_t out[6])
     out[3] = s_ws.idx;    out[4] = s_ws.inl;    out[5] = s_ws.plain;
 }
 
+/* RECOMP_SEGTIME=1: segment timers for the P1 deciding measurement
+ * (P1-DESIGN-V2.md section 1.4). Brackets around the two bulk index
+ * ingest paths in nv2a_pb_exec_run below, and around q_draw's index
+ * segment in nv2a_backend_queue.c; nv2a_dk_perf reads these beside
+ * the word counts above and prints them over the same window. The
+ * clock is CLOCK_MONOTONIC, the one behind the [perf] walk figures
+ * (exec_now_us in xbox_memory_layout.c). Counting only: with the
+ * key absent the latch is 0, nothing is timed or stored, and the
+ * report prints nothing extra, so the build behaves exactly as
+ * without the probe. */
+static int s_segtime = -1;
+
+int nv2a_segtime_on(void)
+{
+    if (__builtin_expect(s_segtime < 0, 0)) {
+        const char *e = getenv("RECOMP_SEGTIME");
+        s_segtime = e && e[0] == '1' ? 1 : 0;
+    }
+    return s_segtime;
+}
+
+static inline uint64_t seg_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+static struct {
+    uint64_t ingest16_us, ingest32_us;
+    uint64_t ingest16_words, ingest32_words;
+    uint64_t ingest16_runs, ingest32_runs;
+} s_seg;
+
+void nv2a_pb_exec_segtime(uint64_t out[6])
+{
+    out[0] = s_seg.ingest16_us;    out[1] = s_seg.ingest32_us;
+    out[2] = s_seg.ingest16_words; out[3] = s_seg.ingest32_words;
+    out[4] = s_seg.ingest16_runs;  out[5] = s_seg.ingest32_runs;
+}
+
 /* The words none of those fast paths took ("the rest" on the [perf] line),
  * by 3D method, with RECOMP_PB_REST=1: the next thing to make cheaper is
  * whichever leads. Subchannel 0 only, below 0x2000; anything else counts
@@ -2695,6 +2737,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
     uint32_t i = 0;
     const int note_trim = note_trim_on();
     const int datashadow = datashadow_on();
+    const int seg_on = nv2a_segtime_on();
     uint32_t trim_noted = 0;
 
     s_ws.words += n;
@@ -2703,6 +2746,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             switch (method) {
             case NV097_ARRAY_ELEMENT16:         /* two 16-bit indices a word */
                 if (s_gpu.prim) {
+                    uint64_t seg_t0 = seg_on ? seg_now_us() : 0;
                     uint32_t k = (NV_MAX_INDICES - s_gpu.idx_count) / 2, *d;
                     uint32_t lo = s_gpu.idx_lo, hi = s_gpu.idx_hi;
                     if (k > n) k = n;
@@ -2725,12 +2769,18 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     s_gpu.idx_lo = lo;
                     s_gpu.idx_hi = hi;
                     s_gpu.idx_count += 2 * k;
+                    if (seg_on) {
+                        s_seg.ingest16_us += seg_now_us() - seg_t0;
+                        s_seg.ingest16_words += k;
+                        s_seg.ingest16_runs++;
+                    }
                 }
                 if (!datashadow) shadow_run(method, p, n);
                 s_ws.idx += n;
                 return;
             case 0x1808:                        /* ARRAY_ELEMENT32 */
                 if (s_gpu.prim) {
+                    uint64_t seg_t0 = seg_on ? seg_now_us() : 0;
                     uint32_t k = NV_MAX_INDICES - s_gpu.idx_count, *d;
                     uint32_t lo = s_gpu.idx_lo, hi = s_gpu.idx_hi;
                     if (k > n) k = n;
@@ -2743,6 +2793,11 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     s_gpu.idx_lo = lo;
                     s_gpu.idx_hi = hi;
                     s_gpu.idx_count += k;
+                    if (seg_on) {
+                        s_seg.ingest32_us += seg_now_us() - seg_t0;
+                        s_seg.ingest32_words += k;
+                        s_seg.ingest32_runs++;
+                    }
                 }
                 if (!datashadow) shadow_run(method, p, n);
                 s_ws.idx += n;

@@ -207,6 +207,33 @@ static uint64_t q_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* RECOMP_SEGTIME=1: q_draw's index segment, for the P1 deciding
+ * measurement (see nv2a_pb_exec_dk.c). nar is the IDX16 narrow loop;
+ * wide is the u32 copy taken when the record carries the indices
+ * unnarrowed. Counting only: with the key absent nothing is timed. */
+static int s_segtime_q = -1;
+
+static int segtime_on_q(void)
+{
+    if (__builtin_expect(s_segtime_q < 0, 0)) {
+        const char *e = getenv("RECOMP_SEGTIME");
+        s_segtime_q = e && e[0] == '1' ? 1 : 0;
+    }
+    return s_segtime_q;
+}
+
+static struct {
+    uint64_t nar_us, wide_us, nar_idx, wide_idx;
+    uint32_t nar_draws, wide_draws;
+} s_qseg;
+
+void nv2a_backend_queue_segtime(uint64_t out[6])
+{
+    out[0] = s_qseg.nar_us;    out[1] = s_qseg.wide_us;
+    out[2] = s_qseg.nar_idx;   out[3] = s_qseg.wide_idx;
+    out[4] = s_qseg.nar_draws; out[5] = s_qseg.wide_draws;
+}
+
 static inline void cpu_relax(void)
 {
 #if defined(__aarch64__)
@@ -595,15 +622,27 @@ static void q_draw(const Nv2aRawBatch *b)
         at += sizeof b->attr_const;
     }
     memcpy(rec + at, (const uint8_t *)b + B_TAIL, sizeof(Nv2aRawBatch) - B_TAIL);
+    const int seg_on = segtime_on_q();
+    const uint64_t seg_t0 = seg_on ? q_ns() : 0;
     if (idx16) {
         uint16_t *o = (uint16_t *)(rec + idx_at);
         uint32_t ii;
         for (ii = 0; ii < b->index_count; ii++)
             o[ii] = (uint16_t)(b->indices[ii] - b->index_base);
         st_idx_bytes += (size_t)b->index_count * 2;
+        if (seg_on) {
+            s_qseg.nar_us += (q_ns() - seg_t0) / 1000;
+            s_qseg.nar_idx += b->index_count;
+            s_qseg.nar_draws++;
+        }
     } else {
         memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
         st_idx_bytes += (size_t)b->index_count * 4;
+        if (seg_on) {
+            s_qseg.wide_us += (q_ns() - seg_t0) / 1000;
+            s_qseg.wide_idx += b->index_count;
+            s_qseg.wide_draws++;
+        }
     }
     if (np) {
         float *o = (float *)(rec + attrs_at);
