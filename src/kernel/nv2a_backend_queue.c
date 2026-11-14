@@ -63,6 +63,7 @@
  * the executor, 59).
  */
 #include "nv2a_backend.h"
+#include "nv2a_ae16_neon.h"   /* nv2a_u16_rebase (RECOMP_PB_U16IDX) */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -595,7 +596,24 @@ static void q_draw(const Nv2aRawBatch *b)
         at += sizeof b->attr_const;
     }
     memcpy(rec + at, (const uint8_t *)b + B_TAIL, sizeof(Nv2aRawBatch) - B_TAIL);
-    if (idx16) {
+    if (b->indices_raw16) {
+        /* The executor kept them 16-bit (RECOMP_PB_U16IDX): a range of at
+         * most 65536 vertices, so idx16 holds whenever the switch is on. */
+        const uint16_t *ix = (const uint16_t *)(const void *)b->indices;
+        if (idx16) {
+            uint16_t *o = (uint16_t *)(rec + idx_at);
+            if (b->index_base)
+                nv2a_u16_rebase(ix, b->index_count, b->index_base, o);
+            else
+                memcpy(o, ix, (size_t)b->index_count * 2);
+            st_idx_bytes += (size_t)b->index_count * 2;
+        } else {
+            uint32_t *o = (uint32_t *)(rec + idx_at), ii;
+            for (ii = 0; ii < b->index_count; ii++)
+                o[ii] = ix[ii];         /* index_base still to subtract */
+            st_idx_bytes += (size_t)b->index_count * 4;
+        }
+    } else if (idx16) {
         uint16_t *o = (uint16_t *)(rec + idx_at);
         uint32_t ii;
         for (ii = 0; ii < b->index_count; ii++)
@@ -830,6 +848,7 @@ static void run_draw(const uint8_t *rec, size_t draw_at)
     memcpy(bb.attr_const, c_attr_const, sizeof bb.attr_const);
     memcpy((uint8_t *)&bb + B_TAIL, rec + at, sizeof(Nv2aRawBatch) - B_TAIL);
     bb.indices_u16 = (uint16_t)qd->idx16;
+    bb.indices_raw16 = 0;               /* the record holds its own form */
 
     nv = bb.vertex_count;
     conv = bb.attr_present & (uint16_t)~bb.attr_direct;

@@ -248,6 +248,10 @@ static struct {
      * for them; any other writer clears idx_mm and raw_batch looks. */
     uint32_t   idx_lo, idx_hi;
     int        idx_mm;
+    /* The batch's indices are in s_idx16 as uint16_t, not in idx[]
+     * (RECOMP_PB_U16IDX): set at BEGIN, cleared by idx_widen() the
+     * moment anything but the ARRAY_ELEMENT16 run path adds to them. */
+    int        idx_w16;
     /* INLINE_ARRAY payload: vertices written straight into the pushbuffer
      * instead of into a buffer the title points at. Same vertex format, a
      * different place to read them from. */
@@ -1203,6 +1207,40 @@ static void attr_const_changed(void);
 
 void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
 
+/* P1 variant (a), the 16-bit index path. JSRF draws with
+ * ARRAY_ELEMENT16 only (the campaign's census: 100% of indices, 46-58%
+ * of pushbuffer words at 99th Street), and they used to be widened to
+ * uint32_t on the walk (ingest, ~1.07 ms/frame on the PGO2 patrol)
+ * only for the queue to narrow them back to uint16_t (~0.20 ms/frame).
+ * With this on, the walk keeps them 16-bit: a straight copy of the
+ * guest words with the range found on the way, and the queue rebases
+ * them 16 lanes at a time. Any batch something else adds indices to
+ * (DRAW_ARRAYS, ARRAY_ELEMENT32, the word-by-word path) is widened
+ * then and goes the old way. RECOMP_PB_U16IDX=0 turns it off. */
+static uint16_t s_idx16[NV_MAX_INDICES] __attribute__((aligned(16)));
+static int s_u16idx = -1;
+
+static int u16idx_on(void)
+{
+    if (s_u16idx < 0) {
+        const char *e = getenv("RECOMP_PB_U16IDX");
+        s_u16idx = e ? e[0] == '1' : 1;
+    }
+    return s_u16idx;
+}
+
+/* Move a 16-bit batch's indices into idx[]; the range stays as it was. */
+static void idx_widen(void)
+{
+    uint32_t i, n = s_gpu.idx_count;
+
+    if (!s_gpu.idx_w16)
+        return;
+    s_gpu.idx_w16 = 0;
+    for (i = 0; i < n; i++)
+        s_gpu.idx[i] = s_idx16[i];
+}
+
 static inline int pb_fast(void);
 
 /* The lowest and highest index of the batch. The whole-run index paths keep
@@ -1218,6 +1256,7 @@ static void batch_index_range(uint32_t *lowest, uint32_t *highest)
         *highest = s_gpu.idx_hi;
         return;
     }
+    idx_widen();
     /* In locals, so the compiler sees nothing in the loop writes them and
      * does it a vector at a time. */
     for (i = 0; i < count; i++) {
@@ -1333,6 +1372,8 @@ static void raw_batch(void)
     /* Indices as the title gave them, when the back end rebases them itself
      * (and no hook wants to look at gathered ones). */
     absolute = (s_backend->flags & NV2A_BACKEND_RAW_ABS_INDICES) && nv2a_raw_batch_hook == NULL;
+    if (!absolute)
+        idx_widen();
     if (!absolute) {
         const uint32_t *index = s_gpu.idx;
         uint32_t *rebased = s_raw_idx, count = s_gpu.idx_count;
@@ -1343,7 +1384,9 @@ static void raw_batch(void)
     rb.vertex_count = vertices;
     rb.attr_present = present;
     rb.attrs = s_raw_attrs;
-    rb.indices = absolute ? s_gpu.idx : s_raw_idx;
+    rb.indices = !absolute ? s_raw_idx
+               : s_gpu.idx_w16 ? (const uint32_t *)(const void *)s_idx16 : s_gpu.idx;
+    rb.indices_raw16 = (uint16_t)(absolute && s_gpu.idx_w16);
     rb.index_base = absolute ? lowest : 0;
     rb.index_count = s_gpu.idx_count;
     describe_state(&rb);
@@ -1431,6 +1474,7 @@ static void draw_inline_array(void)
         if (s_gpu.attr[a].size)
             s_gpu.attr[a].stride = vsize;
 
+    s_gpu.idx_w16 = 0;
     for (i = 0; i < count; i++)
         s_gpu.idx[i] = i;
     s_gpu.idx_count = count;
@@ -1485,6 +1529,7 @@ static void draw_immediate(void)
             s_gpu.attr[a].offset = a * (uint32_t)sizeof *s_imm;
             s_gpu.attr[a].stride = 4 * sizeof(float);
         }
+        s_gpu.idx_w16 = 0;
         for (i = 0; i < n && i < NV_MAX_INDICES; i++)
             s_gpu.idx[i] = i;
         s_gpu.idx_count = i;
@@ -2388,6 +2433,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             s_gpu.idx_lo = 0xFFFFFFFFu;
             s_gpu.idx_hi = 0;
             s_gpu.idx_mm = 1;
+            s_gpu.idx_w16 = u16idx_on() && pb_fast() && s_backend
+                && (s_backend->flags & NV2A_BACKEND_RAW_ABS_INDICES)
+                && nv2a_raw_batch_hook == NULL;
             s_gpu.inline_count = 0;
             s_gpu.imm_count = 0;
             s_gpu.imm_populated = 0;
@@ -2429,6 +2477,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 
         if (!s_gpu.prim)
             break;
+        idx_widen();
         for (i = 0; i < count && s_gpu.idx_count < NV_MAX_INDICES; i++)
             s_gpu.idx[s_gpu.idx_count++] = start + i;
         s_gpu.idx_mm = 0;
@@ -2438,6 +2487,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case NV097_ARRAY_ELEMENT16:
         /* Two 16-bit indices per parameter word. */
         if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
+            idx_widen();
             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
             s_gpu.idx_mm = 0;
@@ -2445,6 +2495,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         break;
     case 0x1808:                            /* ARRAY_ELEMENT32: one index */
         if (s_gpu.prim && s_gpu.idx_count < NV_MAX_INDICES) {
+            idx_widen();
             s_gpu.idx[s_gpu.idx_count++] = param;
             s_gpu.idx_mm = 0;
         }
@@ -2723,6 +2774,9 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     d = s_gpu.idx + s_gpu.idx_count;
                     /* Locals throughout, and the range found on the way, so
                      * raw_batch does not walk the indices again for it. */
+                    if (s_gpu.idx_w16)          /* kept 16-bit (RECOMP_PB_U16IDX) */
+                        nv2a_ae16_copy16(p, k, s_idx16 + s_gpu.idx_count, lo, hi, &lo, &hi);
+                    else
 #if defined(__aarch64__)
                     if (pb_neonidx())
                         nv2a_ae16_unpack_neon(p, k, d, lo, hi, &lo, &hi);
@@ -2746,6 +2800,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             case 0x1808:                        /* ARRAY_ELEMENT32 */
                 if (s_gpu.prim) {
                     uint32_t k = NV_MAX_INDICES - s_gpu.idx_count, *d;
+                    idx_widen();
                     uint32_t lo = s_gpu.idx_lo, hi = s_gpu.idx_hi;
                     if (k > n) k = n;
                     d = s_gpu.idx + s_gpu.idx_count;
