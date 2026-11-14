@@ -26,6 +26,7 @@
 #include "d3d8_swizzle.h"
 #include "nv2a_backend.h"
 #include "nv2a_ae16_neon.h"   /* NEON ARRAY_ELEMENT16 unpack (RECOMP_PB_NEONIDX) */
+#include "nv2a_perf_defaults.h" /* default for the campaign's perf switches */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
@@ -57,8 +58,7 @@ static int note_trim_on(void)
     static int on = -1;
 
     if (on < 0) {
-        const char *e = getenv("RECOMP_DK_NOTE_TRIM");
-        on = e && e[0] == '1';
+        on = nv2a_perf_switch("RECOMP_DK_NOTE_TRIM");
     }
     return on;
 }
@@ -69,15 +69,15 @@ static int note_trim_on(void)
  * no consumer reads shadow words 0x600/0x602/0x606 through any alias, so
  * the only exposure is that regs[m/4] stops being the title's last
  * written value for three write-only data ports -- that is the whole
- * contract change. Absent or 0: every word maintains the shadow exactly
+ * contract change. On by default
+ * (nv2a_perf_defaults.h); =0: every word maintains the shadow exactly
  * as shipped. */
 static int datashadow_on(void)
 {
     static int on = -1;
 
     if (on < 0) {
-        const char *e = getenv("RECOMP_PB_DATASHADOW");
-        on = e && e[0] == '1';
+        on = nv2a_perf_switch("RECOMP_PB_DATASHADOW");
     }
     return on;
 }
@@ -729,7 +729,19 @@ volatile unsigned long g_pb_fence_n;
 
 void nv2a_backend_register(const Nv2aBackend *backend)
 {
+    static int said;
+
     s_backend = backend;
+    if (!said) {
+        /* What the walk runs with, so a run's log says which arm it was. */
+        said = 1;
+        fprintf(stderr, "  [PERF] walk switches: fencescan=%d note_trim=%d datashadow=%d"
+                        " neonidx=%d capture_fast=%d vpbatch=%d (JSRF_PERF_DEFAULTS=%d)\n",
+                nv2a_perf_switch("RECOMP_PB_FENCESCAN"), nv2a_perf_switch("RECOMP_DK_NOTE_TRIM"),
+                nv2a_perf_switch("RECOMP_PB_DATASHADOW"), nv2a_perf_switch("RECOMP_PB_NEONIDX"),
+                nv2a_perf_switch("RECOMP_DK_CAPTURE_FAST"), nv2a_perf_switch("RECOMP_PB_VPBATCH"),
+                nv2a_perf_default());
+    }
 }
 
 static void current_surface(Nv2aSurface *out)
@@ -1700,15 +1712,14 @@ static int capture_render_state(uint32_t method, uint32_t param);
  * 0x0300-0x03A0 cluster plus its two strays (0x0214, 0x1D8C). The
  * pre-test is a superset of the cases (in-cluster methods the switch
  * does not take still fall through it and return 0), so the taker and
- * its side effects are unchanged. Absent (or 0), the chain calls
+ * its side effects are unchanged. On by default (nv2a_perf_defaults.h); =0: the chain calls
  * capture_render_state exactly as shipped. */
 static int capture_fast_on(void)
 {
     static int on = -1;
 
     if (on == -1) {
-        const char *setting = getenv("RECOMP_DK_CAPTURE_FAST");
-        on = setting != NULL && strcmp(setting, "0") != 0;
+        on = nv2a_perf_switch("RECOMP_DK_CAPTURE_FAST");
     }
     return on;
 }
@@ -2022,16 +2033,15 @@ static inline int pb_fast(void)
 /* RECOMP_PB_NEONIDX=1: unpack ARRAY_ELEMENT16 runs with the NEON kernel
  * in nv2a_ae16_neon.h instead of the scalar loop below. The kernel is
  * bit-exact against that loop (idx[] + range + count) -- the desk
- * harness in the campaign record is the gate it had to pass. Absent,
- * or anything but '1': the shipped scalar loop, unchanged. Read once,
+ * harness in the campaign record is the gate it had to pass. On by
+ * default (nv2a_perf_defaults.h); =0: the scalar loop, unchanged. Read once,
  * like the other switches here: getenv per run would cost more than
  * the unpack saves. */
 static int s_neonidx = -1;
 static inline int pb_neonidx(void)
 {
     if (__builtin_expect(s_neonidx < 0, 0)) {
-        const char *e = getenv("RECOMP_PB_NEONIDX");
-        s_neonidx = e && e[0] == '1';
+        s_neonidx = nv2a_perf_switch("RECOMP_PB_NEONIDX");
     }
     return s_neonidx;
 }
@@ -2110,14 +2120,18 @@ static inline void shadow_write(uint32_t method, uint32_t param)
     s_reg_dirty[SHADOW_BLOCK(word)] = 1;
 }
 
-/* RECOMP_PB_VPBATCH: batch vp_upload_run's per-word work. Present and
- * != "0" = on, read per call; absent (or "0") = the shipped per-word
- * code path in vp_upload_run, kept verbatim. */
+/* RECOMP_PB_VPBATCH: batch vp_upload_run's per-word work. On by default
+ * (nv2a_perf_defaults.h); =0 = the per-word code path in vp_upload_run,
+ * kept verbatim. */
 static int vp_batch_on(void)
 {
-    const char *e = getenv("RECOMP_PB_VPBATCH");
+    /* Read once: this runs for every upload run, and a getenv per call
+     * walked the whole environment on the walk's hot path. */
+    static int on = -1;
 
-    return e && strcmp(e, "0") != 0;
+    if (on < 0)
+        on = nv2a_perf_switch("RECOMP_PB_VPBATCH");
+    return on;
 }
 
 /* shadow_write for a run of consecutive shadow words: compare and copy
