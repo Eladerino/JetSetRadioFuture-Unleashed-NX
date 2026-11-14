@@ -177,6 +177,13 @@ typedef struct {
      * indices. The executor's per-draw memset zeroes it, so the
      * direct unqueued path always reads 0. */
     uint16_t        indices_u16;
+    /* Nonzero only from the executor's 16-bit index path
+     * (RECOMP_PB_U16IDX), and only to a back end registered with
+     * NV2A_BACKEND_RAW_ABS_INDICES: indices[] holds index_count
+     * uint16_t values as the title wrote them (not rebased; subtract
+     * index_base). A queue turns them into its own record form, so a
+     * back end behind one never sees it set. */
+    uint16_t        indices_raw16;
 } Nv2aRawBatch;
 
 /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
