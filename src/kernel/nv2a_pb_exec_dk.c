@@ -26,6 +26,7 @@
 #include "d3d8_swizzle.h"
 #include "nv2a_backend.h"
 #include "nv2a_ae16_neon.h"   /* NEON ARRAY_ELEMENT16 unpack (RECOMP_PB_NEONIDX) */
+#include "nv2a_perf_defaults.h" /* default for the campaign's perf switches */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
@@ -57,8 +58,7 @@ static int note_trim_on(void)
     static int on = -1;
 
     if (on < 0) {
-        const char *e = getenv("RECOMP_DK_NOTE_TRIM");
-        on = e && e[0] == '1';
+        on = nv2a_perf_switch("RECOMP_DK_NOTE_TRIM");
     }
     return on;
 }
@@ -69,15 +69,15 @@ static int note_trim_on(void)
  * no consumer reads shadow words 0x600/0x602/0x606 through any alias, so
  * the only exposure is that regs[m/4] stops being the title's last
  * written value for three write-only data ports -- that is the whole
- * contract change. Absent or 0: every word maintains the shadow exactly
+ * contract change. On by default
+ * (nv2a_perf_defaults.h); =0: every word maintains the shadow exactly
  * as shipped. */
 static int datashadow_on(void)
 {
     static int on = -1;
 
     if (on < 0) {
-        const char *e = getenv("RECOMP_PB_DATASHADOW");
-        on = e && e[0] == '1';
+        on = nv2a_perf_switch("RECOMP_PB_DATASHADOW");
     }
     return on;
 }
@@ -248,6 +248,10 @@ static struct {
      * for them; any other writer clears idx_mm and raw_batch looks. */
     uint32_t   idx_lo, idx_hi;
     int        idx_mm;
+    /* The batch's indices are in s_idx16 as uint16_t, not in idx[]
+     * (RECOMP_PB_U16IDX): set at BEGIN, cleared by idx_widen() the
+     * moment anything but the ARRAY_ELEMENT16 run path adds to them. */
+    int        idx_w16;
     /* INLINE_ARRAY payload: vertices written straight into the pushbuffer
      * instead of into a buffer the title points at. Same vertex format, a
      * different place to read them from. */
@@ -729,7 +733,19 @@ volatile unsigned long g_pb_fence_n;
 
 void nv2a_backend_register(const Nv2aBackend *backend)
 {
+    static int said;
+
     s_backend = backend;
+    if (!said) {
+        /* What the walk runs with, so a run's log says which arm it was. */
+        said = 1;
+        fprintf(stderr, "  [PERF] walk switches: fencescan=%d note_trim=%d datashadow=%d"
+                        " neonidx=%d capture_fast=%d vpbatch=%d (JSRF_PERF_DEFAULTS=%d)\n",
+                nv2a_perf_switch("RECOMP_PB_FENCESCAN"), nv2a_perf_switch("RECOMP_DK_NOTE_TRIM"),
+                nv2a_perf_switch("RECOMP_PB_DATASHADOW"), nv2a_perf_switch("RECOMP_PB_NEONIDX"),
+                nv2a_perf_switch("RECOMP_DK_CAPTURE_FAST"), nv2a_perf_switch("RECOMP_PB_VPBATCH"),
+                nv2a_perf_default());
+    }
 }
 
 static void current_surface(Nv2aSurface *out)
@@ -1191,6 +1207,40 @@ static void attr_const_changed(void);
 
 void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
 
+/* P1 variant (a), the 16-bit index path. JSRF draws with
+ * ARRAY_ELEMENT16 only (the campaign's census: 100% of indices, 46-58%
+ * of pushbuffer words at 99th Street), and they used to be widened to
+ * uint32_t on the walk (ingest, ~1.07 ms/frame on the PGO2 patrol)
+ * only for the queue to narrow them back to uint16_t (~0.20 ms/frame).
+ * With this on, the walk keeps them 16-bit: a straight copy of the
+ * guest words with the range found on the way, and the queue rebases
+ * them 16 lanes at a time. Any batch something else adds indices to
+ * (DRAW_ARRAYS, ARRAY_ELEMENT32, the word-by-word path) is widened
+ * then and goes the old way. RECOMP_PB_U16IDX=0 turns it off. */
+static uint16_t s_idx16[NV_MAX_INDICES] __attribute__((aligned(16)));
+static int s_u16idx = -1;
+
+static int u16idx_on(void)
+{
+    if (s_u16idx < 0) {
+        const char *e = getenv("RECOMP_PB_U16IDX");
+        s_u16idx = e ? e[0] == '1' : 1;
+    }
+    return s_u16idx;
+}
+
+/* Move a 16-bit batch's indices into idx[]; the range stays as it was. */
+static void idx_widen(void)
+{
+    uint32_t i, n = s_gpu.idx_count;
+
+    if (!s_gpu.idx_w16)
+        return;
+    s_gpu.idx_w16 = 0;
+    for (i = 0; i < n; i++)
+        s_gpu.idx[i] = s_idx16[i];
+}
+
 static inline int pb_fast(void);
 
 /* The lowest and highest index of the batch. The whole-run index paths keep
@@ -1206,6 +1256,7 @@ static void batch_index_range(uint32_t *lowest, uint32_t *highest)
         *highest = s_gpu.idx_hi;
         return;
     }
+    idx_widen();
     /* In locals, so the compiler sees nothing in the loop writes them and
      * does it a vector at a time. */
     for (i = 0; i < count; i++) {
@@ -1321,6 +1372,8 @@ static void raw_batch(void)
     /* Indices as the title gave them, when the back end rebases them itself
      * (and no hook wants to look at gathered ones). */
     absolute = (s_backend->flags & NV2A_BACKEND_RAW_ABS_INDICES) && nv2a_raw_batch_hook == NULL;
+    if (!absolute)
+        idx_widen();
     if (!absolute) {
         const uint32_t *index = s_gpu.idx;
         uint32_t *rebased = s_raw_idx, count = s_gpu.idx_count;
@@ -1331,7 +1384,9 @@ static void raw_batch(void)
     rb.vertex_count = vertices;
     rb.attr_present = present;
     rb.attrs = s_raw_attrs;
-    rb.indices = absolute ? s_gpu.idx : s_raw_idx;
+    rb.indices = !absolute ? s_raw_idx
+               : s_gpu.idx_w16 ? (const uint32_t *)(const void *)s_idx16 : s_gpu.idx;
+    rb.indices_raw16 = (uint16_t)(absolute && s_gpu.idx_w16);
     rb.index_base = absolute ? lowest : 0;
     rb.index_count = s_gpu.idx_count;
     describe_state(&rb);
@@ -1419,6 +1474,7 @@ static void draw_inline_array(void)
         if (s_gpu.attr[a].size)
             s_gpu.attr[a].stride = vsize;
 
+    s_gpu.idx_w16 = 0;
     for (i = 0; i < count; i++)
         s_gpu.idx[i] = i;
     s_gpu.idx_count = count;
@@ -1473,6 +1529,7 @@ static void draw_immediate(void)
             s_gpu.attr[a].offset = a * (uint32_t)sizeof *s_imm;
             s_gpu.attr[a].stride = 4 * sizeof(float);
         }
+        s_gpu.idx_w16 = 0;
         for (i = 0; i < n && i < NV_MAX_INDICES; i++)
             s_gpu.idx[i] = i;
         s_gpu.idx_count = i;
@@ -1700,15 +1757,14 @@ static int capture_render_state(uint32_t method, uint32_t param);
  * 0x0300-0x03A0 cluster plus its two strays (0x0214, 0x1D8C). The
  * pre-test is a superset of the cases (in-cluster methods the switch
  * does not take still fall through it and return 0), so the taker and
- * its side effects are unchanged. Absent (or 0), the chain calls
+ * its side effects are unchanged. On by default (nv2a_perf_defaults.h); =0: the chain calls
  * capture_render_state exactly as shipped. */
 static int capture_fast_on(void)
 {
     static int on = -1;
 
     if (on == -1) {
-        const char *setting = getenv("RECOMP_DK_CAPTURE_FAST");
-        on = setting != NULL && strcmp(setting, "0") != 0;
+        on = nv2a_perf_switch("RECOMP_DK_CAPTURE_FAST");
     }
     return on;
 }
@@ -2022,16 +2078,15 @@ static inline int pb_fast(void)
 /* RECOMP_PB_NEONIDX=1: unpack ARRAY_ELEMENT16 runs with the NEON kernel
  * in nv2a_ae16_neon.h instead of the scalar loop below. The kernel is
  * bit-exact against that loop (idx[] + range + count) -- the desk
- * harness in the campaign record is the gate it had to pass. Absent,
- * or anything but '1': the shipped scalar loop, unchanged. Read once,
+ * harness in the campaign record is the gate it had to pass. On by
+ * default (nv2a_perf_defaults.h); =0: the scalar loop, unchanged. Read once,
  * like the other switches here: getenv per run would cost more than
  * the unpack saves. */
 static int s_neonidx = -1;
 static inline int pb_neonidx(void)
 {
     if (__builtin_expect(s_neonidx < 0, 0)) {
-        const char *e = getenv("RECOMP_PB_NEONIDX");
-        s_neonidx = e && e[0] == '1';
+        s_neonidx = nv2a_perf_switch("RECOMP_PB_NEONIDX");
     }
     return s_neonidx;
 }
@@ -2110,14 +2165,18 @@ static inline void shadow_write(uint32_t method, uint32_t param)
     s_reg_dirty[SHADOW_BLOCK(word)] = 1;
 }
 
-/* RECOMP_PB_VPBATCH: batch vp_upload_run's per-word work. Present and
- * != "0" = on, read per call; absent (or "0") = the shipped per-word
- * code path in vp_upload_run, kept verbatim. */
+/* RECOMP_PB_VPBATCH: batch vp_upload_run's per-word work. On by default
+ * (nv2a_perf_defaults.h); =0 = the per-word code path in vp_upload_run,
+ * kept verbatim. */
 static int vp_batch_on(void)
 {
-    const char *e = getenv("RECOMP_PB_VPBATCH");
+    /* Read once: this runs for every upload run, and a getenv per call
+     * walked the whole environment on the walk's hot path. */
+    static int on = -1;
 
-    return e && strcmp(e, "0") != 0;
+    if (on < 0)
+        on = nv2a_perf_switch("RECOMP_PB_VPBATCH");
+    return on;
 }
 
 /* shadow_write for a run of consecutive shadow words: compare and copy
@@ -2374,6 +2433,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             s_gpu.idx_lo = 0xFFFFFFFFu;
             s_gpu.idx_hi = 0;
             s_gpu.idx_mm = 1;
+            s_gpu.idx_w16 = u16idx_on() && pb_fast() && s_backend
+                && (s_backend->flags & NV2A_BACKEND_RAW_ABS_INDICES)
+                && nv2a_raw_batch_hook == NULL;
             s_gpu.inline_count = 0;
             s_gpu.imm_count = 0;
             s_gpu.imm_populated = 0;
@@ -2415,6 +2477,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 
         if (!s_gpu.prim)
             break;
+        idx_widen();
         for (i = 0; i < count && s_gpu.idx_count < NV_MAX_INDICES; i++)
             s_gpu.idx[s_gpu.idx_count++] = start + i;
         s_gpu.idx_mm = 0;
@@ -2424,6 +2487,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case NV097_ARRAY_ELEMENT16:
         /* Two 16-bit indices per parameter word. */
         if (s_gpu.prim && s_gpu.idx_count + 2 <= NV_MAX_INDICES) {
+            idx_widen();
             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param & 0xFFFF);
             s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(param >> 16);
             s_gpu.idx_mm = 0;
@@ -2431,6 +2495,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         break;
     case 0x1808:                            /* ARRAY_ELEMENT32: one index */
         if (s_gpu.prim && s_gpu.idx_count < NV_MAX_INDICES) {
+            idx_widen();
             s_gpu.idx[s_gpu.idx_count++] = param;
             s_gpu.idx_mm = 0;
         }
@@ -2709,6 +2774,9 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
                     d = s_gpu.idx + s_gpu.idx_count;
                     /* Locals throughout, and the range found on the way, so
                      * raw_batch does not walk the indices again for it. */
+                    if (s_gpu.idx_w16)          /* kept 16-bit (RECOMP_PB_U16IDX) */
+                        nv2a_ae16_copy16(p, k, s_idx16 + s_gpu.idx_count, lo, hi, &lo, &hi);
+                    else
 #if defined(__aarch64__)
                     if (pb_neonidx())
                         nv2a_ae16_unpack_neon(p, k, d, lo, hi, &lo, &hi);
@@ -2732,6 +2800,7 @@ void nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             case 0x1808:                        /* ARRAY_ELEMENT32 */
                 if (s_gpu.prim) {
                     uint32_t k = NV_MAX_INDICES - s_gpu.idx_count, *d;
+                    idx_widen();
                     uint32_t lo = s_gpu.idx_lo, hi = s_gpu.idx_hi;
                     if (k > n) k = n;
                     d = s_gpu.idx + s_gpu.idx_count;

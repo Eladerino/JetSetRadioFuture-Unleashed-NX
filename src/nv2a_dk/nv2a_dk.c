@@ -97,6 +97,7 @@
 #include "dk_font.h"
 #include "dk_tilefix.h"
 #include "../kernel/nv2a_backend.h"
+#include "../kernel/nv2a_ae16_neon.h"   /* nv2a_u16_rebase (RECOMP_PB_U16IDX) */
 #if defined(XBOXRECOMP_DK_MENU)
 #include "nv2a_dk_menu.h"
 #include "../jsrf_maps.h"
@@ -4644,6 +4645,17 @@ static uint32_t upload_draw(const Nv2aRawBatch *b, DkIdxFormat *ifmt)
             /* The queue already rebased and narrowed them
              * (RECOMP_QUEUE_IDX16): a straight copy. */
             memcpy(dst + idx_at, b->indices, (size_t)n * 2);
+        } else if (b->indices_raw16) {
+            /* Straight from the executor, 16-bit as the title wrote them
+             * (RECOMP_PB_U16IDX, no queue in between). */
+            const uint16_t *ix16 = (const uint16_t *)(const void *)b->indices;
+            if (isz == 2) {
+                nv2a_u16_rebase(ix16, n, base, (uint16_t *)(dst + idx_at));
+            } else {
+                uint32_t *__restrict o = (uint32_t *)(dst + idx_at);
+                for (; i < n; i++)
+                    o[i] = (uint32_t)ix16[i] - base;
+            }
         } else if (isz == 2) {
             uint16_t *__restrict o = (uint16_t *)(dst + idx_at);
 #if defined(__aarch64__)

@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "nv2a_perf_defaults.h"
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -52,15 +53,14 @@ static int s_scan_enabled = -1;
 /* RECOMP_PB_FENCESCAN=1: answer the bulk block's fence question with a
  * range test instead of the per-word loop. The loop stays whenever the
  * scan is enabled because it also feeds note()'s inventory; the per-word
- * fallback for genuine fences is untouched. Absent or 0: the shipped
- * loop, exactly as before. */
+ * fallback for genuine fences is untouched. On by default
+ * (nv2a_perf_defaults.h); =0: the per-word loop, exactly as before. */
 static int fencescan_on(void)
 {
     static int on = -1;
 
     if (on < 0) {
-        const char *e = getenv("RECOMP_PB_FENCESCAN");
-        on = e && e[0] == '1';
+        on = nv2a_perf_switch("RECOMP_PB_FENCESCAN");
     }
     return on;
 }
