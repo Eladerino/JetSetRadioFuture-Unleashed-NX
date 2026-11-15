@@ -1650,6 +1650,13 @@ uint32_t xbox_dispatcher_signal(uint32_t va)
     LeaveCriticalSection(&g_disp_lock);
     return prev;
 }
+/* The software-method queue's state, defined with the queue further
+ * down; the freeze watchdog in the wait below gates on it. */
+int xbox_nv2a_swm_in_flight(void);
+unsigned long xbox_nv2a_swm_wake_deferred(void);
+void xbox_nv2a_swm_queue_state(uint32_t *head, uint32_t *tail, int *pending);
+void xbox_nv2a_swm_stats(unsigned long *raised, unsigned long *dropped);
+
 /* Wait for a guest dispatcher object. timeout_100ns: NULL = forever;
  * negative = relative. Returns STATUS_SUCCESS or STATUS_TIMEOUT. */
 static uint32_t xbox_dispatcher_wait(uint32_t va, const long long *timeout_100ns)
@@ -1657,10 +1664,25 @@ static uint32_t xbox_dispatcher_wait(uint32_t va, const long long *timeout_100ns
     DWORD ms = INFINITE;
     long long deadline = 0;
     uint32_t status = 0;
+    /* The freeze watchdog watches exactly one wait: D3D's make-space
+     * sleep on the busy-block event, the dispatcher object at
+     * device+0x2440, the device pointer being the one D3D keeps at
+     * 0x0019DCE0. Identified by address, here at entry, and only for an
+     * infinite wait -- a timed wait ends on its own, and no other
+     * object is ever eligible. */
+    int ff_watch = 0, ff_fired = 0;
+    long long ff_since = 0;
     if (timeout_100ns) {
         long long t = *timeout_100ns;
         ms = (t < 0) ? (DWORD)((-t) / 10000) : 0;
         deadline = (long long)GetTickCount64() + ms;
+    }
+    if (ms == INFINITE) {
+        uint32_t dev = BRIDGE_MEM32(0x0019DCE0u);
+        if (dev && va == dev + 0x2440u) {
+            ff_watch = 1;
+            ff_since = (long long)GetTickCount64();
+        }
     }
     disp_init();
     EnterCriticalSection(&g_disp_lock);
@@ -1668,6 +1690,51 @@ static uint32_t xbox_dispatcher_wait(uint32_t va, const long long *timeout_100ns
         if (ms == 0) { status = 0x102; break; }
         if (ms == INFINITE) {
             SleepConditionVariableCS(&g_disp_cv, &g_disp_lock, 50);
+            /* The wake for this wait is a software method whose whole
+             * delivery path can lose it -- dropped at a full queue,
+             * missed by the pushbuffer walk, or acknowledged without
+             * the guest-side set taking effect (issue #2) -- and the
+             * wait has no timeout, so any of those is the game frozen
+             * for good. If the wait has been inside a second with its
+             * signal still down, nothing is in flight or queued, and
+             * the channel is drained (DMA_PUT == DMA_GET: the GPU has
+             * consumed everything submitted), then the block the game
+             * is waiting on is in fact free, which is all the lost set
+             * would have said. Say it, once, through the same
+             * SignalState write a KeSetEvent performs -- inline here
+             * because this wait already holds g_disp_lock, which is
+             * the lock xbox_dispatcher_signal takes to do it. An
+             * in-flight method is NOT this case: the tick re-raises
+             * those every 250 ms, so they are left to it. */
+            if (ff_watch && !ff_fired && DISP_SIGNAL(va) == 0) {
+                long long now = (long long)GetTickCount64();
+                uint32_t qh = 0, qt = 0;
+                int qp = 0, in_flight = xbox_nv2a_swm_in_flight();
+                xbox_nv2a_swm_queue_state(&qh, &qt, &qp);
+                if (now - ff_since >= 1000 && !in_flight && qh == qt
+                    && !qp
+                    && BRIDGE_MEM32(0xFD800040u)
+                       == BRIDGE_MEM32(0xFD800044u)) {
+                    unsigned long raised = 0, dropped = 0;
+                    xbox_nv2a_swm_stats(&raised, &dropped);
+                    ff_fired = 1;
+                    DISP_SIGNAL(va) = 1;
+                    WakeAllConditionVariable(&g_disp_cv);
+                    fprintf(stderr, "  [FREEZE-FIX] make-space wait on "
+                            "0x%08X inside %lld ms with its wake lost: "
+                            "pushbuffer drained (DMA_PUT == DMA_GET == "
+                            "0x%08X), swm raised=%lu dropped=%lu "
+                            "wake_deferred=%lu, queue head=%u tail=%u, "
+                            "in_flight=%d -- signalling the busy-block "
+                            "event\n",
+                            va, now - ff_since,
+                            BRIDGE_MEM32(0xFD800040u),
+                            raised, dropped,
+                            xbox_nv2a_swm_wake_deferred(), qh, qt,
+                            in_flight);
+                    fflush(stderr);
+                }
+            }
         } else {
             long long left = deadline - (long long)GetTickCount64();
             if (left <= 0) { status = 0x102; break; }
