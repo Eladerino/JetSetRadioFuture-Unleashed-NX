@@ -146,6 +146,16 @@ static void options_set(const char *key, const char *val)
     if (!slash) return;
     snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "options.txt");
     file_set(path, key, val ? val : "", val == NULL);
+    /* Widescreen/stretch merge cleanup: a JSRF_WIDE_STRETCH line left
+     * in the file from before the merge is inert now (it only feeds
+     * the boot-time migration), so the file's next write drops it --
+     * and writes the widescreen line at the state in effect, so a
+     * migrated player is never dropped back to a pillarbox by losing
+     * the line that carried them. */
+    if (strcmp(key, "JSRF_WIDE_STRETCH")) {
+        file_set(path, "JSRF_WIDE_STRETCH", "", 1);
+        file_set(path, "widescreen", nv2a_widescreen() ? "1" : "0", 0);
+    }
 }
 
 static void options_set_int(const char *key, int val)
@@ -647,12 +657,11 @@ static const DkRow k_display_rows[] = {
 static int  wide_get(intptr_t a) { (void)a; return nv2a_widescreen(); }
 static void wide_set(intptr_t a, int on)
 { (void)a; nv2a_set_widescreen(on); setenv("RECOMP_WIDESCREEN", on ? "1" : "0", 1);
-  cfg_set("widescreen", on); options_set_int("widescreen", on); }
-static int  stretch_get(intptr_t a) { (void)a; return dk_ui_stretch(); }
-static void stretch_set(intptr_t a, int on)
-{ (void)a; dk_ui_set_stretch(on);
-  if (on) { setenv("JSRF_WIDE_STRETCH", "1", 1); options_set("JSRF_WIDE_STRETCH", "1"); }
-  else { unsetenv("JSRF_WIDE_STRETCH"); options_set("JSRF_WIDE_STRETCH", NULL); } }
+  cfg_set("widescreen", on); options_set_int("widescreen", on);
+  /* A pre-merge stretch line reads as widescreen on at the next
+   * start; a widescreen choice made here must retire it, or the
+   * choice (off, especially) would be overridden by the migration. */
+  unsetenv("JSRF_WIDE_STRETCH"); options_set("JSRF_WIDE_STRETCH", NULL); }
 static const char *k_aniso_choices[] = { "OFF", "2X", "4X", "8X", "16X" };
 static const char *k_aniso_values[]  = { "0", "2", "4", "8", "16" };
 /* The stored choice (RECOMP_DK_ANISO in options.txt, exported to the
@@ -678,8 +687,7 @@ static void aniso_set(intptr_t a, int i)
 { (void)a; s_aniso_choice = i; setenv("RECOMP_DK_ANISO", k_aniso_values[i], 1); options_set("RECOMP_DK_ANISO", k_aniso_values[i]); }
 static const DkRow k_graphics_rows[] = {
     SECTION("PICTURE"),
-    CHECK("WIDESCREEN", "On a 16:9 screen, widen the view to fill it instead of drawing the game's 4:3 picture. Applies at once; kept in the settings file and options.txt.", wide_get, wide_set),
-    CHECK("STRETCH TO FIT SCREEN", "Fill the whole screen with the 4:3 picture, stretched, instead of widening the view. Mutually exclusive with widescreen in effect: with stretch on, the game is not widened. Applies at once; kept in options.txt.", stretch_get, stretch_set),
+    CHECK("WIDESCREEN", "Fill the whole screen with the game's 4:3 picture, stretched to fit. Off shows the picture at its own shape, with black bars at the sides. Applies at once; kept in the settings file and options.txt.", wide_get, wide_set),
     CHOICE("TEXTURE ANISOTROPY (RESTART)", "Sharper textures at glancing angles, up to the chosen level. The renderer's samplers are built with it, so it applies from the next start. Kept in options.txt. Your options.txt aniso choice is honoured until you change this.", aniso_get, aniso_set, k_aniso_choices),
     SECTION("POST-PROCESSING"),
     CHOICE("CRT FILTER", "The texture of a CRT television over the picture: fine dark lines between the picture's rows and the colour grille a tube's mask makes, stronger towards MAX. Applies at once; kept in options.txt.", postcrt_get, postcrt_set, k_post_choices),
@@ -1921,8 +1929,7 @@ static void reset_apply(void)
     fpsms_set(0, 0);        /* show_fps_ms=0 */
     fpsdrw_set(0, 0);       /* show_fps_drw=0 */
     /* Graphics */
-    wide_set(0, 1);         /* widescreen=1 */
-    stretch_set(0, 1);      /* JSRF_WIDE_STRETCH is a line in the shipped file */
+    wide_set(0, 1);         /* widescreen=1: the shipped file's filled screen */
     aniso_set(0, 2);        /* 4X: the shipped aniso=4 */
     postcrt_set(0, 0);       /* post-processing off: the shipped defaults */
     postvig_set(0, 0);

@@ -31,8 +31,6 @@ int         dk_ui_fps_state(void);     /* the corner counter is on */
 int         dk_ui_fps_ms_state(void);  /* the counter's frame-time extra is on */
 int         dk_ui_fps_drw_state(void); /* the counter's draws extra is on */
 int         dk_ui_aniso_index(void);   /* 0 off, 1 2x, 2 4x, 3 8x, 4 16x */
-int         dk_ui_stretch(void);       /* the presenter fills the screen */
-void        dk_ui_set_stretch(int on);
 int         dk_ui_post_crt(void);      /* the post pass's CRT step, 0..4 */
 void        dk_ui_set_post_crt(int step);
 int         dk_ui_post_vig(void);      /* the post pass's vignette step, 0..4 */

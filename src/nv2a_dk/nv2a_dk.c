@@ -3433,17 +3433,9 @@ static void dk_menu_apply_pending(void)
 int dk_ui_fb_w(void) { return (int)s_fb_w; }
 int dk_ui_fb_h(void) { return (int)s_fb_h; }
 
-/* Stretch to fit: the presenter fills the screen with the picture
- * instead of letterboxing it (the guest side stands its widening down
- * while JSRF_WIDE_STRETCH is set; see nv2a_host_api_dk.c). */
-static int s_stretch = -1;
-static int stretch_on(void)
-{
-    if (s_stretch < 0) s_stretch = getenv("JSRF_WIDE_STRETCH") != NULL;
-    return s_stretch;
-}
-int dk_ui_stretch(void) { return stretch_on(); }
-void dk_ui_set_stretch(int on) { s_stretch = on ? 1 : 0; }
+/* Widescreen fill: the presenter fills the screen with the picture
+ * while widescreen is on (see present()); the mode's state lives in
+ * the host API (nv2a_host_api_dk.c) since the stretch merge. */
 
 /* ── Post-processing (build J): the CRT FILTER and VIGNETTE rows ──
  * Two stepped looks on the Graphics page, applied by a final pass in
@@ -3456,7 +3448,7 @@ void dk_ui_set_stretch(int on) { s_stretch = on ? 1 : 0; }
  * processes the game only; the renderer's own overlays and the menu
  * stay clean.
  *
- * The steps are renderer state, like the stretch switch above:
+ * The steps are renderer state:
  * latched from options.txt's raw lines (RECOMP_DK_POST_CRT /
  * RECOMP_DK_POST_VIGNETTE, 0..4) at first read, set live by the
  * menu's rows, and read by present() every frame, so a change lands
@@ -3848,8 +3840,8 @@ static void present(int show_loading)
     if (show_loading || !s_last) {
         draw_loading(s_frames);
     } else {
-        /* The logical aspect (surface / anti-aliasing factor; 16:9 for a
-         * widescreen title), letterboxed. Rows are top-first in both. The
+        /* The logical aspect (surface / anti-aliasing factor),
+         * letterboxed. Rows are top-first in both. The
          * whole image: at "auto" a 480-line picture is the screen's height,
          * so the 2D engine copies it 1:1. */
         DkSurf *s = s_last;
@@ -3857,8 +3849,6 @@ static void present(int show_loading)
         DkImageRect src = { 0, 0, 0, s->pw, s->ph, 1 }, dst;
         float lw = (float)s->w / (float)s->aa_sx, lh = (float)s->h / (float)s->aa_sy;
         float scale, fw = (float)s_fb_w, fh = (float)s_fb_h;
-        if (xbox_video_widescreen() && lw < lh * 1.5f)
-            lw = lh * 16.0f / 9.0f;
         scale = fw / lw < fh / lh ? fw / lw : fh / lh;
         dst.width = (uint32_t)(lw * scale + 0.5f);
         dst.height = (uint32_t)(lh * scale + 0.5f);
@@ -3869,7 +3859,7 @@ static void present(int show_loading)
         dst.z = 0;
         dst.depth = 1;
 #if defined(XBOXRECOMP_DK_MENU)
-        if (stretch_on()) {         /* stretch to fit: no letterbox */
+        if (xbox_video_widescreen()) {  /* widescreen: fill the screen, no letterbox */
             dst.width = s_fb_w; dst.height = s_fb_h; dst.x = 0; dst.y = 0;
         }
 #endif
