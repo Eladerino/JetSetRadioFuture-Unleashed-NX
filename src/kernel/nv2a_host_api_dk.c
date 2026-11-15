@@ -72,6 +72,13 @@ int nv2a_widescreen(void)
         const char *v = getenv("RECOMP_WIDESCREEN");
         if (v && *v) g_wide = atoi(v) != 0;
         else g_wide = 0;
+        /* Merge migration (2026-11-15): the stretch look is part of
+         * widescreen now, so a JSRF_WIDE_STRETCH=1 line left in an
+         * options file from before the merge reads as widescreen on.
+         * The Switch loader does the same to the environment itself;
+         * this covers any start path that reaches here first. */
+        if (!g_wide && (v = getenv("JSRF_WIDE_STRETCH")) != NULL && atoi(v) != 0)
+            g_wide = 1;
         if ((v = getenv("RECOMP_WIDE_ASPECT")) != NULL && atof(v) > 0.0)
             nv2a_set_wide_aspect((float)atof(v));
     }
@@ -87,21 +94,20 @@ static volatile int g_wide_scene = 1;
 
 void nv2a_set_wide_scene(int on) { g_wide_scene = on ? 1 : 0; }
 
-/* The stretch look: present the untouched 4:3 frame and do none of the
- * port's own widening. JSRF_WIDE_STRETCH in the options file (an
- * environment variable by the time this runs) decides; the Deko3D menu
- * writes no settings file, so there is no second source to consult.
- * Note the Deko3D presenter letterboxes rather than stretches, so with
- * stretch on, a 4:3 screen is shown pillarboxed at its true shape. */
-static int g_wide_stretch = -1;
-
+/* The stretch look merged into widescreen (2026-11-15): there is one
+ * display mode now -- widescreen on presents the untouched 4:3 picture
+ * filling the screen, and the guest-side widening never runs. This
+ * function used to latch JSRF_WIDE_STRETCH from the environment once,
+ * with no setter anywhere, so after a boot with the line set, the
+ * guest side disagreed with the presenter for the whole session
+ * (issue #4's "didn't show as off"). Its answer now follows the
+ * merged widescreen state live, through the same state the menu's
+ * row drives, which makes nv2a_wide_scene() false under every option
+ * combination by construction. JSRF_WIDE_STRETCH itself survives
+ * only as the migration input read in nv2a_widescreen() above. */
 static int nv2a_wide_stretch(void)
 {
-    if (g_wide_stretch < 0) {
-        const char *v = getenv("JSRF_WIDE_STRETCH");
-        g_wide_stretch = v ? atoi(v) != 0 : 0;
-    }
-    return g_wide_stretch;
+    return nv2a_widescreen();
 }
 
 int nv2a_wide_scene(void)

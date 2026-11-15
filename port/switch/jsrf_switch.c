@@ -627,6 +627,23 @@ __attribute__((constructor(101))) static void switch_env(void)
     }
     for (i = 0; i < sizeof k_env / sizeof k_env[0]; i++)
         setenv(k_env[i][0], k_env[i][1], 0);
+#if defined(JSRF_DEKO3D)
+    /* Widescreen/stretch merge migration: before the merge, a
+     * JSRF_WIDE_STRETCH=1 line (the shipped options.txt had one)
+     * asked for the filled-screen look on its own; that look is what
+     * widescreen means now. A file that still carries the line and
+     * does not ask for widescreen therefore reads as widescreen on,
+     * so nobody is dropped back to a pillarbox by the upgrade. The
+     * menu drops the line on its next options.txt write. */
+    {
+        const char *s = getenv("JSRF_WIDE_STRETCH");
+        const char *w = getenv("RECOMP_WIDESCREEN");
+        if (s && atoi(s) != 0 && !(w && atoi(w) != 0)) {
+            setenv("RECOMP_WIDESCREEN", "1", 1);
+            opt_note(" %s=%s", "widescreen(migrated)", "1");
+        }
+    }
+#endif
 }
 
 /* The title-takeover check, and its explanation on the console
