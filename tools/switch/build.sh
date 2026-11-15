@@ -30,6 +30,11 @@
 #                      icon in the homebrew menu. Kept outside the repo
 #                      on purpose: the icon ships inside the .nro, so
 #                      releases use devkitPro's default icon.
+#   JSRF_VERSION=...   the version string compiled into the .nro (shown
+#                      in game and answered by --version). Unset means
+#                      the release tag this tree is at (git describe).
+#                      Set it to stamp a build whose version differs
+#                      from the tree's tag, e.g. JSRF_VERSION=0.5.3-switch.
 #   JSRF_GEN_OPT=...   compile options added for the generated code only,
 #                      after devkitPro's own (-O2): JSRF_GEN_OPT=-O3 to try
 #                      the wider optimisation on the game's code. Unset
@@ -214,6 +219,7 @@ cmake -S port -B "$WORK_DIR/build-switch" \
     -DJSRF_GUEST_REGS="${JSRF_GUEST_REGS:-ON}" \
     -DJSRF_PGO_GENERATE="${JSRF_PGO_GENERATE:-OFF}" \
     -DJSRF_PGO_USE="${JSRF_PGO_USE:-OFF}" \
+    ${JSRF_VERSION:+-DJSRF_VERSION="$JSRF_VERSION"} \
     ${JSRF_ICON:+-DJSRF_ICON="$JSRF_ICON"}
 cmake --build "$WORK_DIR/build-switch" -j"$JOBS"
 
