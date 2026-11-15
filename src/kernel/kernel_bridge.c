@@ -3016,6 +3016,16 @@ static void kernel_vblank_tick(void)
  * because the others were never delivered either and the rest of the runtime
  * may already stand in for what their handlers do (parameter 1's, for one,
  * counts flips). RECOMP_NV2A_SWM=all delivers every one, =0 none.
+ *
+ * A full queue used to drop a wake silently, and a dropped parameter 5 is
+ * the game asleep for good: the make-space wait it was meant to end has no
+ * timeout (issue #2). Parameter 5 therefore parks in a dedicated pending
+ * slot when the ring is full; the tick below moves it into the ring at the
+ * first free slot, and the executor's sync wait covers the parked case, so
+ * the wake is delayed, never lost. Repeated wakes while one is parked
+ * coalesce into the slot -- they all set the same event -- and every
+ * would-have-dropped wake is counted (g_swm_wake_deferred) so the freeze
+ * report can show that the park was used.
  */
 #define NV2A_PGRAPH_INTR       0x00400100u
 #define NV2A_PGRAPH_NSOURCE    0x00400108u
@@ -3030,6 +3040,11 @@ static struct { uint32_t subch, param; } g_swm_q[SWM_QUEUE];
 static volatile uint32_t g_swm_head, g_swm_tail;
 static volatile int      g_swm_in_flight;
 static unsigned long     g_swm_raised, g_swm_dropped;
+/* The parked busy-block wake (parameter 5) and its count of
+ * would-have-dropped wakes. See the header comment above. */
+static volatile int      g_swm_wake_pending;
+static uint32_t          g_swm_wake_subch;
+static unsigned long     g_swm_wake_deferred;
 
 static int swm_wanted(uint32_t param)
 {
@@ -3049,7 +3064,15 @@ void xbox_nv2a_software_method(uint32_t subch, uint32_t param)
     uint32_t h = g_swm_head;
     if (!swm_wanted(param)) return;
     if (h - __atomic_load_n(&g_swm_tail, __ATOMIC_ACQUIRE) >= SWM_QUEUE) {
-        g_swm_dropped++;
+        if (param == 5) {
+            if (!__atomic_load_n(&g_swm_wake_pending, __ATOMIC_ACQUIRE)) {
+                g_swm_wake_subch = subch;
+                __atomic_store_n(&g_swm_wake_pending, 1, __ATOMIC_RELEASE);
+            }
+            g_swm_wake_deferred++;
+        } else {
+            g_swm_dropped++;
+        }
         return;
     }
     g_swm_q[h % SWM_QUEUE].subch = subch;
@@ -3069,6 +3092,21 @@ int xbox_nv2a_software_method_sync(uint32_t subch, uint32_t param)
 
     xbox_nv2a_software_method(subch, param);
     target = __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE);
+    if (target == before && param == 5
+        && __atomic_load_n(&g_swm_wake_pending, __ATOMIC_ACQUIRE)) {
+        /* This wake was parked, not dropped: wait until the tick has
+         * moved it into the queue and the title has acknowledged it,
+         * exactly as if it had queued directly. */
+        do {
+            if (!__atomic_load_n(&g_swm_wake_pending, __ATOMIC_ACQUIRE)) {
+                target = __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE);
+                tail = __atomic_load_n(&g_swm_tail, __ATOMIC_ACQUIRE);
+                if ((int32_t)(tail - target) >= 0)
+                    return 1;
+            }
+            Sleep(1);
+        } while (1);
+    }
     if (target == before)
         return 0;
     do {
@@ -3091,6 +3129,19 @@ static void kernel_pgraph_tick(void)
 {
     uint32_t t = g_swm_tail;
     int claimed;
+    /* A parked busy-block wake takes the first free slot. It is older
+     * than anything queued after it was parked -- the ring was full
+     * then -- so what it passes in line is only later wakes for the
+     * same event. */
+    if (__atomic_load_n(&g_swm_wake_pending, __ATOMIC_ACQUIRE)) {
+        uint32_t h = __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE);
+        if (h - t < SWM_QUEUE) {
+            g_swm_q[h % SWM_QUEUE].subch = g_swm_wake_subch;
+            g_swm_q[h % SWM_QUEUE].param = 5;
+            __atomic_store_n(&g_swm_head, h + 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_swm_wake_pending, 0, __ATOMIC_RELEASE);
+        }
+    }
     /* One unanswered for a quarter of a second: raise it again. Should a
      * status bit go missing again, the title waits that long, not for
      * good; while it is merely slow, raising again changes nothing (the
@@ -3143,6 +3194,22 @@ void xbox_nv2a_swm_stats(unsigned long *raised, unsigned long *dropped)
 {
     if (raised) *raised = g_swm_raised;
     if (dropped) *dropped = g_swm_dropped;
+}
+
+/* The parked-wake count, and a snapshot of the ring for readers that
+ * sit before this section in the file (the dispatcher wait's freeze
+ * watchdog). */
+unsigned long xbox_nv2a_swm_wake_deferred(void)
+{
+    return g_swm_wake_deferred;
+}
+
+void xbox_nv2a_swm_queue_state(uint32_t *head, uint32_t *tail, int *pending)
+{
+    if (head) *head = __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE);
+    if (tail) *tail = __atomic_load_n(&g_swm_tail, __ATOMIC_ACQUIRE);
+    if (pending) *pending = __atomic_load_n(&g_swm_wake_pending,
+                                            __ATOMIC_ACQUIRE);
 }
 
 /* The audio processor's interrupt, delivered.
@@ -8202,11 +8269,12 @@ static void kthread_report(void)
          * (raised unchanged). */
         if (!k->left_ms && age >= 1000 && k->ordinal == 159 && k->wait_obj) {
             fprintf(stderr, "       wait object 0x%08X: DISP_SIGNAL=%u, "
-                    "timeout %s; swm raised=%lu dropped=%lu, queue "
-                    "head=%u tail=%u, in_flight=%d\n",
+                    "timeout %s; swm raised=%lu dropped=%lu "
+                    "wake_deferred=%lu, queue head=%u tail=%u, "
+                    "in_flight=%d\n",
                     k->wait_obj, (unsigned)DISP_SIGNAL(k->wait_obj),
                     k->wait_no_timeout ? "NULL (infinite)" : "set",
-                    g_swm_raised, g_swm_dropped,
+                    g_swm_raised, g_swm_dropped, g_swm_wake_deferred,
                     (unsigned)g_swm_head, (unsigned)g_swm_tail,
                     (int)g_swm_in_flight);
         }
