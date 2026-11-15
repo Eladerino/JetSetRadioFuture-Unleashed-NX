@@ -268,12 +268,10 @@ write_default_options() {
         "" \
         "# ---- picture" \
         "" \
-        "# Widescreen 16:9 in gameplay (the logos and title screen stay 4:3)." \
+        "# Widescreen: the game's 4:3 picture stretched to fill the" \
+        "# screen, title and menus included. 0 = the picture at its" \
+        "# own shape, with black bars at the sides." \
         "widescreen=1" \
-        "" \
-        "# Stretch the 4:3 picture to fill the screen, title and menus" \
-        "# included, instead of widening the view." \
-        "JSRF_WIDE_STRETCH=1" \
         "" \
         "# Internal resolution: 1 = the Xbox's 640x480, 2 = twice that, up to 4." \
         "# Each step costs GPU time." \
