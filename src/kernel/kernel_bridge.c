@@ -1683,6 +1683,11 @@ static uint32_t xbox_dispatcher_wait(uint32_t va, const long long *timeout_100ns
     return status;
 }
 
+/* Defined with KThreadState below: the wait bridge records each
+ * dispatcher wait here so the freeze report can name the object a
+ * stuck thread is waiting on (see KThreadState's wait_obj). */
+static void kthread_note_wait(uint32_t obj, int no_timeout);
+
 /* ════════════════════════════════════════════════════════════════
  * ADDITIONS to src/kernel/kernel_bridge.c — the FLIPQ module, the
  * counter-1 wait hooks' callees, and the [SPEED] stats stub.
@@ -2085,6 +2090,7 @@ static void bridge_KeWaitForSingleObject(void)
         g_eax = STATUS_USER_APC_VALUE;
         return;
     }
+        kthread_note_wait(object, tp == NULL);
     {   /* FLIPQ: counter 1 wraps the wait; gate off = the plain call */
         int fq_latched = 0;
         int fq_armed = flipq_wait_arm(object, tp, &fq_latched);
@@ -8024,6 +8030,14 @@ typedef struct {
     volatile long long entered_ms; /* when the call began */
     volatile long long left_ms;    /* when it returned; 0 while inside */
     volatile unsigned long long calls;
+    /* The dispatcher object an in-progress KeWaitForSingleObject is
+     * waiting on, and whether that wait's timeout was NULL. Recorded by
+     * the wait bridge (kthread_note_wait) and read by the freeze report:
+     * a thread parked inside ordinal 159 names WHAT it is parked on,
+     * which is the difference between "a wait was never satisfied" and
+     * knowing which wait. Reset at every dispatch. */
+    volatile uint32_t wait_obj;
+    volatile uint32_t wait_no_timeout;
     /* The thread's own mach port, recorded by the thread itself because only
      * it can ask for it. With this, a watchdog on another thread can read
      * this one's program counter -- which is the only way to see a thread
@@ -8034,6 +8048,14 @@ typedef struct {
 static KThreadState g_kthreads[KTHREAD_SLOTS];
 static volatile long g_kthread_n;
 static RECOMP_TLS KThreadState *t_kthread;
+
+static void kthread_note_wait(uint32_t obj, int no_timeout)
+{
+    if (t_kthread) {
+        t_kthread->wait_obj = obj;
+        t_kthread->wait_no_timeout = no_timeout ? 1u : 0u;
+    }
+}
 
 static uint32_t gcs_caller(void)
 {
@@ -8169,6 +8191,49 @@ static void kthread_report(void)
                 k->tid, k->ordinal, k->caller,
                 k->left_ms ? "idle for" : "INSIDE for", age,
                 (unsigned long long)k->calls);
+        /* A wait that has been inside for a second or more is the freeze
+         * shape (issue #2: the make-space wait at device+0x2440 sat inside
+         * ordinal 159 for the whole end of the log while everything else
+         * lived). Name the object, whether its signal ever arrived, and
+         * the state of the software-method path that was supposed to set
+         * it, so one log separates a dropped wake (dropped > 0), an ISR
+         * that ran without the set taking effect (raised advanced,
+         * signal still 0), and a wake that never reached the queue
+         * (raised unchanged). */
+        if (!k->left_ms && age >= 1000 && k->ordinal == 159 && k->wait_obj) {
+            fprintf(stderr, "       wait object 0x%08X: DISP_SIGNAL=%u, "
+                    "timeout %s; swm raised=%lu dropped=%lu, queue "
+                    "head=%u tail=%u, in_flight=%d\n",
+                    k->wait_obj, (unsigned)DISP_SIGNAL(k->wait_obj),
+                    k->wait_no_timeout ? "NULL (infinite)" : "set",
+                    g_swm_raised, g_swm_dropped,
+                    (unsigned)g_swm_head, (unsigned)g_swm_tail,
+                    (int)g_swm_in_flight);
+        }
+        /* The loading-screen shape (issue #2's second log): a thread
+         * parked in RtlEnterCriticalSection while the waiters pile up
+         * behind it. The GCS watchdog tables already track the section
+         * each waiting thread wants and who holds it. */
+        if (!k->left_ms && age >= 1000 && k->ordinal == 277) {
+            int w;
+            for (w = 0; w < GCS_SLOTS; w++) {
+                int h;
+                if (!g_gcs_wait[w].tid
+                    || g_gcs_wait[w].tid != (unsigned long)k->tid)
+                    continue;
+                h = gcs_find(g_gcs_wait[w].cs);
+                if (h >= 0 && g_gcs[h].owner)
+                    fprintf(stderr, "       critical section 0x%08X, held "
+                            "by thread %lu (taken %lld ms ago from "
+                            "0x%08X)\n",
+                            g_gcs_wait[w].cs, g_gcs[h].owner,
+                            now - g_gcs[h].since, g_gcs[h].site);
+                else
+                    fprintf(stderr, "       critical section 0x%08X, no "
+                            "owner recorded\n", g_gcs_wait[w].cs);
+                break;
+            }
+        }
     }
     fflush(stderr);
 }
@@ -8227,6 +8292,8 @@ static void kernel_thunk_dispatch(void)
         k->caller = g_esp ? BRIDGE_MEM32(g_esp) : 0;
         k->entered_ms = (long long)GetTickCount64();
         k->left_ms = 0;
+        k->wait_obj = 0;
+        k->wait_no_timeout = 0;
         k->calls++;
     }
 
