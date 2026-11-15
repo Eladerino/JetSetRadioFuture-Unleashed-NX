@@ -2001,7 +2001,10 @@ static void modal_confirm(void)
         __atomic_store_n(&s_warned, 1, __ATOMIC_RELEASE);
         break;
     case ACT_MAP_JUMP:
+        /* Shut the menu too: the jump runs at the next frame of play,
+         * and the menu has nothing left to show for it. */
         recomp_map_jump_request(param);
+        xbox_MenuSetOpen(0);
         break;
     case ACT_REDIRECT:
         recomp_mission_redirect_toggle();
