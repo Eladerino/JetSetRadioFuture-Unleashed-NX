@@ -1165,6 +1165,11 @@ static int custom_foldcmp(const void *a, const void *b)
         x++; y++;
     }
 }
+static uint32_t custom_be32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
 static void custom_scan_dir(const char *dir)
 {
     DIR *d;
@@ -1178,7 +1183,9 @@ static void custom_scan_dir(const char *dir)
     if (!d) return;
     while ((de = readdir(d)) != NULL) {
         char path[512];
-        unsigned char hdr[32];
+        /* 64 bytes, not the validator's 32: the scan log below reads
+         * the v3/v4 loop fields, which run to byte 0x2C / 0x38. */
+        unsigned char hdr[64];
         FILE *f;
         size_t rd;
         long total;
@@ -1191,6 +1198,32 @@ static void custom_scan_dir(const char *dir)
         total = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
         fclose(f);
         if (!custom_adx_header_valid(hdr, rd, total)) { s_custom_invalid++; continue; }
+        /* Log the header facts the validator itself does not need:
+         * the rate and total samples it already reads, the file size,
+         * and the loop fields it skips (v3: flag at 0x18, start/end
+         * samples at 0x1C/0x24; v4: flag at 0x24, start/end samples
+         * at 0x28/0x30; all big-endian). One line per valid file per
+         * scan, so a track whose stream later wedges can be matched
+         * against its own header from the log alone: a read failing
+         * at the file's exact end, a loop that was never set. */
+        {
+            uint32_t rate = custom_be32(hdr + 8);
+            uint32_t samples = custom_be32(hdr + 12);
+            int version = hdr[18];
+            int loop = -1;
+            uint32_t loop_start = 0, loop_end = 0;
+            if (version == 3 && rd >= 0x2Cu) {
+                loop = (int)custom_be32(hdr + 0x18);
+                loop_start = custom_be32(hdr + 0x1C);
+                loop_end = custom_be32(hdr + 0x24);
+            } else if (version == 4 && rd >= 0x38u) {
+                loop = (int)custom_be32(hdr + 0x24);
+                loop_start = custom_be32(hdr + 0x28);
+                loop_end = custom_be32(hdr + 0x30);
+            }
+            fprintf(stderr, "[ADXSCAN] %s: rate=%u samples=%u bytes=%ld version=%d loop=%d loop_start=%u loop_end=%u\n",
+                    de->d_name, rate, samples, total, version, loop, loop_start, loop_end);
+        }
         if (s_custom_count >= CUSTOM_MAX) { s_custom_capped = 1; continue; }
         strcpy(s_custom_leaf[s_custom_count], de->d_name);
         s_custom_count++;
