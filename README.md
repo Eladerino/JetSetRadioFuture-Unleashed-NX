@@ -105,9 +105,9 @@ from your own copy of the game.
   replaces `options.txt` with the fresh release defaults, so
   upgrade by copying the `.nro` only, or keep your `options.txt`
   aside first. It
-  covers the picture (by default the 4:3 image stretched to fill
-  the screen, title and menus included; or true widescreen, 16:9 in
-  gameplay with the logos and title screen at 4:3), internal
+  covers the picture (the widescreen setting: on by default, the
+  4:3 image stretched to fill the screen, title and menus included;
+  off, the picture stays 4:3 with bars down the sides), internal
   resolution (1x to 4x), anisotropic filtering,
   the frame rate cap, the post-processing defaults, the shader cache, the run log (off by default;
   `log=1` writes one), and `fast_gpu`, the asynchronous
@@ -120,8 +120,8 @@ from your own copy of the game.
   file beside the .nro (some rows also write `options.txt`) and survive
   restarts unless marked session-only. Display carries just the frame
   settings (render scale, the frame rate cap, the counters). Graphics
-  carries the picture (widescreen, stretch to fill the screen,
-  anisotropic filtering) and a post-processing section: a CRT filter,
+  carries the picture (the widescreen setting, anisotropic
+  filtering) and a post-processing section: a CRT filter,
   a vignette, anti-aliasing and sharpening, all off by default.
   Controller carries the right-stick camera (the camera eases back
   when released by default, and does not hold its view unless you
