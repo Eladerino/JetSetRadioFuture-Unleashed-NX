@@ -737,11 +737,11 @@ void sub_0013D300(void)
      * and said nothing about the tutorial's stream. On a new stream handle,
      * dump its first words once so the cvFs handle it reads through shows. */
     {
-        static struct { uint32_t h, sig[6]; double t; uint32_t stm; } seen[8];
+        static struct { uint32_t h, sig[6]; double t; uint32_t stm; double tcnt; } seen[8];
         static int lines;
         if (h && h + 0x80 < (64u << 20) && lines < 2000) {
             uint32_t sig[6];
-            int i, slot = -1, changed;
+            int i, slot = -1, changed, cnt_only;
             double now = jsrf_now();
             sig[0] = (uint8_t)m[h + 1]; sig[1] = *(uint16_t *)(m + h + 0x60);
             sig[2] = *(uint16_t *)(m + h + 0x68); sig[3] = *(uint16_t *)(m + h + 0x6a);
@@ -750,7 +750,22 @@ void sub_0013D300(void)
             if (slot < 0) for (i = 0; i < 8; i++) if (!seen[i].h) { slot = i; seen[i].h = h; break; }
             if (slot >= 0) {
                 changed = memcmp(seen[slot].sig, sig, sizeof sig) != 0;
+                /* A wedged handle's wait counter (+0x6A) ticks on every
+                 * server pass, so "changed" fires constantly and the
+                 * 2000-line cap spends itself on the wedge, blind for
+                 * everything after it. A change confined to that counter
+                 * while the handle sits in state 1 (preparing) prints at
+                 * most once a second; the line still carries the counter,
+                 * so the streak reads as one line per second of ticks.
+                 * Any other change -- state, error, mode, stream --
+                 * prints at once, as before. Log gating only. */
+                cnt_only = changed && sig[0] == 1 && sig[3] != seen[slot].sig[3]
+                    && sig[1] == seen[slot].sig[1] && sig[2] == seen[slot].sig[2]
+                    && sig[4] == seen[slot].sig[4] && sig[5] == seen[slot].sig[5];
+                if (cnt_only && now - seen[slot].tcnt < 1.0)
+                    changed = 0;
                 if (changed || now - seen[slot].t >= 5.0) {
+                    if (cnt_only) seen[slot].tcnt = now;
                     lines++;
                     fprintf(stderr, "[ADXT] t=%.1f h=%08X state=%d thresh[0x38]=%d err[0x60]=%d cnt68=%d cnt6a=%d mode6d=%d stm=%08X%s\n",
                             now, h, (int8_t)m[h + 1], *(int32_t *)(m + h + 0x38), *(int16_t *)(m + h + 0x60),
@@ -794,11 +809,15 @@ void sub_0013D300(void)
               fflush(stderr); runs = 0; last_ms = now;
           }
       } }
-    /* JSRF_ADX_STALL=1: while an ADXT handle sits in state 1 (preparing)
+    /* JSRF_ADX_STALL: while an ADXT handle sits in state 1 (preparing)
      * past a second, dump its stream (+0x14) and the cvFs handle the stream
-     * reads through -- what the stream is waiting for. */
+     * reads through -- what the stream is waiting for. On by default
+     * (JSRF_ADX_STALL=0 turns it off): the custom-music wedge left every
+     * later stream in exactly this state, and the run that showed it had
+     * the dump switched off. The (c6a % 90) == 60 spacing and the 12-dump
+     * cap below are unchanged, so a wedged session prints a bounded set. */
     { static int on = -1, dumps;
-      if (on < 0) on = getenv("JSRF_ADX_STALL") ? 1 : 0;
+      if (on < 0) { const char *e = getenv("JSRF_ADX_STALL"); on = (e && e[0] == '0') ? 0 : 1; }
       if (on && h && h + 0x80 < (64u << 20) && dumps < 12) {
           uint8_t *mm = (uint8_t *)g_xbox_mem_offset;
           int8_t st = (int8_t)mm[h + 1];
