@@ -1364,7 +1364,20 @@ NTSTATUS __stdcall xbox_NtReadFile(
     if (n >= 0 && at_offset)
         lseek(fd, (off_t)ByteOffset->QuadPart + n, SEEK_SET);
     if (n < 0) {
-        XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
+        /* Unconditional, unlike the trace it replaces: a failed stream
+         * read is how the custom-music wedge announced itself (one
+         * STATUS_UNSUCCESSFUL at the end of a track, then every later
+         * stream stuck starting), and the errno is the only thing that
+         * says why the host read failed. Error path only; successful
+         * reads stay silent. */
+        int e = errno;
+        const char *path = w32_handle_path(FileHandle);
+        fprintf(stderr, "[READERR] NtReadFile(handle=%p) failed: offset=%lld len=%lu errno=%d (%s) -> STATUS_UNSUCCESSFUL (0xC0000001)%s%s\n",
+                FileHandle,
+                at_offset ? (long long)ByteOffset->QuadPart
+                          : (long long)lseek(fd, 0, SEEK_CUR),
+                (unsigned long)Length, e, strerror(e),
+                path ? " path=" : "", path ? path : "");
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
         IoStatusBlock->Information = 0;
         return STATUS_UNSUCCESSFUL;
