@@ -73,6 +73,9 @@ from your own copy of the game.
   recompiled code only; every texture, model, song and video comes
   from your copy. Saves live in `game/UDATA`, as on an Xbox; copy
   that folder to back them up.
+- **Updating:** replace the `jsrf-unleashed.nro` file with the new
+  one. Nothing else needs to change unless the release notes say
+  so; your `options.txt`, settings and saves are kept as they are.
 - **Or build it yourself, from your own disc.** The recompiler turns
   the `default.xbe` on your disc into C on your machine, and that code,
   the game files and the built `.nro` stay there. None of them are in
