@@ -4408,9 +4408,16 @@ static RECOMP_TLS int t_apc_head, t_apc_count;
 static void bridge_queue_apc(uint32_t apc_routine, uint32_t apc_context, uint32_t iostatus)
 {
     if (t_apc_count >= BRIDGE_APC_RING) {
-        fprintf(stderr, "  [KERNEL] APC ring full; delivering 0x%08X inline\n", apc_routine);
-        deliver_one_apc(apc_routine, apc_context, iostatus);
-        return;
+        /* Never deliver inline: a completion run inside NtReadFile clears
+         * the server's in-flight flag before it tests it, so the bytes are
+         * never accounted and the stream starves. Drop the oldest queued
+         * APC instead and queue the new one normally; the server re-issues
+         * a read whose completion was dropped. */
+        uint32_t dr = t_apc_ring[t_apc_head].routine, dc = t_apc_ring[t_apc_head].context;
+        t_apc_head = (t_apc_head + 1) % BRIDGE_APC_RING;
+        t_apc_count--;
+        fprintf(stderr, "  [KERNEL] APC ring full; dropped oldest routine=0x%08X ctx=0x%08X for 0x%08X\n", dr, dc, apc_routine);
+        fflush(stderr);
     }
     int i = (t_apc_head + t_apc_count) % BRIDGE_APC_RING;
     if (getenv("JSRF_DBG")) fprintf(stderr, "  [APC] queued routine=0x%08X ctx=0x%08X (pending %d)\n", apc_routine, apc_context, t_apc_count + 1);
@@ -4613,8 +4620,20 @@ static void bridge_NtReadFile(void)
         off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
         poff = &off;
     }
-    g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
+    NTSTATUS st = xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
+    g_eax = (uint32_t)st;
+
+    /* A synchronously-failed read must still look pending to the guest:
+     * the bridge queues the error completion below, and CRI's file server
+     * only waits for (and accounts) a completion it was told is pending.
+     * Returning the error synchronously orphaned the completion: the server
+     * never waited, re-issued once per step, and the orphaned completions
+     * filled the 32-slot APC ring, after which every later completion was
+     * delivered inline and never accounted. The IOSB still carries the real
+     * error status, so the waited-for completion serves the error once. */
+    if (!NT_SUCCESS(st) && st != STATUS_PENDING)
+        g_eax = (uint32_t)STATUS_PENDING;
 
     /* What a read actually delivered. A decoder that rejects its input cannot
      * say whether the bytes were wrong or the read was, and the two look
