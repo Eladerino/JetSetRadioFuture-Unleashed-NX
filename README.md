@@ -18,8 +18,6 @@ select and gameplay all work on real hardware. At stock clocks
 measure, the 99th Street tower patrol, runs at 36 to 38 steps/s
 with the current build, up from 25.5 before the November
 optimisation work, and lighter areas hold the game's 60 fps cap.
-On an overclocked console (CPU 1963 / GPU 1152 / memory 2366 MHz)
-the garage, Shibuya Terminal and Dogenzaka Hill sit at or near 60.
 It has not been played from start to finish, so later areas should
 be expected to have bugs. The port's status and open issues are kept in the
 [Switch port notes](docs/switch-port.md), and how it is
